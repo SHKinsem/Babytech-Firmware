@@ -1,0 +1,25 @@
+--cpu Cortex-M3
+"zdt_stm32f103_can_cmd\startup_stm32f103xb.o"
+"zdt_stm32f103_can_cmd\main.o"
+"zdt_stm32f103_can_cmd\gpio.o"
+"zdt_stm32f103_can_cmd\can.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_it.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_msp.o"
+"zdt_stm32f103_can_cmd\x_v2.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_gpio_ex.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_can.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_rcc.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_rcc_ex.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_gpio.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_dma.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_cortex.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_pwr.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_flash.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_flash_ex.o"
+"zdt_stm32f103_can_cmd\stm32f1xx_hal_exti.o"
+"zdt_stm32f103_can_cmd\system_stm32f1xx.o"
+--strict --scatter "ZDT_STM32F103_CAN_CMD\ZDT_STM32F103_CAN_CMD.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list "ZDT_STM32F103_CAN_CMD.map" -o ZDT_STM32F103_CAN_CMD\ZDT_STM32F103_CAN_CMD.axf

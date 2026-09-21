@@ -1,0 +1,7 @@
+{
+  "name": "BoardProtocol",
+  "version": "0.1.0",
+  "description": "Babytech brain-motion UART frames; no Arduino dependency",
+  "frameworks": "*",
+  "platforms": "*"
+}

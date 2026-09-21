@@ -1,0 +1,13 @@
+import { createRequire } from 'node:module';
+import fs from 'node:fs/promises';
+const require = createRequire(import.meta.url);
+const { chromium } = require('C:/Users/xusen/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const browser = await chromium.launch({executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
+const page = await browser.newPage({viewport:{width:1513,height:1039},deviceScaleFactor:1});
+const errors=[];
+page.on('pageerror',e=>errors.push(e.message));
+await page.goto('http://127.0.0.1:4175/',{waitUntil:'networkidle'});
+await fs.mkdir('qa',{recursive:true});
+await page.screenshot({path:'qa/desktop.png',fullPage:true});
+console.log(JSON.stringify({title:await page.title(),body:(await page.locator('body').innerText()).slice(0,10000),errors}));
+await browser.close();

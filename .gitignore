@@ -1,0 +1,27 @@
+**/.pio/
+**/.vscode/
+__pycache__/
+*.pyc
+.DS_Store
+/out/
+
+# Local dependencies, generated previews and execution evidence
+**/node_modules/
+**/dist/
+**/.deepseek-runs/
+**/qa/
+*.log
+**/.npmrc
+**/.env
+**/.env.*
+!**/.env.example
+
+# IDE/compiler output in vendor reference projects
+**/Objects/
+**/Listings/
+*.uvguix.*
+*.uvoptx
+*.axf
+*.o
+*.obj
+*.hex

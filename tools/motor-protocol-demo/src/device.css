@@ -1,0 +1,46 @@
+body.device-body {min-width:0;}
+.device-app .toolbar__right { gap:16px; }
+.device-app .toolbar__field { gap:8px; }
+.device-app .workspace--manual .manual {grid-column:2;grid-row:1;}
+.device-app .workspace--manual .panel--feedback {grid-column:1;grid-row:1;}
+.device-app .device-network-note {margin-left:auto;padding:0 24px;color:#7b8494;font-size:12px;}
+.device-app .panel--feedback {gap:8px;}
+.device-app .panel--feedback > * {flex-shrink:0;}
+.device-app .panel--feedback p {line-height:1.65;overflow-wrap:anywhere;margin:4px 0;font-size:13px;}
+.device-app .panel--feedback .divider {margin:10px 0;}
+.device-app .trace__head .chip {display:inline-flex;}
+.device-error {color:#bc3434;}
+.device-notice {font-size:13px;color:#3b4ce0;}
+.wifi-page {display:grid;grid-template-columns:1fr 1fr;gap:28px;padding:28px;overflow:auto;min-height:0;background:#f8f9fc;}
+.wifi-card {padding:24px;background:white;border:1px solid #e1e5ed;border-radius:8px;align-self:start;min-width:0;}
+.wifi-card h2 {font-size:18px;margin:0 0 16px;}
+.wifi-card p {font-size:13px;line-height:1.7;color:#687385;}
+.wifi-card label {display:block;margin:18px 0 8px;font-size:13px;}
+.wifi-card>.input {width:100%;}
+.wifi-card>.button {margin-top:22px;}
+.wifi-scan {display:flex;gap:12px;align-items:center;font-size:12px;color:#687385;}
+.wifi-networks {max-height:160px;overflow:auto;margin-top:14px;}
+.wifi-networks button {display:flex;justify-content:space-between;gap:16px;padding:10px;width:100%;background:white;border:0;border-bottom:1px solid #edf0f6;text-align:left;cursor:pointer;}
+.wifi-networks button:hover {background:#f0f2ff;}
+.wifi-card dd {font-size:15px;overflow-wrap:anywhere;}
+@media(max-width:850px) {
+ .device-app{height:auto;min-height:100vh;display:flex;flex-direction:column;overflow:visible;}
+ .device-app .toolbar{flex-wrap:wrap;gap:12px;height:auto;padding:16px;position:sticky;top:0;background:white;z-index:20;}
+ .device-app .toolbar__right{flex-wrap:wrap;gap:10px;}
+ .device-app .toolbar__brand{gap:8px;}.device-app .toolbar__logo{font-size:22px;}.device-app .toolbar__title{font-size:16px;}
+ .device-app .device-network-note{display:none;}.device-app .tabs{flex-shrink:0;}
+ .device-app .workspace{display:flex;flex-direction:column;overflow:visible;}
+ .device-app .workspace>*{overflow:visible;flex-shrink:0;}
+ .device-app .workspace--manual .manual{display:block;}.device-app .manual__preview{margin-top:20px;}
+ .device-app .trace{height:290px;flex-shrink:0;}.device-app .trace__head{height:auto;flex-wrap:wrap;padding:12px;}
+ .device-app .trace__head .chip{display:none;}.device-app .trace__table{overflow-x:auto;}.device-app .trace__row{min-width:800px;}
+ .device-app .trace__foot{font-size:11px;padding:8px 12px;}.device-app .trace__count{display:none;}
+ .wifi-page{grid-template-columns:1fr;padding:16px;}.wifi-card{padding:18px;}.wifi-card .metrics__row dd{font-size:15px;}
+ .device-app .library{max-height:280px;overflow:auto;}
+ .device-app .field,.device-app .preview__row{grid-template-columns:1fr;gap:8px;}
+ .device-app .field__input{flex-wrap:wrap;}.device-app .field__range{white-space:normal;}
+ .device-app .frame__box{flex-wrap:wrap;gap:8px;}.device-app .frame__code{white-space:normal;overflow-wrap:anywhere;}
+ .device-app .code-box{white-space:normal;overflow-wrap:anywhere;}.device-app .segmented__item{min-width:0;}
+ .device-app .panel--command .actions{position:static;margin:0;}
+ .device-app .prediction{gap:12px;}.device-app .toast{left:16px;right:16px;bottom:16px;max-width:calc(100vw - 32px);}
+}

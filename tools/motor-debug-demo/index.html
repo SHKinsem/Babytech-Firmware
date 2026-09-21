@@ -1,0 +1,126 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Babytech · 电机调试</title><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="ux.css"><link rel="stylesheet" href="compact.css"><link rel="stylesheet" href="refinement.css"></head><body data-selected="A" data-mode="single"><div class="app-shell">
+<header class="topbar"><div class="brand-lockup"><strong>babytech</strong><span class="top-divider">/</span><h1>电机调试</h1></div><div class="topbar-status"><span class="simulation-badge">模拟模式</span><span class="status-copy">未连接硬件</span><span id="bus-state" hidden>模拟总线</span></div><button id="global-stop" class="button button-danger" disabled>全部停止</button></header>
+<nav class="motor-strip"><label class="address-picker" for="motor-address">目标 CAN ID <input id="motor-address" type="number" min="1" max="255" step="1" value="1" aria-describedby="address-note"></label><span id="address-note" class="address-note">选择控制对象，不修改驱动器地址</span><button id="reset-simulation" class="button button-ghost">重置模拟</button></nav>
+<main class="bench"><aside class="controls"><div class="mode-switch" role="tablist"><button id="mode-single" class="mode-tab is-active" role="tab" aria-selected="true">单轴试动</button><button id="mode-sync" class="mode-tab" role="tab" aria-selected="false">两轴联动</button></div><span id="selected-motor-label" hidden>ID 1</span><section id="single-panel" class="control-panel" aria-labelledby="single-heading">
+          <div class="control-panel-heading">
+            <div>
+              <span class="mini-label">RELATIVE MOVE / 相对运动</span>
+              <h3 id="single-heading">ID <span id="single-motor-name">1</span></h3>
+            </div>
+            <span id="single-state-chip" class="state-chip">待机</span>
+          </div>
+
+          <div class="parameter-grid"><label class="field field-wide">
+              <span class="field-label">相对行程 <em>°</em></span>
+              <span class="input-shell"><input id="single-angle" type="number" min="-3600" max="3600" step="1" value="360" inputmode="decimal"><span class="unit">deg</span></span>
+              <small>以当前位置为起点，支持正负方向</small>
+            </label><div class="quick-angles"><span>步长</span><button type="button" data-angle="10">10°</button><button type="button" data-angle="90">90°</button><button type="button" data-angle="360">360°</button><button id="reverse-direction" type="button">⇄ 反向</button></div><label class="field">
+              <span class="field-label">最大速度 <em>RPM</em></span>
+              <span class="input-shell"><input id="single-speed" type="number" min="0.1" max="120" step="0.1" value="30" inputmode="decimal"><span class="unit">rpm</span></span>
+              <small>范围 0.1–120 RPM</small>
+            </label></div><div class="advanced"><div class="advanced-fields"><label class="field">
+              <span class="field-label">加速度 <em>RPM/s</em></span>
+              <span class="input-shell"><input id="single-accel" type="number" min="0.1" max="240" step="0.1" value="60" inputmode="decimal"><span class="unit">rpm/s</span></span>
+              <small>范围 0.1–240 RPM/s</small>
+            </label><label class="field">
+              <span class="field-label">减速度 <em>RPM/s</em></span>
+              <span class="input-shell"><input id="single-decel" type="number" min="0.1" max="240" step="0.1" value="60" inputmode="decimal"><span class="unit">rpm/s</span></span>
+              <small>范围 0.1–240 RPM/s</small>
+            </label><label class="field">
+              <span class="field-label">限流 <em>mA</em></span>
+              <span class="input-shell"><input id="single-current" type="number" min="100" max="5000" step="50" value="1200" inputmode="numeric"><span class="unit">mA</span></span>
+              <small>模拟负载反馈上限</small>
+            </label></div></div>
+
+          <div id="single-validation" class="validation-message" role="status" aria-live="polite"></div>
+          <div class="plan-preview">
+            <div><span>预计时长</span><strong id="single-duration">—</strong></div>
+            <div><span>目标位置</span><strong id="single-target">—</strong></div>
+            <div><span>轨迹类型</span><strong id="single-profile">—</strong></div>
+          </div>
+          <div class="action-row">
+            <button id="single-start" class="button button-primary" type="button"><span class="play-icon" aria-hidden="true"></span> 试动 ID <span id="single-start-name">1</span></button>
+            <button id="single-stop" class="button button-secondary" type="button" disabled><span class="stop-icon small" aria-hidden="true"></span> 停止</button>
+          </div>
+        </section><section id="sync-panel" class="control-panel is-hidden" aria-labelledby="sync-heading">
+          <div class="control-panel-heading">
+            <div>
+              <span class="mini-label">COORDINATED MOVE / 协同运动</span>
+              <h3 id="sync-heading">两轴联动</h3>
+            </div>
+            <span class="state-chip teal-chip">SYMMETRIC PROFILE</span>
+          </div>
+          <p class="panel-intro">两台电机在同一条时间轴上开始和结束。加速、匀速、减速分别占总时长的 1/4、1/2、1/4；峰值速度和加速度由目标距离自动计算。</p>
+
+          <div class="sync-params-head"><span>CAN ID</span><span>相对行程 °</span><span>限流 mA</span><span>目标</span></div>
+          <div class="sync-row">
+            <div class="sync-node"><input id="sync-id-a" type="number" min="1" max="255" step="1" value="1" aria-label="联动目标 ID 1"></div>
+            <label class="compact-field"><span class="sr-only">ID 1 相对行程</span><input id="sync-angle-a" type="number" min="-3600" max="3600" step="1" value="360" inputmode="decimal"></label>
+            <label class="compact-field"><span class="sr-only">ID 1 限流</span><input id="sync-current-a" type="number" min="100" max="5000" step="50" value="1200" inputmode="numeric"></label>
+            <span id="sync-target-a" class="target-readout">360.0°</span>
+          </div>
+          <div class="sync-row">
+            <div class="sync-node"><input id="sync-id-b" type="number" min="1" max="255" step="1" value="2" aria-label="联动目标 ID 2"></div>
+            <label class="compact-field"><span class="sr-only">ID 2 相对行程</span><input id="sync-angle-b" type="number" min="-3600" max="3600" step="1" value="180" inputmode="decimal"></label>
+            <label class="compact-field"><span class="sr-only">ID 2 限流</span><input id="sync-current-b" type="number" min="100" max="5000" step="50" value="1200" inputmode="numeric"></label>
+            <span id="sync-target-b" class="target-readout">180.0°</span>
+          </div>
+
+          <div class="sync-time-row">
+            <label class="field time-field">
+              <span class="field-label">共同运动时间 <em>s</em></span>
+              <span class="input-shell"><input id="sync-duration" type="number" min="0.5" max="60" step="0.1" value="4" inputmode="decimal"><span class="unit">sec</span></span>
+              <small>范围 0.5–60 秒；时间越短，所需峰值越高</small>
+            </label>
+            <div class="sync-guard"><span class="guard-icon">✓</span><span>同步触发窗口<br><strong>同一 CAN 广播时刻</strong></span></div>
+          </div>
+
+          <div id="sync-validation" class="validation-message" role="status" aria-live="polite"></div>
+          <div class="sync-plan-grid">
+            <div class="sync-plan-card"><span class="plan-card-label">ID 1 · 峰值速度</span><strong id="sync-speed-a">—</strong><small>RPM</small></div>
+            <div class="sync-plan-card"><span class="plan-card-label">ID 1 · 加速度</span><strong id="sync-accel-a">—</strong><small>RPM/s</small></div>
+            <div class="sync-plan-card"><span class="plan-card-label">ID 2 · 峰值速度</span><strong id="sync-speed-b">—</strong><small>RPM</small></div>
+            <div class="sync-plan-card"><span class="plan-card-label">ID 2 · 加速度</span><strong id="sync-accel-b">—</strong><small>RPM/s</small></div>
+          </div>
+          <div class="action-row">
+            <button id="sync-start" class="button button-primary" type="button"><span class="sync-play-icon" aria-hidden="true"></span> 预装指令并同步启动</button>
+            <span class="action-hint">模拟顺序：A/B 参数帧 → SYNC 广播 → 轨迹执行</span>
+          </div>
+        </section></aside><section class="observation" aria-label="运动反馈"><div class="observation-heading"><h2>运动反馈</h2><span>模拟实时数据</span></div><div class="telemetry-list">
+            <article class="telemetry-card" data-telemetry="A">
+              <div class="telemetry-card-head"><span class="telemetry-id">1</span><div><strong>ID 1</strong><small data-telemetry-state="A">IDLE · 待机</small></div><span class="telemetry-status-dot" data-status-dot="A"></span></div>
+              <div class="telemetry-values">
+                <div><span>位置</span><strong data-telemetry-position="A">0.0°</strong></div>
+                <div><span>速度</span><strong data-telemetry-speed="A">0.0 <small>RPM</small></strong></div>
+                <div><span>电流</span><strong data-telemetry-current="A">0 <small>mA</small></strong></div>
+              </div>
+            </article>
+            <article class="telemetry-card" data-telemetry="B">
+              <div class="telemetry-card-head"><span class="telemetry-id telemetry-id-b">2</span><div><strong>ID 2</strong><small data-telemetry-state="B">IDLE · 待机</small></div><span class="telemetry-status-dot" data-status-dot="B"></span></div>
+              <div class="telemetry-values">
+                <div><span>位置</span><strong data-telemetry-position="B">0.0°</strong></div>
+                <div><span>速度</span><strong data-telemetry-speed="B">0.0 <small>RPM</small></strong></div>
+                <div><span>电流</span><strong data-telemetry-current="B">0 <small>mA</small></strong></div>
+              </div>
+            </article>
+          </div><section class="trajectory-panel panel" aria-labelledby="trajectory-heading">
+          <div class="panel-heading compact-heading">
+            <div>
+              <p class="section-kicker">TRAJECTORY / 轨迹</p>
+              <h2 id="trajectory-heading">位置曲线</h2>
+            </div>
+            <div class="legend"><span><i class="legend-line line-a"></i><span id="legend-id-a">ID 1</span></span><span><i class="legend-line line-b"></i><span id="legend-id-b">ID 2</span></span></div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="trajectory-chart" aria-label="ID 1 与 ID 2 的位置时间曲线"></canvas>
+            <div id="chart-empty" class="chart-empty"><span class="chart-empty-icon">⌁</span><span>启动一次动作后显示实际模拟轨迹</span></div>
+          </div>
+          <div class="chart-foot"><span>横轴：动作时间 / s</span><span>纵轴：相对位置 / °</span><span id="chart-range">范围自动适配</span></div>
+        </section><div class="telemetry-summary"><span>本次动作</span><strong id="overall-state">待机 · 等待指令</strong></div><div class="progress-track"><span id="overall-progress"></span></div><p class="observation-note">修改参数 → 试动 → 观察曲线。每次以当前位置为起点，可反向试动。</p></section></main><details class="panel log-panel"><summary>通信日志 <span>模拟指令 · 展开查看</span></summary>
+      <div class="log-heading">
+        <div class="log-title"><span class="section-kicker">EVENT STREAM / 事件流</span><h2 id="log-heading">模拟 CAN 日志</h2><span class="semantic-badge">SEMANTIC SIMULATION</span></div>
+        <button id="clear-log" class="button button-ghost" type="button">清空日志</button>
+      </div>
+      <div class="log-disclaimer"><span class="warning-symbol">!</span> 以下是语义模拟 CAN 日志，用来展示指令流程；当前没有真实 CAN 抓包，也不会发送到硬件。</div>
+      <div id="event-log" class="event-log" role="log" aria-live="polite" aria-label="模拟 CAN 事件日志"></div>
+    </details><footer class="footer"><span>电脑交互原型 · 不发送真实 CAN 指令</span><span id="footer-clock"></span></footer></div><script src="app.js"></script><script src="ux.js"></script></body></html>

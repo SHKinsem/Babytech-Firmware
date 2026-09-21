@@ -1,0 +1,3 @@
+for(const mode of ['single','sync'])document.getElementById('mode-'+mode).addEventListener('click',()=>{document.body.dataset.mode=mode;});
+document.querySelectorAll('[data-angle]').forEach(el=>el.addEventListener('click',()=>{const input=document.getElementById('single-angle');input.value=(Number(input.value)<0?-1:1)*Number(el.dataset.angle);input.dispatchEvent(new Event('input',{bubbles:true}));}));
+document.getElementById('reverse-direction').addEventListener('click',()=>{const input=document.getElementById('single-angle');input.value=-Number(input.value);input.dispatchEvent(new Event('input',{bubbles:true}));});
