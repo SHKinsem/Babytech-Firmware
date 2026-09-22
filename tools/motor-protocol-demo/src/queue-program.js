@@ -56,6 +56,27 @@ const CAN_ID_RE = /^(?:0x)?([0-9a-fA-F]{1,8})$/;
  */
 export const QUEUE_VERBS = [
   {
+    verb: 'sync', label: '同步组边界', usage: 'sync begin | sync end', shortForm: 'sync begin',
+    defaults: '组内 2–8 个不同地址的相对 move',
+    note: '共同轨迹、一次触发、全部到位后继续；异常请求成员停止并保留使能。必须先配置反馈预算与同步容差、完成缓存隔离台架确认。',
+    args: [{ key: 'boundary', label: '边界 begin 或 end', kind: 'raw', default: 'begin' }],
+  },
+  {
+    verb: 'helix', label: '螺旋动作',
+    usage: 'helix ROTARY_ID LINEAR_ID TURNS LEAD RATIO ROTARY_DIR LINEAR_DIR RPM ACCEL DECEL CURRENT TOL_MM',
+    shortForm: '所有参数必填', defaults: '无默认机械参数；直线轴 mm/rev 使用板端已保存值',
+    note: '轴向行程＝导程×瓶盖圈数；板端统一换算为双轴同步组。方向填写 1 或 -1。不会识别螺纹脱离，抬升另写一行。',
+    args: [
+      {key:'id',label:'旋转电机地址',kind:'address'}, {key:'linearId',label:'直线电机地址',kind:'address'},
+      {key:'turns',label:'瓶盖圈数',kind:'number'}, {key:'lead',label:'导程',unit:'mm/瓶盖圈',kind:'number'},
+      {key:'ratio',label:'传动比',unit:'电机圈/瓶盖圈',kind:'number'},
+      {key:'rotaryDir',label:'旋转方向',unit:'1 或 -1',kind:'number'}, {key:'linearDir',label:'直线方向',unit:'1 或 -1',kind:'number'},
+      {key:'rpm',label:'各轴转速上限',unit:'RPM',kind:'number'},
+      {key:'accel',label:'各轴加速度上限',unit:'RPM/s',kind:'number'}, {key:'decel',label:'各轴减速度上限',unit:'RPM/s',kind:'number'},
+      {key:'current',label:'各轴电流上限',unit:'mA',kind:'number'}, {key:'tolerance',label:'轴向允许偏差',unit:'mm',kind:'number'},
+    ],
+  },
+  {
     verb: 'enable',
     label: '使能',
     usage: 'enable ID',
@@ -389,6 +410,26 @@ function parseVelocity(tokens, fail) {
 /** Parse one already-tokenised action line. Returns null when `fail` was called. */
 function parseTokens(verb, tokens, fail) {
   switch (verb) {
+    case 'sync':
+      if(tokens.length!==1 || !['begin','end'].includes(tokens[0].toLowerCase())) {
+        fail('同步边界只能是 sync begin 或 sync end');return null;
+      }
+      return {boundary:tokens[0].toLowerCase()};
+    case 'helix': {
+      if(tokens.length!==12) {fail('helix 的 12 个参数必须全部明确填写');return null;}
+      const id=readAddress(tokens[0],fail),linearId=readAddress(tokens[1],fail);
+      if(id==null || linearId==null) return null;
+      if(id===linearId) {fail('螺旋动作需要两个不同电机地址');return null;}
+      if(tokens.slice(2).some(t=>!NUMBER_RE.test(t))) {fail('helix 只接受有限十进制数值');return null;}
+      const [turns,lead,ratio,rotaryDir,linearDir,rpm,accel,decel,current,tolerance]=tokens.slice(2).map(Number);
+      if(![turns,lead,ratio,rotaryDir,linearDir,rpm,accel,decel,current,tolerance].every(Number.isFinite) ||
+         turns===0 || lead<=0 || ratio<=0 || ![-1,1].includes(rotaryDir) || ![-1,1].includes(linearDir) ||
+         rpm<0.1 || rpm>3000 || ![accel,decel].every(v=>Number.isInteger(v)&&v>=1&&v<=65535) ||
+         !Number.isInteger(current) || current<0 || current>5000 || tolerance<=0) {
+        fail('helix 几何、方向、运动上限或容差不合法');return null;
+      }
+      return {id,linearId,turns,lead,ratio,rotaryDir,linearDir,rpm,accel,decel,current,tolerance};
+    }
     case 'enable':
     case 'disable':
     case 'stop': {
@@ -520,6 +561,12 @@ export function actionAngleDegrees(action, distances) {
 export function previewAction(action, { distances = null } = {}) {
   const warnings = [];
   switch (action.verb) {
+    case 'sync': return {summary:action.boundary==='begin'?'同步组开始：先检查，再缓存与单次触发':'同步组结束：全部成员到位后继续',warnings};
+    case 'helix': return {
+      summary:`螺旋：旋转轴 ${action.id} / 直线轴 ${action.linearId} · ${action.turns} 瓶盖圈 · 轴向 ${num(action.turns*action.lead)} mm`,
+      detail:`方向 ${action.rotaryDir}/${action.linearDir}；传动比 ${action.ratio}；轴向容差 ${action.tolerance} mm；板端换算与预算校验。未自动判断脱扣。`,
+      warnings:distanceLookup(distances,action.linearId).state==='known'?[]:['直线轴 mm/rev 尚未确认，不能预判换算结果。'],
+    };
     case 'enable':
       return { summary: `电机 ${action.id}：发送使能 F3（不等应答）`, warnings };
     case 'disable':
@@ -616,9 +663,29 @@ export function validateProgram(text, { distances = null } = {}) {
   if (bytes > QUEUE_LIMITS.maxTextBytes) {
     errors.push({ line: 0, message: `程序文本 ${bytes} 字节，超过板端上限 ${QUEUE_LIMITS.maxTextBytes} 字节` });
   }
-  if (parsed.actions.length > QUEUE_LIMITS.maxActions) {
-    errors.push({ line: 0, message: `程序有 ${parsed.actions.length} 个动作，超过板端上限 ${QUEUE_LIMITS.maxActions} 个` });
+  const expandedCount=parsed.actions.reduce((n,a)=>n+(a.verb==='helix'?4:1),0);
+  if (expandedCount > QUEUE_LIMITS.maxActions) {
+    errors.push({ line: 0, message: `程序展开后有 ${expandedCount} 个动作，超过板端上限 ${QUEUE_LIMITS.maxActions} 个` });
   }
+  let group=null;
+  for(const a of parsed.actions) {
+    const fail=message=>errors.push({line:a.line,message});
+    if(a.verb==='sync') {
+      if(a.boundary==='begin') {
+        if(group) fail('同步组禁止嵌套');else group={line:a.line,ids:new Set(),count:0};
+      } else if(!group) fail('sync end 缺少对应的 begin');
+      else {if(group.count<2 || group.count>8) fail('同步组需要 2–8 个成员');group=null;}
+    } else if(group) {
+      if(a.verb!=='move' || a.awaitCompletion) fail('同步组内只允许相对 move，不写 await');
+      else {
+        if(group.ids.has(a.id)) fail('同步组电机地址不能重复');
+        group.ids.add(a.id);group.count++;
+        if(a.accel===0 || a.decel===0) fail('同步组加减速度必须大于零');
+      }
+    }
+    if(a.verb==='helix' && distanceLookup(distances,a.linearId).state==='none') fail(`直线电机 ${a.linearId} 未配置 mm/rev`);
+  }
+  if(group) errors.push({line:group.line,message:'sync begin 缺少对应的 end'});
   if (parsed.actions.length === 0 && errors.length === 0) {
     errors.push({ line: 0, message: '程序里没有任何动作：板端会以“程序为空”拒绝。' });
   }
@@ -656,7 +723,7 @@ export function validateProgram(text, { distances = null } = {}) {
     errors,
     warnings,
     preview,
-    stats: { bytes, actions: parsed.actions.length, lines: parsed.lineCount, byVerb, usedIds: [...new Set(parsed.actions.map((action) => action.id).filter((id) => Number.isInteger(id)))].sort((a, b) => a - b) },
+    stats: { bytes, actions: expandedCount, lines: parsed.lineCount, byVerb, usedIds: [...new Set(parsed.actions.flatMap(a=>[a.id,a.linearId]).filter(Number.isInteger))].sort((a,b)=>a-b) },
   };
 }
 

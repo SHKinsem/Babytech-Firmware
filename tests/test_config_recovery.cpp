@@ -39,17 +39,19 @@ int main() {
         assert(r.motor.configPending());
         injectRx(makeAck(1,0x4C,2));r.tick(40);
         assert(std::strcmp(r.motor.configMessage(),"config_wait_readback")==0);
-        injectRx(part(0));injectRx(part(1));injectRx(part(2));r.tick(60);
+        r.tick(120); // one budgeted query after the command's traffic gap
+        injectRx(part(0));injectRx(part(1));injectRx(part(2));r.tick(140);
         assert(std::strcmp(r.motor.configMessage(),"config_verified")==0);
-        r.feed(80,false);
+        r.feed(160,false);
         assert(std::strcmp(r.motor.configMessage(),"config_verified")==0);
     }
     {
         Rig r; setMillis(10);
         assert(r.motor.rawLogical(config,sizeof(config)));
         injectRx(makeAck(1,0x4C,2)); r.tick(40);
+        r.tick(120);
         // Responses may be drained again within the same millisecond.
-        injectRx(part(0)); injectRx(part(1)); injectRx(part(2)); r.tick(40);
+        injectRx(part(0)); injectRx(part(1)); injectRx(part(2)); r.tick(120);
         assert(std::strcmp(r.motor.configMessage(),"config_verified")==0);
     }
     for(int failure=0;failure<4;++failure) {
@@ -58,8 +60,9 @@ int main() {
         if(failure==1)r.tick(3021);
         if(failure>=2) {
             injectRx(makeAck(1,0x4C,2));r.tick(40);
-            if(failure==2)r.tick(3041);
-            else {injectRx(part(0,true));injectRx(part(1));injectRx(part(2));r.tick(60);}
+            r.tick(120);
+            if(failure==2)r.tick(3121);
+            else {injectRx(part(0,true));injectRx(part(1));injectRx(part(2));r.tick(140);}
         }
         assert(countTx(TxKind::Enable)==0);
         assert(r.motor.configFailed());

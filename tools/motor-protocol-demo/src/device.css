@@ -62,7 +62,7 @@ body.device-body {min-width:0;}
 .wifi-card dd {font-size:15px;overflow-wrap:anywhere;}
 
 /* --------------------------------------------------------- 编排队列 tab */
-.queue-page {display:grid;grid-template-columns:clamp(330px,29vw,430px) minmax(0,1fr) clamp(310px,26vw,392px);min-height:0;border-bottom:1px solid var(--line);}
+.queue-page {display:grid;grid-template-columns:clamp(330px,29vw,430px) minmax(0,1fr) clamp(310px,26vw,392px);grid-template-rows:auto minmax(0,1fr);min-height:0;border-bottom:1px solid var(--line);}
 .queue-page>* {min-width:0;min-height:0;}
 .queue-col {display:flex;flex-direction:column;gap:10px;padding:18px 22px 22px;overflow:auto;}
 .queue-col--preview {border-left:1px solid var(--line);border-right:1px solid var(--line);}
@@ -84,6 +84,8 @@ body.device-body {min-width:0;}
 .queue-submit__repeat {display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);}
 .queue-submit__repeat .input {width:72px;height:36px;}
 .queue-submit .button {height:38px;min-width:124px;}
+.queue-col--source > .queue-col__head {order:-2;}
+.queue-col--source > .queue-submit {order:-1;}
 .queue-gate {display:flex;align-items:flex-start;gap:7px;margin:0;color:#687385;font-size:12px;line-height:1.6;flex:none;}
 .queue-notice {margin:0;padding:9px 12px;border-radius:var(--radius);font-size:12px;line-height:1.7;flex:none;}
 .queue-notice--ok {background:#f1f7f2;border:1px solid #cfe6d5;color:var(--green-deep);}
@@ -273,3 +275,16 @@ body.device-body {min-width:0;}
 
 .device-app .toolbar {flex-wrap:wrap;height:auto;min-height:72px;row-gap:8px;padding-top:10px;padding-bottom:10px;}
 .device-app .toolbar__right {flex-wrap:wrap;gap:10px;}
+/* The execution evidence spans all columns and remains above scrolling panels. */
+.queue-diagnostics { grid-column: 1 / -1; min-width: 0; background: #fff; padding: 8px 14px; border-bottom: 1px solid #e3e7ee; }
+.queue-diagnostics .queue-notice { margin: 0 0 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.queue-diagnostics details { max-height: 240px; overflow: auto; font-size: 12px; }
+.queue-diagnostics__table { overflow: auto; }
+.queue-diagnostics table { border-collapse: collapse; width: 100%; text-align: left; }
+.queue-diagnostics td, .queue-diagnostics th { padding: 6px 10px; border-bottom: 1px solid #e3e7ee; }
+@media (min-width:851px) and (max-width:1500px) {
+  .device-app { grid-template-rows:112px 48px minmax(0,1fr) auto; }
+  .device-app:has(> .config-result) { grid-template-rows:112px 48px auto minmax(0,1fr) auto; }
+  .device-app .toolbar { flex-wrap:wrap; align-content:center; gap:8px; padding-top:8px; padding-bottom:8px; }
+  .device-app .toolbar__right { margin-left:0; width:100%; justify-content:flex-end; gap:10px; }
+}

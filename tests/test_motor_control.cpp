@@ -221,7 +221,7 @@ static void test_watch_select_1_to_255_not_exhausted() {
 
     uint32_t t = 0;
     for (int id = 1; id <= 255; ++id) {
-        t += 40;
+        t += 3000; // previous page lease and in-flight timeout have expired
         setMillis(t);
         rig.mc.watch(static_cast<uint8_t>(id));
         rig.mc.poll();
@@ -231,7 +231,7 @@ static void test_watch_select_1_to_255_not_exhausted() {
     }
 
     // Cycling back round must keep working: selecting never exhausts a slot.
-    t += 40;
+    t += 3000;
     setMillis(t);
     rig.mc.watch(1);
     rig.mc.poll();
@@ -239,18 +239,18 @@ static void test_watch_select_1_to_255_not_exhausted() {
     CHECK(lastTx().addr == 1);
 }
 
-static void test_query_first_after_30ms_and_repeats_past_600ms() {
+static void test_query_global_budget_and_repeats_past_600ms() {
     Rig rig;
     rig.mc.begin(4, 5, 500000);
     rig.mc.watch(1);
 
     setMillis(0);
     rig.mc.poll();
-    CHECK(countTx(TxKind::ReadSysParam) == 0);  // first query needs >= 30 ms
+    CHECK(countTx(TxKind::ReadSysParam) == 1);  // first demand has no old traffic
 
     setMillis(29);
     rig.mc.poll();
-    CHECK(countTx(TxKind::ReadSysParam) == 0);
+    CHECK(countTx(TxKind::ReadSysParam) == 1); // budget does not refill per poll
 
     setMillis(40);
     rig.mc.poll();
@@ -266,7 +266,7 @@ static void test_query_first_after_30ms_and_repeats_past_600ms() {
     CHECK(countTx(TxKind::ReadSysParam) > afterFirst + 1);
 }
 
-static void test_query_rotation_exactly_four_fields_selected_and_active() {
+static void test_query_budget_selected_and_active_without_current() {
     Rig rig;
     rig.mc.begin(4, 5, 500000);
 
@@ -285,12 +285,17 @@ static void test_query_rotation_exactly_four_fields_selected_and_active() {
 
     std::set<std::pair<int, int> > seen;
     uint32_t t = 80;
-    for (int i = 0; i < 8; ++i) {
-        t += 40;
+    for (int i = 0; i < 20; ++i) {
+        t += 100;
         setMillis(t);
         // Keep the active job's feedback fresh but moving, so it never completes.
         injectRx(makePosition(2, 50));
         injectRx(makeVelocity(2, 100));
+        injectRx(makeFlags(2, 1));
+        injectRx(makePosition(1, 0));
+        injectRx(makeVelocity(1, 0));
+        injectRx(makeFlags(1, 1));
+        rig.mc.watch(1);
         rig.mc.poll();
 
         const TxRecord last = lastTx();
@@ -299,17 +304,18 @@ static void test_query_rotation_exactly_four_fields_selected_and_active() {
                                    static_cast<int>(last.param)));
     }
 
-    // Exactly the three feedback fields (Cpos, Vel, Cpha) for both the selected
-    // node and the active job, no more and no fewer combinations.
-    CHECK(seen.size() == 8);
+    // Position, velocity and flags share a budget. Current is opt-in, not a
+    // periodic tax on every motor. Aging prevents low-priority starvation.
+    CHECK(seen.size() == 6);
     for (int addr = 1; addr <= 2; ++addr) {
         int fields = 0;
         if (seen.count(std::make_pair(addr, static_cast<int>(X42sSysParam::Cpos)))) ++fields;
         if (seen.count(std::make_pair(addr, static_cast<int>(X42sSysParam::Vel)))) ++fields;
         if (seen.count(std::make_pair(addr, static_cast<int>(X42sSysParam::Cpha)))) ++fields;
         if (seen.count(std::make_pair(addr, static_cast<int>(X42sSysParam::Flag)))) ++fields;
-        CHECK(fields == 4);
+        CHECK(fields == 3);
     }
+    CHECK(countTx(TxKind::ReadSysParam) <= 20);
 }
 
 static void test_enable_confirmed_only_after_f3_02() {
@@ -1515,7 +1521,7 @@ static void test_direct_position_mode0_needs_fresh_target() {
     CHECK(missing.code == kCodeUnavailable);
     CHECK(std::string(missing.message) == "target_not_fresh");
     CHECK(countTx(TxKind::Direct) == 0);
-    CHECK(countTxOpcode(0x33, 2) > 0);
+    CHECK(countTxOpcode(0x33, 2) == 0); // refresh is queued under the global budget
     CHECK(countTxOpcode(0x34, 2) == 0);  // p71's setpoint is never asked for
 
     // A fresh actual position is not a substitute, and a second attempt without
@@ -2306,8 +2312,8 @@ int main() {
         {"raw diagnostics preserve unexpected replies and actual flags", test_diagnostics_capture_unrecognized_reply_and_flags},
         {"begin sends no motion", test_begin_sends_no_motion},
         {"watch/select 1..255 not exhausted", test_watch_select_1_to_255_not_exhausted},
-        {"query first >=30ms and repeats past 600ms", test_query_first_after_30ms_and_repeats_past_600ms},
-        {"query rotation: 4 fields, selected + active", test_query_rotation_exactly_four_fields_selected_and_active},
+        {"global query budget and repeated demands past 600ms", test_query_global_budget_and_repeats_past_600ms},
+        {"shared query budget: selected + active, no periodic current", test_query_budget_selected_and_active_without_current},
         {"enable confirmed only after F3 02", test_enable_confirmed_only_after_f3_02},
         {"late F3 ack after stop does not enable", test_late_f3_ack_after_stop_does_not_enable},
         {"move requires fresh feedback + enable", test_move_requires_fresh_feedback_and_enable},

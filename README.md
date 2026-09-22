@@ -23,6 +23,8 @@
 
 详细操作和接口见 [下板网页调试](docs/motion-debug.md)。
 
+直发队列、执行诊断、全局查询预算及受缓存隔离门禁保护的同步/螺旋动作见 [电机编排队列](docs/motor-queue.md)。软件验证和待实测项目见 [同步开发与验收记录](docs/motion-sync-development.md)；尚未完成同步实机验收。
+
 新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
 
 ## 目录

@@ -77,7 +77,8 @@ String bootIdHex(uint64_t value) {
 const char* const kLoggedPostRoutes[] = {
     "/api/enable-all", "/api/command", "/api/move", "/api/enable", "/api/stop", "/api/stop-all",
     "/api/control/reset",
-    "/api/queue/start", "/api/queue/cancel", "/api/limits", "/api/motor-distance",
+    "/api/queue/start", "/api/queue/cancel", "/api/limits", "/api/motor-distance", "/api/query-budget",
+    "/api/sync-settings", "/api/sync-isolation",
     "/api/scale/tare", "/api/scale/calibrate", "/api/scale/config",
 };
 
@@ -974,7 +975,8 @@ void handleNotFound() {
                            uri == "/api/scale" || uri == "/api/scale/tare" ||
                            uri == "/api/scale/calibrate" || uri == "/api/scale/config" || uri == "/api/limits" ||
                            uri == "/api/queue" || uri == "/api/queue/start" || uri == "/api/queue/cancel" ||
-                           uri == "/api/motor-distance";
+                           uri == "/api/motor-distance" || uri == "/api/query-budget" ||
+                           uri == "/api/sync-settings" || uri == "/api/sync-isolation";
     if (knownPath) {
         server.sendHeader("Allow", "GET, POST");
         sendError(405, F("method not allowed"));
@@ -1087,6 +1089,96 @@ void handleQueueCancel() {
 }
 
 
+void loadQueryBudget() {
+    // Versioned, explicit-width record; never persist compiler struct padding.
+    uint16_t record[6]={};
+    Preferences prefs;
+    if (!prefs.begin("can-query",true)) return;
+    const bool ok=prefs.getBytesLength("v1")==sizeof(record) &&
+        prefs.getBytes("v1",record,sizeof(record))==sizeof(record);
+    prefs.end();
+    if (!ok || record[0]!=1 || record[5]>8) return;
+    motion::CanQueryScheduler::Config c;
+    c.queriesPerSecond=record[1];c.gapMs=record[2];c.timeoutMs=record[3];
+    c.cooldownMs=record[4];c.maxInflight=record[5];
+    motor.queries().configure(c);
+}
+
+void handleQueryBudget() {
+    if (queue.active() || endpoint.busy() || motor.operationBusy() || motor.queries().inflight()) {
+        sendError(409,F("query_budget_busy"));return;
+    }
+    const char* fields[]={"queriesPerSecond","gapMs","timeoutMs","cooldownMs","maxInflight"};
+    long values[5]={};
+    for (uint8_t i=0;i<5;++i) {
+        if(!argInteger(fields[i],values[i]) || values[i]<1 || values[i]>10000) {
+            sendError(400,F("query_budget_invalid"));return;
+        }
+    }
+    if(values[4]>8) {sendError(400,F("query_budget_invalid"));return;}
+    motion::CanQueryScheduler::Config c;
+    c.queriesPerSecond=values[0];c.gapMs=values[1];c.timeoutMs=values[2];
+    c.cooldownMs=values[3];c.maxInflight=values[4];
+    if(!c.valid()) {sendError(400,F("query_budget_invalid"));return;}
+    const uint16_t record[]={1,c.queriesPerSecond,c.gapMs,c.timeoutMs,c.cooldownMs,c.maxInflight};
+    Preferences prefs;
+    if(!prefs.begin("can-query",false)) {sendError(500,F("query_budget_save_failed"));return;}
+    const bool saved=prefs.putBytes("v1",record,sizeof(record))==sizeof(record);
+    prefs.end();
+    if(!saved) {sendError(500,F("query_budget_save_failed"));return;}
+    motor.queries().configure(c);
+    sendJson(200,motor.queryStatusJson());
+}
+
+// Persist numbers only. Isolation is a separate operator attestation for this
+// boot, never restored from NVS and never established by issuing blind stops.
+void loadSyncSettings() {
+    uint32_t r[8]={};Preferences prefs;
+    if(!prefs.begin("sync-settings",true)) return;
+    const bool ok=prefs.getBytesLength("v1")==sizeof(r) && prefs.getBytes("v1",r,sizeof(r))==sizeof(r);
+    prefs.end();if(!ok || r[0]!=1 || r[7]>1000) return;
+    motion::SyncSettings s;s.tolerance.progress=r[1]/1000000.0;s.tolerance.timeMs=r[2];
+    s.feedbackTimeoutMs=r[3];s.prepareTimeoutMs=r[4];s.stopTimeoutMs=r[5];
+    s.responseBudgetMs=r[6];s.completionTenths=r[7];queue.setSyncSettings(s);
+}
+
+void handleSyncSettings() {
+    if(queue.active() || endpoint.busy() || motor.operationBusy()) {sendError(409,F("sync_busy"));return;}
+    double progress=0;long v[6]={};
+    const char* fields[]={"timeToleranceMs","feedbackTimeoutMs","prepareTimeoutMs","stopTimeoutMs","responseBudgetMs","completionTenths"};
+    if(!argDecimal("progressTolerance",progress) || progress<=0 || progress>0.25) {
+        sendError(400,F("sync_settings_invalid"));return;
+    }
+    for(uint8_t i=0;i<6;++i) if(!argInteger(fields[i],v[i]) || v[i]<1 || v[i]>60000) {
+        sendError(400,F("sync_settings_invalid"));return;
+    }
+    motion::SyncSettings s;
+    const uint32_t ppm=uint32_t(floor(progress*1000000));
+    s.tolerance.progress=ppm/1000000.0;s.tolerance.timeMs=v[0];s.feedbackTimeoutMs=v[1];
+    s.prepareTimeoutMs=v[2];s.stopTimeoutMs=v[3];s.responseBudgetMs=v[4];s.completionTenths=v[5];
+    if(!s.valid()) {sendError(400,F("sync_settings_invalid"));return;}
+    const uint32_t r[]={1,ppm,s.tolerance.timeMs,s.feedbackTimeoutMs,s.prepareTimeoutMs,s.stopTimeoutMs,s.responseBudgetMs,s.completionTenths};
+    Preferences prefs;
+    if(!prefs.begin("sync-settings",false)) {sendError(500,F("sync_settings_save_failed"));return;}
+    const bool saved=prefs.putBytes("v1",r,sizeof(r))==sizeof(r);prefs.end();
+    if(!saved) {sendError(500,F("sync_settings_save_failed"));return;}
+    queue.setSyncSettings(s);sendJson(200,queue.syncSettingsJson());
+}
+
+void handleSyncIsolation() {
+    if(queue.active() || endpoint.busy() || motor.operationBusy()) {sendError(409,F("sync_busy"));return;}
+    // These assertions must come from a staged bench test of the actual drive
+    // firmware and all bus nodes. This endpoint itself verifies no hardware.
+    const bool revoke=server.arg("revoke")=="1";
+    if(!revoke && (server.arg("cacheSemanticsVerified")!="1" ||
+       server.arg("allNodesIsolated")!="1" || server.arg("pendingRepliesDrained")!="1")) {
+        sendError(400,F("sync_isolation_attestation_required"));return;
+    }
+    motor.confirmSyncIsolation(!revoke);
+    debugLog.addf(millis(),"warn","sync_isolation","operator_attestation=%s; not a hardware verification",revoke?"revoked":"asserted");
+    sendJson(200,queue.syncSettingsJson());
+}
+
 }  // namespace
 
 void setup() {
@@ -1123,6 +1215,8 @@ void setup() {
     }
 
     loadDebugLimits();
+    loadQueryBudget();
+    loadSyncSettings();
     loadRotationDistances();
     wifiSetup.begin();
 
@@ -1169,6 +1263,11 @@ void setup() {
     // Board queue: GET never executes anything, start validates the whole
     // program before the first CAN frame, cancel also stops everything.
     server.on("/api/queue", HTTP_GET, []() { sendJson(200, queue.statusJson()); });
+    server.on("/api/query-budget", HTTP_GET, []() { sendJson(200, motor.queryStatusJson()); });
+    server.on("/api/query-budget", HTTP_POST, handleQueryBudget);
+    server.on("/api/sync-settings", HTTP_GET, [](){sendJson(200,queue.syncSettingsJson());});
+    server.on("/api/sync-settings", HTTP_POST, handleSyncSettings);
+    server.on("/api/sync-isolation", HTTP_POST, handleSyncIsolation);
     server.on("/api/queue/start", HTTP_POST, handleQueueStart);
     server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
     server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);
@@ -1187,15 +1286,16 @@ void loop() {
     // entry is written only when something actually changed.
     debugLogPoll(millis());
     powderScale.poll(millis());
-    motor.poll();
-    // The queue drives one supervised action per poll and never blocks.
-    queue.poll(millis());
+    motor.poll(false);
     serviceBrainLink();
     server.handleClient();
+    // Process explicit stop/cancel inputs before the next queued operation.
+    queue.poll(millis());
     wifiSetup.poll();
     powderScale.poll(millis());
-    motor.poll();
-    queue.poll(millis());
+    motor.poll(false);
     serviceBrainLink();
+    queue.poll(millis());
+    motor.dispatchQueries();
     delay(1);
 }

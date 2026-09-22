@@ -6,8 +6,10 @@
 // no implicit enable, retry, timeout stop, or automatic fault latching.
 // Missing feedback leaves await pending; explicit driver rejection fails it.
 // Cancel remains an explicit broadcast abort/stop operation.
+// Opt-in sync/helix groups instead own fresh preflight, a shared trajectory,
+// cache confirmation, one trigger and independent completion/fault stops.
 //
-// Memory: the plan is a fixed array of 64 QueueStep values (about 6 KB) held by
+// Memory: the plan is a fixed array of 64 QueueStep values held by
 // the queue object in .bss, plus one function-local static scratch buffer of the
 // same size used for validation. No whole-program value is ever placed on a
 // task stack, and nothing is allocated per step: the ESP32 loop task keeps its
@@ -20,6 +22,7 @@
 #include "DebugLimits.h"
 #include "MotorControl.h"
 #include "QueueProgram.h"
+#include "SyncRuntime.h"
 
 namespace motion {
 
@@ -32,9 +35,15 @@ enum class QueueState : uint8_t { Idle = 0, Running, Done, Failed, Cancelled };
 //   "done"/"cancelled" or the stable failure reason.
 const char* queueStateName(QueueState state);
 
-class CommandQueue {
+class CommandQueue : private SyncPort {
 public:
-    explicit CommandQueue(MotorControl& motor) : motor_(motor) {}
+    explicit CommandQueue(MotorControl& motor) : motor_(motor), sync_(*this,motor.queries()) {}
+    bool setSyncSettings(const SyncSettings& settings) {
+        if(active() || sync_.active() || !settings.valid()) return false;
+        syncSettings_=settings;return true;
+    }
+    const SyncSettings& syncSettings() const {return syncSettings_;}
+    String syncSettingsJson() const;
 
     // Call every loop after MotorControl::poll().
     void poll(uint32_t now);
@@ -55,7 +64,7 @@ public:
     // The result reports stop transmission only, never physical completion.
     Result clearControlState();
 
-    bool active() const { return state_ == QueueState::Running; }
+    bool active() const { return state_ == QueueState::Running || sync_.active(); }
     bool containsRaw() const { return program_.hasRaw; }
     QueueState state() const { return state_; }
     uint32_t runId() const { return runId_; }
@@ -72,16 +81,17 @@ private:
         kPhaseWait,       // a user-written `wait MS`
         kPhaseTimed,      // legacy timed torque/velocity: send FE at the deadline
         kPhaseMotion,
+        kPhaseSync,
     };
 
     void beginStep(uint32_t now);
     void dispatchStep(uint32_t now, const QueueStep& step);
-    bool encodeAndSend(const QueueStep& step);
+    bool encodeAndSend(const QueueStep& step, bool synchronized=false);
     bool sendStopFrame(uint8_t id);
     bool stopEverything();
     void observeMotion(uint32_t now);
-    uint32_t observedAckAt_ = 0, queryAt_ = 0, donePosAt_ = 0, doneVelAt_ = 0;
-    uint8_t queryIndex_ = 0, doneSamples_ = 0;
+    uint32_t observedAckAt_ = 0, donePosAt_ = 0, doneVelAt_ = 0;
+    uint8_t doneSamples_ = 0;
     uint32_t homeProofAt_ = 0;
     bool accepted_ = false, homeSeenRunning_ = false, homeComplete_ = false;
 
@@ -90,11 +100,27 @@ private:
     void fail(uint32_t now, const char* reason, uint16_t line);
     void setMessage(const char* text);
     const QueueStep* currentStep() const;
+    SyncFeedback syncFeedback(uint8_t id) const override;
+    bool syncSendMove(const QueueStep& step) override;
+    bool syncTrigger() override;
+    bool syncStop(uint8_t id) override;
+    void syncObserve(uint8_t id,bool value) override;
+    bool syncIsolationReady() const override;
+    void syncInvalidateIsolation() override;
+    void syncCompletedIsolation() override;
+    void pollSync(uint32_t now);
 
     MotorControl& motor_;
+    SyncSettings syncSettings_;
+    SyncRuntime sync_;
+    bool motionComplete_=false;
+    bool unconfirmedMotion_=false;
+    double helixTravelMm_=0;
+    double helixGeometryErrorMm_=0;
     QueueProgram program_{};
     QueueState state_ = QueueState::Idle;
     uint32_t runId_ = 0;
+    uint32_t programHash_ = 0;
     uint32_t repeat_ = 1;
     uint32_t iteration_ = 0;          // 0-based index of the running iteration
     uint16_t stepIndex_ = 0;          // 0-based index into program_.steps

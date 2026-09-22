@@ -218,7 +218,7 @@ export function DeviceApp() {
   // Poll cadence, shared with the mutation path so a start/cancel answer also
   // speeds the next read up instead of waiting for the slow (idle) interval.
   const queueIntervalRef = useRef(2500);
-  const queueRunning = queue?.state === 'running';
+  const queueRunning = queue?.active === true || queue?.state === 'running';
   const queueStale = queueState === 'error';
   const queueBusy = queueRunning || queueLock.pending || queueLock.unconfirmed;
   const queueUnknown = queueLock.unconfirmed && !queueRunning;

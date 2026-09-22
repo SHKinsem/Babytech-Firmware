@@ -22,5 +22,9 @@ inline esp_err_t twai_start() {return ESP_OK;}
 inline esp_err_t twai_driver_uninstall() {return ESP_OK;}
 inline esp_err_t twai_driver_install(const twai_general_config_t*,const twai_timing_config_t*,const twai_filter_config_t*) {return ESP_OK;}
 inline esp_err_t twai_get_status_info(twai_status_info_t* out) {*out={};return ESP_OK;}
+#ifdef TEST_TWAI_RX
+esp_err_t twai_receive(twai_message_t*,uint32_t);
+#else
 inline esp_err_t twai_receive(twai_message_t*,uint32_t) {return -1;}
+#endif
 esp_err_t twai_transmit(const twai_message_t*,uint32_t);

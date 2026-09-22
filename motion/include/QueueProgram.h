@@ -5,8 +5,9 @@
 // It translates readable lines
 // into CAN frames and sends them in order. Validation here is therefore limited
 // to what a *sender* needs - the grammar, the documented protocol field widths
-// and the resource bounds - and never asks the motor for permission: no enable
-// order, no feedback, no board policy limits and no planner estimation.
+// and the resource bounds. Plain commands never ask for enable/feedback or apply
+// manual policy limits. Explicit sync/helix groups are checked separately by
+// SyncPlanner and SyncRuntime, including preparation and fault-generated stops.
 //
 // One action per line, '#' starts a comment, commands and units are
 // case-insensitive. Numbers are parsed strictly (signed decimal, finite, integer
@@ -58,6 +59,8 @@ enum class QueueAction : uint8_t {
     Wait,
     Hex,
     Can,
+    SyncBegin,
+    SyncEnd,
 };
 
 // Stable identifiers for the status JSON and error text.
@@ -82,6 +85,10 @@ struct QueueStep {
     uint16_t line = 0;
     uint8_t id = 0;
     bool awaitCompletion = false;  // explicit trailing await on move/home only
+    uint8_t groupSize = 0;
+    double syncToleranceProgress = 0; // helix axial tolerance / axial travel
+    double helixTravelMm = 0;        // zero for a generic sync group
+    double helixGeometryErrorMm = 0; // displacement rounding envelope
 
     // move: resolved at validation, 0.1 degree, the sign carries the direction.
     int32_t distanceTenths = 0;

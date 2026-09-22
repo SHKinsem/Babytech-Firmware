@@ -422,11 +422,20 @@ export function readMotorDistance(payload, expectedId = null) {
 export const QUEUE_STATES = ['idle', 'running', 'done', 'failed', 'cancelled'];
 
 export const queueStateLabels = {
-  idle:'空闲', running:'运行中', done:'已完成', failed:'失败', cancelled:'已取消', unknown:'状态未知',
+  idle:'空闲', running:'运行中', done:'发送结束', failed:'失败', cancelled:'已取消／停止待确认', unknown:'状态未知',
 };
 
 export const queueActionLabels = {enable:'使能',disable:'失能',move:'相对移动',home:'回零',torque:'限速力矩',velocity:'限流速度',stop:'停止',wait:'等待',hex:'逻辑帧直通',can:'CAN 帧直通',none:'—'};
 export function queueMessageText(message) {
+  const syncLabels={sync_settings_unconfigured:'尚未配置同步容差与反馈期限',sync_queries_paused:'自动查询暂停，无法监督同步组',
+    sync_feedback_budget_insufficient:'当前查询预算无法在所选速度与容差下可靠判定：请降低速度、放宽容差或根据台架数据调整预算',
+    sync_cache_isolation_unverified:'当前缓存隔离未经人工确认；必须先完成全总线台架检查',sync_target_association_uncertain:'目标未发生可区分变化，无法可靠归属新缓存指令',
+    sync_quantization_tolerance:'编码取整后的比例或时间误差超过容差',sync_quantization_unrepresentable:'至少一轴的速度或加减速低于协议可表示范围',
+    sync_motion_complete:'同步成员全部到位，运动完成',sync_stop_requested:'已请求同步成员停止，等待静止证据',
+    sync_prepare_timeout:'同步准备超时，已请求成员停止',sync_target_mismatch:'缓存目标读回不匹配，已请求成员停止',
+    sync_coordination_error:'可观测配合误差超过容差，已请求成员停止',sync_feedback_lost:'同步反馈失效，已请求成员停止',
+    sync_feedback_indeterminate:'持续无法判定配合误差，已请求成员停止'};
+  if(syncLabels[message]) return syncLabels[message];
   // The queue only ever reports transmission: every "done" wording says the
   // frames went out, never that the motor reached anything.
   return ({home_wait_ack:'等待本次回零指令应答（9A）',home_wait_end:'已观察到正在回零，等待运行标志清除',home_wait_start_or_done:'指令已接收，等待启动宽限后的未回零状态或明确完成应答',home_wait_fresh_feedback:'已记录回零完成证据，等待完成后的新鲜位置和速度',home_wait_stationary:'已记录回零完成证据，速度尚未满足静止条件',home_confirming_stationary:'已记录回零完成证据，正在累计两次静止确认',automatic_queries_paused:'自动查询已暂停；仍接收回包并判断完成',waiting_home:'等待回零完成',waiting_position:'等待移动到位',waiting_feedback:'等待新鲜反馈',idle:'尚未执行',running:'正在按顺序发送',done:'发送结束',raw_frames_submitted:'发送结束（含原始帧，不判断机械动作）',frames_submitted:'发送结束（含原始帧，不判断机械动作）',cancelled:'已取消后续步骤并请求停止',stopped:'已停止队列',uart_stop:'已由串口停止队列',control_state_cleared:'已清除板端状态',home_no_motion:'驱动报告已在零点或限位触发，本次未运动'})[message] || errorLabels[message] || message;
@@ -449,6 +458,7 @@ export function readQueueStatus(payload) {
     status: {
       state,
       runId: number('runId'),
+      programHash: number('programHash'),
       step: number('step'),
       total: number('total'),
       iteration: number('iteration'),
@@ -457,6 +467,12 @@ export function readQueueStatus(payload) {
       action: typeof payload.action === 'string' ? payload.action : '',
       message: typeof payload.message === 'string' ? payload.message : '',
       raw: payload.raw === true,
+      motionComplete: payload.motionComplete === true,
+      active: payload.active === true || state === 'running',
+      sync: payload.sync && typeof payload.sync==='object' ? payload.sync : null,
+      diagnostics: Array.isArray(payload.diagnostics) ? payload.diagnostics.slice(-64) : [],
+      diagnosticsDropped: number('diagnosticsDropped'),
+      alert: payload.alert && typeof payload.alert === 'object' ? payload.alert : null,
     },
   };
 }
@@ -464,7 +480,7 @@ export function readQueueStatus(payload) {
 /** Progress line for the queue: step/iteration/line, never an optimistic done. */
 export function queueProgressText(status) {
   if (!status) return '尚未读取到队列状态';
-  const label = status.state==='done' && status.raw ? '发送结束' : queueStateLabels[status.state] || status.state;
+  const label = status.state==='done' ? (status.motionComplete?'运动完成':'发送结束') : queueStateLabels[status.state] || status.state;
   const step = status.step > 0 ? `第 ${status.step}/${status.total || '?'} 步` : '尚未开始第一步';
   const iteration = status.repeat > 1 ? ` · 第 ${status.iteration}/${status.repeat} 轮` : '';
   const line = status.line > 0 ? ` · 源程序第 ${status.line} 行` : '';
