@@ -270,3 +270,6 @@ body.device-body {min-width:0;}
 .trace__detail pre {white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0;font-size:12px;line-height:1.6;}
 .device-app .trace__row:has(details[open]) {height:auto;min-height:40px;align-items:start;padding-top:10px;padding-bottom:10px;}
 .device-app .trace__cell:has(details[open]) {white-space:normal;overflow:visible;}
+
+.device-app .toolbar {flex-wrap:wrap;height:auto;min-height:72px;row-gap:8px;padding-top:10px;padding-bottom:10px;}
+.device-app .toolbar__right {flex-wrap:wrap;gap:10px;}

@@ -44,6 +44,14 @@ int main() {
         r.feed(80,false);
         assert(std::strcmp(r.motor.configMessage(),"config_verified")==0);
     }
+    {
+        Rig r; setMillis(10);
+        assert(r.motor.rawLogical(config,sizeof(config)));
+        injectRx(makeAck(1,0x4C,2)); r.tick(40);
+        // Responses may be drained again within the same millisecond.
+        injectRx(part(0)); injectRx(part(1)); injectRx(part(2)); r.tick(40);
+        assert(std::strcmp(r.motor.configMessage(),"config_verified")==0);
+    }
     for(int failure=0;failure<4;++failure) {
         Rig r;setMillis(10);assert(r.motor.rawLogical(config,sizeof(config)));r.tick(20);
         if(failure==0) {injectRx(makeAck(1,0x4C,0xE2));r.tick(40);}

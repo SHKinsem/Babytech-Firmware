@@ -1405,7 +1405,7 @@ const char* MotorControl::configMessage() const {
 
 bool MotorControl::configFrame(const CanRawFrame& f, uint32_t now) {
     if (!configPending() || !f.extended || f.remote || f.length < 1 || f.length > 8 ||
-        (f.identifier >> 8) != config_.id || !isStrictlyNewerThan(now, config_.started)) return false;
+        (f.identifier >> 8) != config_.id) return false;
     const uint8_t packet = uint8_t(f.identifier);
     if (f.data[0] == 0x4C) {
         if (packet != 0 || f.length != 3 || f.data[2] != 0x6B || config_.state != 1) return true;
@@ -1413,16 +1413,12 @@ bool MotorControl::configFrame(const CanRawFrame& f, uint32_t now) {
         if (config_.ack != 0x02) { config_.state = 4; return true; }
         config_.state = 2;
         config_.readAt = now;
-        // A read is sent once. No write retry, and no assumption about save time.
-        const uint8_t read[] = {config_.id, 0x22, 0x6B};
-        can_.clearTransmissionError();
-        if (!can_.sendValidatedCommand(read, sizeof(read)) || can_.hasTransmissionError())
-            config_.state = 8;
-        can_.clearTransmissionError();
+        // pollConfig issues the read after this RX batch has drained, so a
+        // buffered response predating our request cannot enter the new assembly.
         return true;
     }
     if (f.data[0] != 0x22 || config_.state != 2) return false;
-    if (!isStrictlyNewerThan(now, config_.readAt)) return true;
+    if (!config_.readIssued) return true;
     // Manual: logical reply [addr][22][15 parameter bytes][6B]. CAN repeats
     // opcode for each 7-byte slice. Reject reordered/duplicate/truncated parts.
     const uint8_t take = packet < 2 ? 7 : 2;
@@ -1438,6 +1434,15 @@ bool MotorControl::configFrame(const CanRawFrame& f, uint32_t now) {
 }
 
 void MotorControl::pollConfig(uint32_t now) {
+    if (config_.state == 2 && !config_.readIssued) {
+        config_.readIssued = true;
+        config_.readAt = now;
+        const uint8_t read[] = {config_.id, 0x22, 0x6B};
+        can_.clearTransmissionError();
+        if (!can_.sendValidatedCommand(read, sizeof(read)) || can_.hasTransmissionError())
+            config_.state = 8;
+        can_.clearTransmissionError();
+    }
     if (config_.state == 1 && uint32_t(now - config_.started) > 3000) config_.state = 5;
     if (config_.state == 2 && uint32_t(now - config_.readAt) > 3000) config_.state = 6;
 }
@@ -1640,6 +1645,14 @@ Result MotorControl::stopAll() {
     // A broadcast stop can halt every node: no target sample survives it.
     invalidateTarget(0);
     return Result{kCodeQueued, "queued"};
+}
+
+Result MotorControl::broadcastEnable(bool enabled) {
+    const uint8_t frame[] = {0, 0xF3, 0xAB, uint8_t(enabled ? 1 : 0), 0, 0x6B};
+    // Broadcast has no per-node acknowledgement; do not invent confirmations.
+    const bool sent = queueSendLogical(frame, sizeof(frame));
+    if (!enabled) clearControlState();
+    return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
 }
 
 void MotorControl::clearControlState() {

@@ -75,7 +75,7 @@ String bootIdHex(uint64_t value) {
 // query string can never end up in the log or in an export, and the Wi-Fi routes
 // (which carry credentials) are deliberately absent.
 const char* const kLoggedPostRoutes[] = {
-    "/api/command", "/api/move", "/api/enable", "/api/stop", "/api/stop-all",
+    "/api/enable-all", "/api/command", "/api/move", "/api/enable", "/api/stop", "/api/stop-all",
     "/api/control/reset",
     "/api/queue/start", "/api/queue/cancel", "/api/limits", "/api/motor-distance",
     "/api/scale/tare", "/api/scale/calibrate", "/api/scale/config",
@@ -844,6 +844,23 @@ void handleControlReset() {
                     "\"error\":\"control_state_cleared_stop_unconfirmed\"}"));
 }
 
+void handleEnableAll() {
+    long enabled = 0;
+    if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
+        sendError(400, F("enabled must be 0 or 1")); return;
+    }
+    if (enabled) {
+        if (queue.active()) { sendError(409, F("queue_busy")); return; }
+        if (endpoint.busy()) { sendError(409, F("uart_operation_active")); return; }
+        if (wifiSetup.busy()) { sendError(409, F("wifi_busy")); return; }
+    } else {
+        babytech::v2::Frame event;
+        for (uint8_t i = 0; i < 2 && endpoint.cancelPending(event); ++i) sendFrame(event);
+        queue.cancel("disabled_all");
+    }
+    sendResult("enable-all", -1, motor.broadcastEnable(enabled == 1));
+}
+
 void handleStopAll() {
     const auto result = queue.cancel("stopped");
     sendResult("stop-all", -1, result.code < 300 ? motion::Result{202,"queued"} : result);
@@ -951,7 +968,7 @@ void handleLimits() {
 
 void handleNotFound() {
     const String uri = server.uri();
-    const bool knownPath = uri == "/" || uri == "/api/status" || uri == "/api/enable" ||
+    const bool knownPath = uri == "/" || uri == "/api/status" || uri == "/api/enable-all" || uri == "/api/enable" ||
                            uri == "/api/command" || uri == "/api/trace" || uri == "/api/can-debug" ||
                            uri == "/api/move" || uri == "/api/stop" || uri == "/api/stop-all" ||
                            uri == "/api/scale" || uri == "/api/scale/tare" ||
@@ -1142,6 +1159,7 @@ void setup() {
     server.on("/api/scale/calibrate", HTTP_POST, handleScaleCalibrate);
     server.on("/api/command", HTTP_POST, handleCommand);
     server.on("/api/enable", HTTP_POST, handleEnable);
+    server.on("/api/enable-all", HTTP_POST, handleEnableAll);
     server.on("/api/move", HTTP_POST, handleMove);
     server.on("/api/stop", HTTP_POST, handleStop);
     server.on("/api/stop-all", HTTP_POST, handleStopAll);

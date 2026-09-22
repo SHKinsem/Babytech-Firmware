@@ -972,6 +972,15 @@ void CommandQueue::observeMotion(uint32_t now) {
         // RX accumulates transitions in arrival order, before another frame can
         // overwrite the public latest-value cache (including same-tick frames).
         if (n.queueHomeFailed) { fail(now, "home_failed", step->line); return; }
+        // Fast homing may finish before any running sample is captured.
+        // After a 1 s startup grace, accept a fresh idle/no-failure status.
+        // Latch its first timestamp so later idle polls do not reset settling.
+        if (accepted_ && !n.queueHomeComplete && n.homeFlagsValid &&
+            newer(n.homeFlagsMs, phaseAt_) && uint32_t(n.homeFlagsMs - phaseAt_) >= 1000 &&
+            uint32_t(now - n.homeFlagsMs) < 1000 && !(n.homeFlags & 0x3C)) {
+            n.queueHomeComplete = true;
+            n.queueHomeProofMs = n.homeFlagsMs;
+        }
         homeSeenRunning_ = n.queueHomeRunning;
         homeComplete_ = n.queueHomeComplete;
         homeProofAt_ = n.queueHomeProofMs;

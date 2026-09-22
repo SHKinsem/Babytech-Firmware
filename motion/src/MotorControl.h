@@ -39,6 +39,7 @@ public:
     // Requests the firmware enable state. Result is 202 queued; the enable is
     // only reported as true after matching F3 ACK and fresh enabled 3A flags.
     Result enable(uint8_t id, bool enabled);
+    Result broadcastEnable(bool enabled);
 
     // Queues one relative position move. Requires a confirmed enable and fresh,
     // approximately stationary feedback.
@@ -182,6 +183,7 @@ private:
     // One serialized 4C write and its 22 readback. Terminal evidence is retained
     // independently of the rolling CAN trace and ordinary feedback polling.
     struct ConfigTransaction {
+        bool readIssued = false;
         uint32_t sequence = 0, started = 0, readAt = 0;
         uint8_t id = 0, state = 0, ack = 0, packet = 0, received = 0;
         uint8_t expected[15] = {}, actual[16] = {};

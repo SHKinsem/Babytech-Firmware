@@ -1389,6 +1389,35 @@ static void test_home_rx_order_and_same_tick() {
     }
 }
 
+static void test_fast_home_without_running_sample() {
+    QueueRig rig; rig.begin();
+    CHECK(startQueue(rig, "home 3 2 await", 1, 10).code == 202);
+    tick(rig, 20);
+    injectRx(makeAck(3, 0x9A, 2)); tick(rig, 30);
+    injectRx(makeHomeStatus(3, 3)); tick(rig, 40);
+    feedStationary(rig, 3, 50); rig.queue.poll(50);
+    feedStationary(rig, 3, 60); rig.queue.poll(60);
+    CHECK(rig.queue.active()); // startup grace rejects early idle
+    tick(rig, 1100);
+    CHECK(rig.queue.active()); // old idle cannot release a later run
+    injectRx(makeHomeStatus(3, 3)); tick(rig, 1110);
+    feedStationary(rig, 3, 1120); rig.queue.poll(1120);
+    injectRx(makeHomeStatus(3, 3)); tick(rig, 1130);
+    feedStationary(rig, 3, 1140); rig.queue.poll(1140);
+    tick(rig, 1150);
+    CHECK(rig.queue.state() == QueueState::Done);
+}
+
+static void test_broadcast_enable_frames() {
+    QueueRig rig; rig.begin();
+    CHECK(rig.motor.broadcastEnable(true).code == 202);
+    const uint8_t enable[] = {0xF3,0xAB,1,0,0x6B};
+    CHECK(sawTxId(0, enable, sizeof(enable)));
+    CHECK(rig.motor.broadcastEnable(false).code == 202);
+    const uint8_t disable[] = {0xF3,0xAB,0,0,0x6B};
+    CHECK(sawTxId(0, disable, sizeof(disable)));
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -1396,6 +1425,8 @@ struct TestCase {
 
 int main() {
     const TestCase tests[] = {
+        {"fast home idle after grace without running sample", test_fast_home_without_running_sample},
+        {"broadcast enable and disable wire frames", test_broadcast_enable_frames},
         {"home RX ordering, same tick and rejection", test_home_rx_order_and_same_tick},
         {"batched homing RX retains ACK and running-to-idle transition", test_home_batched_rx_keeps_transition},
         {"pause query TX while continuing RX", test_pause_queries_keeps_receiving},

@@ -38,6 +38,7 @@ await page.route('http://queue.test/**',async route=>{
    if (url.pathname==='/api/polling') {autoQueriesEnabled=new URLSearchParams(route.request().postData()).get('enabled')==='1';return json({autoQueriesEnabled});}
    const params=Object.fromEntries(new URLSearchParams(route.request().postData()));
    posts.push({path:url.pathname,params});
+   if(url.pathname==='/api/enable-all')return json({message:'broadcast_sent'},202);
    if(url.pathname==='/api/queue/start'){
      if(startMode==='reject')return json({error:'program_line',line:2,message:'invalid program'},400);
      // A lost response: the board may or may not have started the program.
@@ -95,6 +96,11 @@ try {
  await page.goto('http://queue.test/');
  await page.getByRole('tab',{name:'编排队列',exact:true}).click();
  await page.waitForFunction(()=>document.querySelectorAll('.trace__body .trace__row').length===30);
+ await page.getByRole('button',{name:'全部使能',exact:true}).click();
+ await page.waitForFunction(()=>document.body.textContent.includes('全部使能广播已发送'));
+ await page.getByRole('button',{name:'全部失能',exact:true}).click();
+ await page.waitForFunction(()=>document.body.textContent.includes('全部失能广播已发送'));
+ assert.deepEqual(posts.filter(p=>p.path==='/api/enable-all').map(p=>p.params.enabled),['1','0']);
  await page.getByRole('button',{name:'暂停自动查询',exact:true}).click();
  await page.waitForTimeout(600);
  const count=gets;
@@ -108,6 +114,8 @@ try {
  assert.equal(await page.locator('details[open]').count(),1);
  for (const size of [{width:1513,height:1039},{width:1280,height:800}]) {
    await page.setViewportSize(size);
+   const disableBox=await page.getByRole('button',{name:'全部失能',exact:true}).boundingBox();
+   assert.ok(disableBox.x+disableBox.width<=size.width);
    const box=await page.locator('.trace--expanded').boundingBox();
    assert.ok(box.height>500 && box.y+box.height<=size.height);
    await page.screenshot({path:`qa-trace-${size.width}.png`});
