@@ -34,13 +34,13 @@ const enabledIn = (text) => knownEnabledIds(parseProgram(text).actions);
 test('sample program is short, valid and needs explicit enables', () => {
   const result = validateProgram(SAMPLE_PROGRAM, { distances: { 1: 40 } });
   assert.deepEqual(result.errors, []);
-  assert.equal(result.actions.length, 6, 'the sample stays at six lines');
+  assert.equal(result.actions.length, 8);
   assert.deepEqual(result.stats.usedIds, [1, 2, 3]);
-  assert.deepEqual(result.actions.map((action) => action.verb), ['enable', 'move', 'enable', 'home', 'enable', 'torque']);
+  assert.deepEqual(result.actions.map((action) => action.verb), ['enable', 'move', 'wait', 'enable', 'home', 'enable', 'torque', 'torque']);
 
   const move = result.actions.find((action) => action.verb === 'move');
-  assert.deepEqual(move, { line: 4, verb: 'move', id: 1, value: 90, unit: 'deg', rpm: 30, accel: 60, decel: 60, current: 800 });
-  assert.deepEqual(result.actions.find((action) => action.verb === 'torque'), { line: 8, verb: 'torque', id: 3, currentMa: 800, durationMs: 1500, maxRpm: 30, rampMaS: 1000 });
+  assert.deepEqual(move, { line: 4, verb: 'move', awaitCompletion: true, id: 1, value: 90, unit: 'deg', rpm: 30, accel: 60, decel: 60, current: 800 });
+  assert.deepEqual(result.actions.find((action) => action.verb === 'torque'), { line: 9, verb: 'torque', id: 3, currentMa: 800, durationMs: 1500, maxRpm: 30, rampMaS: 1000 });
   assert.equal(result.actions.find((action) => action.verb === 'home').mode, 0);
 
   // Every motor that moves is enabled first, on its own line.
@@ -57,9 +57,9 @@ test('sample program is short, valid and needs explicit enables', () => {
   assert.match(buildActionLine('disable', builderDefaults('disable')).line, /^disable 1$/);
 
   // Readable preview with source line numbers, and never a torque value in Nm.
-  assert.equal(result.preview.length, 6);
+  assert.equal(result.preview.length, 8);
   assert.ok(result.preview.every((row) => Number.isInteger(row.line) && row.summary.length > 0));
-  const torquePreview = result.preview.find((row) => row.line === 8);
+  const torquePreview = result.preview.find((row) => row.line === 9);
   assert.doesNotMatch(`${torquePreview.summary} ${torquePreview.detail}`, /\d\s*Nm/);
   assert.match(torquePreview.summary, /800 mA · 1500 ms/);
 });
@@ -158,9 +158,9 @@ test('ranges and overflow are rejected instead of truncated', () => {
     ['move 256 90', /电机地址/],
     ['move 1 90 deg 3001', /转速/],
     ['move 1 90 deg 30 65536', /加速度/],
-    ['move 1 90 deg 30 60 0', /减速度/],
+    ['move 1 90 deg 30 60 -1', /减速度/],
     ['move 1 90 deg 30 60 60 5001', /电流上限/],
-    ['move 1 90 deg 30 60 60 99', /电流上限/],
+    ['move 1 90 deg 30 60 60 -1', /电流上限/],
     ['move 1 90 deg 30 60 60 800 7', /最多 4 个可选参数/],
     ['home 2 6', /回零模式/],
     ['home 2 0 1', /用法：home ID \[MODE\]/],
@@ -268,7 +268,7 @@ test('preview wording keeps the honest caveats', () => {
   const torque = previewAction(parseProgram('torque 1 -300 1000').actions[0], {});
   assert.match(torque.summary, /-300 mA/);
   assert.doesNotMatch(`${torque.summary} ${torque.detail}`, /\d\s*Nm/);
-  assert.match(previewAction(parseProgram('disable 1').actions[0], {}).summary, /确认真实静止/);
+  assert.match(previewAction(parseProgram('disable 1').actions[0], {}).summary, /不等应答/);
   assert.match(previewAction(parseProgram('wait 200').actions[0], {}).summary, /非阻塞/);
 });
 
@@ -410,4 +410,16 @@ test('4C homing parameters follow the configured speed and current policy', () =
   // The timeout is a full uint32 on the wire: no arbitrary cap in the page.
   assert.equal(supportReason(frame({ timeoutMs: 0xffffffff }), DEFAULT_LIMITS), null);
   assert.match(supportReason(frame({ powerOn: 1 }), DEFAULT_LIMITS), /不允许配置上电自动回零/);
+});
+
+test('await suffix is explicit, strict and shown in previews', () => {
+  const parsed = parseProgram('move 1 90\nmove 1 90 deg 30 60 60 800 AWAIT # done\nhome 2 2\nhome 2 await');
+  assert.deepEqual(parsed.errors, []);
+  assert.deepEqual(parsed.actions.map(a => a.awaitCompletion), [false, true, false, true]);
+  assert.match(previewAction(parsed.actions[0]).summary, /发送后继续/);
+  assert.match(previewAction(parsed.actions[1]).summary, /等待到位/);
+  assert.match(previewAction(parsed.actions[3]).summary, /等待完成/);
+  for (const text of ['move 1 await 90', 'home 2 await await', 'stop 1 await', 'wait 2 await', 'hex 01 FE 6B await']) {
+    assert.equal(parseProgram(text).errors.length, 1, text);
+  }
 });

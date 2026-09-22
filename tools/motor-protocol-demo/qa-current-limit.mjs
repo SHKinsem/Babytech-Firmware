@@ -34,6 +34,8 @@ await page.route('http://device.test/**',async route=>{
   const json=body=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});
   if(path==='/')return route.fulfill({contentType:'text/html',body:html});
   if(path==='/favicon.ico')return route.fulfill({status:204});
+  if(path==='/api/config-result')return json({sequence:0});
+  if(path==='/api/logs')return json({bootId:'QABOOT',uptimeMs:1,sequence:0,capacity:48,events:[]});
   if(route.request().method()==='POST'){
     const params=Object.fromEntries(new URLSearchParams(route.request().postData()));
     posts.push({path,params});

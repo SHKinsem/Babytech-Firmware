@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { formatBytes, formatCanId } from '../protocol.js';
 import { GlyphSearch } from './glyphs.jsx';
@@ -17,6 +17,9 @@ function formatTime(timestamp) {
 
 export function TracePanel({
   device = false,
+  pollingPaused = false,
+  pollingBusy = false,
+  onTogglePolling,
   records,
   totalCount,
   hiddenCount,
@@ -30,15 +33,26 @@ export function TracePanel({
   onCopy,
 }) {
   const bodyRef = useRef(null);
+  const [expanded, setExpanded] = useState(false);
+  const [motorId, setMotorId] = useState('');
+  const [homeOnly, setHomeOnly] = useState(false);
+  const visible = records.filter(record =>
+    (!motorId || ((record.canId >>> 8) & 255) === Number(motorId)) &&
+    (!homeOnly || [0x9a, 0x3b, 0x35, 0x36].includes(record.data[0])));
+  useEffect(() => {
+    const close = event => { if (event.key === 'Escape') setExpanded(false); };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, []);
 
   useEffect(() => {
     if (paused) return;
     const body = bodyRef.current;
     if (body) body.scrollTop = body.scrollHeight;
-  }, [records.length, paused]);
+  }, [visible.at(-1)?.id, paused, expanded]);
 
   return (
-    <section className="trace" aria-label="收发记录">
+    <section className={`trace${expanded ? ' trace--expanded' : ''}`} aria-label="收发记录">
       <div className="trace__head">
         <h2 className="trace__title">收发记录</h2>
         <span className="chip chip--soft" title={device ? 'TX 为 TWAI 入队，RX 为总线接收；不代表运动完成' : '本地模拟'}>
@@ -76,8 +90,15 @@ export function TracePanel({
           />
         </div>
 
+        {device && <>
+          <button type="button" className="pill" aria-pressed={pollingPaused} disabled={pollingBusy} onClick={onTogglePolling}>{pollingPaused ? '恢复自动查询' : '暂停自动查询'}</button>
+          <label className="trace__motor">电机 <input aria-label="筛选电机 ID" type="number" min="1" max="255" placeholder="全部" value={motorId} onChange={e => setMotorId(e.target.value)} /></label>
+          <button type="button" className={`pill${homeOnly ? ' is-active' : ''}`} aria-pressed={homeOnly} onClick={() => { setHomeOnly(!homeOnly); onQueryChange(''); }}>回零相关</button>
+          <button type="button" className="link-button" aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? '收起记录' : '展开记录'}</button>
+          <button type="button" className="link-button" onClick={() => onCopy(visible.map(r => `${formatTime(r.at)} ${r.dir} ${formatCanId(r.canId)} DLC ${r.dlc} ${formatBytes(r.data)} ${r.note}`).join('\n'), '筛选记录')}>复制筛选结果</button>
+        </>}
         <span className="trace__count">
-          显示 {records.length} / 共 {totalCount} 条
+          显示 {visible.length} / 共 {totalCount} 条
           {paused && hiddenCount > 0 ? ` · 暂停期间新增 ${hiddenCount} 条` : ''}
         </span>
 
@@ -97,10 +118,10 @@ export function TracePanel({
         </div>
 
         <div className="trace__body" ref={bodyRef}>
-          {records.length === 0 ? (
+          {visible.length === 0 ? (
             <p className="trace__empty">{device ? '等待板端收发记录。' : '暂无模拟记录。'}</p>
           ) : (
-            records.map((record) => (
+            visible.map((record) => (
               <div className="trace__row" key={record.id} role="row">
                 <span className="trace__cell trace__time" role="cell">{formatTime(record.at)}</span>
                 <span
@@ -113,12 +134,12 @@ export function TracePanel({
                 <span className="trace__cell trace__dlc" role="cell">{record.dlc}</span>
                 <span className="trace__cell trace__data" role="cell">{formatBytes(record.data)}</span>
                 <span className="trace__cell trace__note" role="cell">
-                  <span className="trace__note-text">{record.note}</span>
+                  <details className="trace__detail"><summary>{record.note}</summary><pre>{record.decoded?.text || record.note}</pre></details>
                   <button
                     type="button"
                     className="link-button trace__copy"
                     onClick={() => onCopy(
-                      `${formatTime(record.at)} ${record.dir} ${formatCanId(record.canId)} DLC ${record.dlc} ${formatBytes(record.data)}`,
+                      `${formatTime(record.at)} ${record.dir} ${formatCanId(record.canId)} DLC ${record.dlc} ${formatBytes(record.data)} ${record.note}`,
                       '记录',
                     )}
                   >

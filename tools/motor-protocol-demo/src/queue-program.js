@@ -35,9 +35,9 @@ export const QUEUE_LIMITS = {
   minAngleDeg: 0.1,
   minSpeedRpm: 0.1,
   maxSpeedRpm: 3000,
-  minAccelRpmS: 1,
+  minAccelRpmS: 0,
   maxAccelRpmS: 65535,
-  minCurrentMa: 100,
+  minCurrentMa: 0,
   maxCurrentMa: 5000,
 };
 
@@ -61,7 +61,7 @@ export const QUEUE_VERBS = [
     usage: 'enable ID',
     shortForm: 'enable 1',
     defaults: '地址必填，没有隐式使能',
-    note: '等待驱动器真实的 F3 应答。程序不会替任何电机隐式使能，需要运动就先写 enable。',
+    note: '只发送 F3 使能帧，不等应答。程序不会替任何电机隐式使能：需要就先自己写一行。',
     args: [{ key: 'id', label: '电机地址', kind: 'address', default: '1' }],
   },
   {
@@ -70,16 +70,16 @@ export const QUEUE_VERBS = [
     usage: 'disable ID',
     shortForm: 'disable 1',
     defaults: '地址必填',
-    note: '关闭使能：等待应答，并确认电机真实静止。示例程序故意不写 disable：定时力矩／速度动作会自行停止，正常停止也保留使能；确认要断电或人工干预时再加这一行。',
+    note: '只发送 F3 关闭使能帧，不等应答、也不等待静止确认。示例程序故意不写 disable：需要断电或人工干预时再加这一行。',
     args: [{ key: 'id', label: '电机地址', kind: 'address', default: '1' }],
   },
   {
     verb: 'move',
     label: '相对运动',
-    usage: 'move ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]]',
+    usage: 'move ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]] [await]',
     shortForm: 'move 1 90',
     defaults: '单位 deg · RPM 30 · 加减速 60 · 电流 800 mA',
-    note: 'VALUE 带符号表示方向；rev = 360°；mm 用该地址已保存的 mm/rev 旋转距离换算。等待受监督的 CD 完成。',
+    note: 'VALUE 带符号表示方向；rev = 360°；mm 用该地址已保存的 mm/rev 换算。发送 CD 相对模式 2；默认发送后继续，末尾加 await 才等待到位。',
     args: [
       { key: 'id', label: '电机地址', kind: 'address', default: '1' },
       { key: 'value', label: '行程', kind: 'number', unit: 'deg|rev|mm', default: '90' },
@@ -93,10 +93,10 @@ export const QUEUE_VERBS = [
   {
     verb: 'home',
     label: '回零',
-    usage: 'home ID [MODE]',
+    usage: 'home ID [MODE] [await]',
     shortForm: 'home 2',
     defaults: '模式 0（单圈就近）',
-    note: '触发 9A 回零并等待板端的监督结果；12/22 表示已在零点或限位已触发、电机未动，不等于回零完成。',
+    note: '发送 9A 回零触发；默认发送后继续，末尾加 await 才等待回零完成；12/22 表示驱动报告无需运动。异常只报告，不自动停机或失能。',
     args: [
       { key: 'id', label: '电机地址', kind: 'address', default: '2' },
       { key: 'mode', label: '回零模式', kind: 'number', unit: '0..5', default: '0' },
@@ -105,10 +105,10 @@ export const QUEUE_VERBS = [
   {
     verb: 'torque',
     label: '限速力矩',
-    usage: 'torque ID SIGNED_MA DURATION_MS [MAX_RPM [RAMP_MA_S]]',
+    usage: 'torque ID SIGNED_MA [DURATION_MS [MAX_RPM [RAMP_MA_S]]]',
     shortForm: 'torque 3 -300 1500',
     defaults: '限速 30 RPM · 斜率 1000 mA/s',
-    note: 'C5 限速力矩：SIGNED_MA 带符号决定方向，到时停止并等待静止。力矩以 mA 下发，界面不使用 Nm。',
+    note: 'C5 限速力矩：SIGNED_MA 带符号决定方向。写持续时间＝到时补一条 FE 停止后立刻继续（不等静止）；不写持续时间＝只发送、继续下一行，不会自动停止。力矩以 mA 下发，界面不使用 Nm。',
     args: [
       { key: 'id', label: '电机地址', kind: 'address', default: '3' },
       { key: 'currentMa', label: '力矩电流', kind: 'number', unit: 'mA（带符号）', default: '300', signed: true },
@@ -120,10 +120,10 @@ export const QUEUE_VERBS = [
   {
     verb: 'velocity',
     label: '速度',
-    usage: 'velocity ID SIGNED_RPM DURATION_MS [ACCEL [CURRENT]]',
+    usage: 'velocity ID SIGNED_RPM [DURATION_MS [ACCEL [CURRENT]]]',
     shortForm: 'velocity 1 60 2000',
     defaults: '加速度 60 RPM/s · 电流 800 mA',
-    note: 'C6 限流速度：SIGNED_RPM 带符号决定方向，到时停止并等待静止。',
+    note: 'C6 限流速度：SIGNED_RPM 带符号决定方向。写持续时间＝到时补一条 FE 停止后立刻继续（不等静止）；不写持续时间＝只发送、继续下一行，不会自动停止。',
     args: [
       { key: 'id', label: '电机地址', kind: 'address', default: '1' },
       { key: 'rpm', label: '转速', kind: 'number', unit: 'RPM（带符号）', default: '60', signed: true },
@@ -138,7 +138,7 @@ export const QUEUE_VERBS = [
     usage: 'stop ID',
     shortForm: 'stop 1',
     defaults: '地址必填',
-    note: '停止并等待真实静止反馈；保留使能状态（要真正断电请再写一行 disable）。',
+    note: '只发送停止帧，不等待静止反馈；保留使能状态（要真正断电请再写一行 disable）。',
     args: [{ key: 'id', label: '电机地址', kind: 'address', default: '1' }],
   },
   {
@@ -339,21 +339,24 @@ function parseMove(tokens, fail) {
 }
 
 function parseTorque(tokens, fail) {
+  // torque ID SIGNED_MA [DURATION_MS [MAX_RPM [RAMP_MA_S]]]
+  // Without a duration the frame is sent and the next line follows immediately:
+  // no timer and no implicit stop.
   const [idToken, currentToken, durationToken, ...rest] = tokens;
-  if (idToken === undefined || currentToken === undefined || durationToken === undefined) {
-    fail('用法：torque ID SIGNED_MA DURATION_MS [MAX_RPM [RAMP_MA_S]]');
+  if (idToken === undefined || currentToken === undefined) {
+    fail('用法：torque ID SIGNED_MA [DURATION_MS [MAX_RPM [RAMP_MA_S]]]');
     return null;
   }
   const id = readAddress(idToken, fail);
-  const currentMa = readNumber(currentToken, { label: '力矩电流', integer: true, signed: true, absMin: 1, absMax: QUEUE_LIMITS.maxCurrentMa, unit: 'mA' }, fail);
-  const durationMs = readNumber(durationToken, DURATION, fail);
+  const currentMa = readNumber(currentToken, { label: '力矩电流', integer: true, signed: true, absMin: 0, absMax: QUEUE_LIMITS.maxCurrentMa, unit: 'mA' }, fail);
+  const durationMs = durationToken === undefined ? 0 : readNumber(durationToken, DURATION, fail);
   if (id == null || currentMa == null || durationMs == null) return null;
   if (rest.length > 2) {
     fail(`限速力矩最多 2 个可选参数（MAX_RPM RAMP_MA_S），多出 ${rest.length - 2} 个`);
     return null;
   }
   const maxRpm = rest.length > 0
-    ? readNumber(rest[0], { ...SPEED, label: '限速' }, fail)
+    ? readNumber(rest[0], { ...SPEED, min: 0, label: '限速' }, fail)
     : 30;
   const rampMaS = rest.length > 1
     ? readNumber(rest[1], { label: '电流斜率', integer: true, min: 0, max: QUEUE_LIMITS.maxAccelRpmS, unit: 'mA/s' }, fail)
@@ -363,14 +366,15 @@ function parseTorque(tokens, fail) {
 }
 
 function parseVelocity(tokens, fail) {
+  // velocity ID SIGNED_RPM [DURATION_MS [ACCEL [CURRENT]]]
   const [idToken, rpmToken, durationToken, ...rest] = tokens;
-  if (idToken === undefined || rpmToken === undefined || durationToken === undefined) {
-    fail('用法：velocity ID SIGNED_RPM DURATION_MS [ACCEL [CURRENT]]');
+  if (idToken === undefined || rpmToken === undefined) {
+    fail('用法：velocity ID SIGNED_RPM [DURATION_MS [ACCEL [CURRENT]]]');
     return null;
   }
   const id = readAddress(idToken, fail);
   const rpm = readNumber(rpmToken, { ...SPEED, label: '转速', signed: true, absMin: QUEUE_LIMITS.minSpeedRpm, absMax: QUEUE_LIMITS.maxSpeedRpm }, fail);
-  const durationMs = readNumber(durationToken, DURATION, fail);
+  const durationMs = durationToken === undefined ? 0 : readNumber(durationToken, DURATION, fail);
   if (id == null || rpm == null || durationMs == null) return null;
   if (rest.length > 2) {
     fail(`速度指令最多 2 个可选参数（ACCEL CURRENT），多出 ${rest.length - 2} 个`);
@@ -455,7 +459,17 @@ export function parseProgram(text) {
     const tokens = withoutComment.split(/\s+/);
     const verb = tokens[0].toLowerCase();
     const fail = (message) => errors.push({ line, message });
+    const awaitIndex = tokens.findIndex((token, i) => i > 0 && token.toLowerCase() === 'await');
+    const awaitCompletion = awaitIndex !== -1;
+    if (awaitCompletion) {
+      if (!['move', 'home'].includes(verb) || awaitIndex !== tokens.length - 1) {
+        fail('await 只能放在 move/home 指令末尾，且只能出现一次');
+        return;
+      }
+      tokens.pop();
+    }
     const body = parseTokens(verb, tokens.slice(1), fail);
+    if (body && ['move', 'home'].includes(verb)) body.awaitCompletion = awaitCompletion;
     if (body) actions.push({ line, verb, ...body });
   });
   return { actions, errors, lineCount: lines.length };
@@ -507,16 +521,16 @@ export function previewAction(action, { distances = null } = {}) {
   const warnings = [];
   switch (action.verb) {
     case 'enable':
-      return { summary: `电机 ${action.id}：使能（等待真实 F3 应答）`, warnings };
+      return { summary: `电机 ${action.id}：发送使能 F3（不等应答）`, warnings };
     case 'disable':
-      return { summary: `电机 ${action.id}：关闭使能（等待应答并确认真实静止）`, warnings };
+      return { summary: `电机 ${action.id}：发送关闭使能 F3（不等应答）`, warnings };
     case 'stop':
-      return { summary: `电机 ${action.id}：停止（等待静止反馈，保留使能）`, warnings };
+      return { summary: `电机 ${action.id}：发送停止 FE（保留使能状态）`, warnings };
     case 'wait':
-      return { summary: `等待 ${action.ms} ms（非阻塞）`, warnings };
+      return { summary: `等待 ${action.ms} ms（非阻塞，只推迟后续动作）`, warnings };
     case 'home':
       return {
-        summary: `电机 ${action.id}：回零 · 模式 ${action.mode} ${homeModeLabel(action.mode)}（等待受监督的 9A 结果）`,
+        summary: `电机 ${action.id}：发送回零触发 9A · 模式 ${action.mode} ${homeModeLabel(action.mode)}（${action.awaitCompletion ? '等待完成' : '发送后继续'}）`,
         warnings,
       };
     case 'move': {
@@ -540,18 +554,26 @@ export function previewAction(action, { distances = null } = {}) {
         warnings.push(`尚未从板端读取电机 ${action.id} 的 mm/rev 旋转距离，本页不推测换算结果。`);
         detail = `旋转距离未读取 · ${detail}`;
       }
-      return { summary: head, detail, warnings, counts, deg: angle.ok ? angle.deg : null };
+      return { summary: `${head}（${action.awaitCompletion ? '等待到位' : '发送后继续'}）`, detail, warnings, counts, deg: angle.ok ? angle.deg : null };
     }
     case 'torque':
       return {
-        summary: `电机 ${action.id}：限速力矩 ${signed(action.currentMa)} mA · ${action.durationMs} ms · 限速 ${num(action.maxRpm)} RPM · 斜率 ${action.rampMaS} mA/s`,
-        detail: `到时停止并等待静止；力矩以 mA 下发（不使用 Nm）`,
+        summary: action.durationMs
+          ? `电机 ${action.id}：限速力矩 ${signed(action.currentMa)} mA · ${action.durationMs} ms · 限速 ${num(action.maxRpm)} RPM · 斜率 ${action.rampMaS} mA/s`
+          : `电机 ${action.id}：限速力矩 ${signed(action.currentMa)} mA · 限速 ${num(action.maxRpm)} RPM · 斜率 ${action.rampMaS} mA/s`,
+        detail: action.durationMs
+          ? '到时补一条 FE 停止后立刻继续（不等静止）；力矩以 mA 下发（不使用 Nm）'
+          : '只发送、继续下一行，不会自动停止；力矩以 mA 下发（不使用 Nm）',
         warnings,
       };
     case 'velocity':
       return {
-        summary: `电机 ${action.id}：速度 ${signed(action.rpm)} RPM · ${action.durationMs} ms`,
-        detail: `加速度 ${num(action.accel)} RPM/s · 电流上限 ${action.current} mA · 到时停止并等待静止`,
+        summary: action.durationMs
+          ? `电机 ${action.id}：速度 ${signed(action.rpm)} RPM · ${action.durationMs} ms`
+          : `电机 ${action.id}：速度 ${signed(action.rpm)} RPM`,
+        detail: action.durationMs
+          ? `加速度 ${num(action.accel)} RPM/s · 电流上限 ${action.current} mA · 到时补一条 FE 停止后立刻继续`
+          : `加速度 ${num(action.accel)} RPM/s · 电流上限 ${action.current} mA · 只发送，不会自动停止`,
         warnings,
       };
     case 'hex': {
@@ -698,18 +720,20 @@ export function knownEnabledIds(actions) {
 }
 
 /**
- * Sample program: six lines, the three motors the user actually drives, each
- * enabled explicitly. No stop/disable padding — a timed torque or velocity step
- * stops itself, and the normal stop keeps enable on purpose; `disable` stays
- * available for when the motor really should be switched off (see the help).
+ * Sample program: the three motors the user actually drives, each enabled
+ * explicitly (the board never enables anything on its own). Frames go out in
+ * order and nothing is awaited: `wait` lines are the only waiting, and a timed
+ * torque step adds its own FE after the written duration.
  */
 export const SAMPLE_PROGRAM = [
   '# 编排队列示例：1 号相对运动 → 2 号回零 → 3 号限速力矩',
-  '# 每行一个动作；# 之后是注释；指令与单位不分大小写；可选参数只能写在最后。',
-  'enable 1            # 等待真实 F3 应答；程序不会替电机隐式使能',
-  'move 1 90           # 单位默认 deg，RPM 30、加减速 60、电流 800 mA',
+  '# 默认发送后继续；末尾 await 等本次动作完成，wait 用于固定延时。',
+  'enable 1            # 只发送 F3；程序不会替电机隐式使能',
+  'move 1 90 await     # 单位默认 deg，RPM 30、加减速 60、电流 800 mA',
+  'wait 1500           # 到位后额外停留 1.5 秒',
   'enable 2',
-  'home 2              # 模式默认 0（单圈就近），等待受监督的 9A 结果',
+  'home 2 await        # 等待回零完成后继续',
   'enable 3',
-  'torque 3 800 1500   # 800 mA 持续 1500 ms，到时自动停止并等待静止',
+  'torque 3 800 1500   # 保持 800 mA 1500 ms，到时补一条 FE 停止',
+  'torque 3 0          # 不带持续时间：只发送，不会自动停止',
 ].join('\n');

@@ -118,7 +118,9 @@ export function QueuePanel({
   // --------------------------------------------------------------- action builder
   const [builderVerb, setBuilderVerb] = useState('move');
   const [builderValues, setBuilderValues] = useState(() => builderDefaults('move'));
-  const [addEnable, setAddEnable] = useState(true);
+  // Off by default: the program is sent exactly as written, with no implicit
+  // enable line added for the user.
+  const [addEnable, setAddEnable] = useState(false);
   const [builderError, setBuilderError] = useState(null);
 
   useEffect(() => {
@@ -317,7 +319,7 @@ export function QueuePanel({
         onQueueBusy({ pending: false, unconfirmed: false });
         setNotice({
           tone: parsed.status.state === 'failed' ? 'error' : 'ok',
-          text: `板端已接受队列（HTTP 202）：${queueProgressText(parsed.status)}。结构化步骤会等待真实应答／反馈；原始帧（hex / can）只报告已发送，不推断完成。`,
+          text: `板端已接受队列（HTTP 202）：${queueProgressText(parsed.status)}。默认发送后继续；move/home 末尾加 await 才等待完成；原始帧（hex / can）只报告已发送，不推断完成。`,
         });
       } else {
         // 202 without a readable body still means the board took the program.
@@ -454,11 +456,11 @@ export function QueuePanel({
   // A failed read keeps the last board-reported status on screen but never
   // presents it as current: the label and the note say which one it is.
   const queueStale = queueState === 'error';
-  const lastStateLabel = queue ? queueStateLabels[queue.state] : null;
+  const lastStateLabel = queue ? (queue.state==='done' && queue.raw ? '发送结束' : queueStateLabels[queue.state]) : null;
   const stateLabel = queueState === 'unavailable'
     ? '不可用'
     : queueStale && lastStateLabel ? `${lastStateLabel}（最后读取，当前未知）` : (lastStateLabel ?? queueStateLabels.unknown);
-  const chipClass = queue?.state === 'running' ? 'chip--warn' : queue?.state === 'failed' ? 'chip--warn' : queue?.state === 'done' ? 'chip--ok' : 'chip--muted';
+  const chipClass = queue?.state === 'running' ? 'chip--warn' : queue?.state === 'failed' ? 'chip--warn' : queue?.state === 'done' && !queue?.raw ? 'chip--ok' : 'chip--muted';
 
   return (
     <div className="queue-page">
@@ -468,7 +470,7 @@ export function QueuePanel({
           <span className={`chip ${chipClass}`}>板端队列：{stateLabel}</span>
         </div>
         <p className="panel__desc">
-          板端整份校验后独立执行，浏览器断开后板端仍继续执行已提交的队列。结构化步骤会等待真实应答／反馈；原始帧（hex / can）只报告已发送。网页只负责编辑、预览与显示，不会自动重发。
+          按顺序发送，默认发送后继续；move/home 末尾加 await 才等待本次动作完成。速度／力矩按写出的持续时间执行；<code>wait MS</code> 用于额外延时。await 期间反馈中断时停留当前行并提示，恢复后继续；驱动拒绝时报告原因，不自动失能或追加停机。原始帧只负责发送。浏览器断开后板端仍继续，不会自动重发。
         </p>
 
         <label className="queue-editor__label" htmlFor="queue-program">
@@ -482,7 +484,7 @@ export function QueuePanel({
           autoComplete="off"
           value={program}
           onChange={(event) => { setProgram(event.target.value); setNotice(null); }}
-          placeholder={'enable 1\nmove 1 90\nhome 2 0\ntorque 3 -300 1500'}
+          placeholder={'enable 1\nmove 1 90 await\nhome 2 0 await\ntorque 3 -300 1500'}
         />
         <p className="queue-stats">
           动作 {result.stats.actions}/{QUEUE_LIMITS.maxActions} · 文本 {result.stats.bytes}/{QUEUE_LIMITS.maxTextBytes} 字节 ·

@@ -1,0 +1,61 @@
+import {createRequire} from 'node:module';
+import {readFile,mkdir} from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const require=createRequire(import.meta.url);
+const {chromium}=require('C:/Users/xusen/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe'});
+const page=await browser.newPage({viewport:{width:1280,height:800}});
+const html=await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const errors=[],posts=[];
+let sequence=0,state='none',ack=0,actual=[],offline=false,traceSeq=0;
+const expected=[2,0,0,100,0,0,39,16,0,5,0,120,0,60,0];
+page.on('pageerror',e=>errors.push(e.message));
+await page.route('http://config.test/**',async route=>{
+  const path=new URL(route.request().url()).pathname;
+  const json=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
+  if(path==='/')return route.fulfill({contentType:'text/html',body:html});
+  if(path==='/favicon.ico')return route.fulfill({status:204});
+  if(offline)return route.abort();
+  if(route.request().method()==='POST') {
+    posts.push({path,body:route.request().postData()});
+    sequence++;state='config_wait_ack';ack=0;actual=[];
+    return json({message:'queued'},202);
+  }
+  if(path==='/api/config-result')return json({sequence,id:1,opcode:76,state,ack,pending:state.startsWith('config_wait'),expected,actual});
+  if(path==='/api/status')return json({id:1,enabled:false,driverEnabled:false,online:true,canReady:true,state:'disabled',busState:'running',positionDeg:0,speedRpm:0,currentMa:0,lastAck:'received',fault:'none'});
+  if(path==='/api/limits')return json({maxSpeedRpm:3000,maxAccelRpmS:2400,maxCurrentMa:5000,maxAngleDeg:360000,maxMoveSeconds:60,experimentSeconds:10});
+  if(path==='/api/queue')return json({state:'idle',runId:0,step:0,total:0,iteration:0,repeat:1,line:0,raw:false});
+  if(path==='/api/trace')return json({uptimeMs:++traceSeq*1000,sequence:traceSeq,frames:[{seq:traceSeq,atMs:traceSeq*1000,dir:'RX',id:256,extended:true,remote:false,data:[0x35,0,0,0,0x6B]}]});
+  return json({});
+});
+try {
+  await page.goto('http://config.test/');
+  await page.getByText('设备在线',{exact:true}).waitFor();
+  await page.getByRole('tab',{name:'指令实验室',exact:true}).click();
+  await page.getByLabel('搜索指令名称或功能码').fill('4C');
+  await page.locator('.library__item').first().click();
+  await page.getByRole('button',{name:'发送指令',exact:true}).click();
+  const panel=page.getByRole('region',{name:'回零参数设置结果'});
+  await panel.getByText(/配置已提交/).waitFor();
+  assert.equal(posts.length,1);
+  state='config_wait_readback';ack=2;
+  await panel.getByText(/驱动器已接受/).waitFor();
+  state='config_verified';actual=[...expected];
+  await panel.getByText(/全部一致/).waitFor();
+  await page.waitForTimeout(1800);assert.match(await panel.innerText(),/全部一致/);
+  assert.equal(posts.length,1);assert.ok(traceSeq>=3);
+  offline=true;
+  await panel.getByText(/保留最后一次结果/).waitFor();
+  assert.match(await panel.innerText(),/全部一致/);
+  offline=false;sequence++;state='config_mismatch';actual=[...expected];actual[13]=61;
+  await panel.getByText(/读回参数与提交值不一致/).waitFor();
+  await panel.locator('summary').click();
+  assert.match(await panel.innerText(),/61 ms（不一致）/);
+  await mkdir(new URL('./qa/',import.meta.url),{recursive:true});
+  await page.screenshot({path:new URL('./qa/config-result-1280.png',import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1')});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  state='config_ack_timeout';actual=[];sequence++;
+  await panel.getByText(/结果未知，未自动重发/).waitFor();
+  assert.equal(posts.length,1);assert.deepEqual(errors,[]);
+  console.log('PASS config result: submit/ACK/readback, sticky during polling and disconnect, field mismatch, timeout, no auto-retry, desktop layout');
+} finally {await browser.close();}

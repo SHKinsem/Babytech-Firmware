@@ -1,5 +1,13 @@
 import { experimentWindowText } from './device-limits.js';
 import { expectedDurationMs } from './simulation.js';
+import { logStore } from './debug-log.js';
+
+// Diagnostic logging is observation only. Every call is wrapped so a logging
+// problem (denied storage, a throwing subscriber, an unexpected payload) can
+// never change a request's outcome or its returned body.
+function observe(action) {
+  try { return action(); } catch { return undefined; }
+}
 
 // One request helper for the whole device page.
 //
@@ -10,6 +18,11 @@ import { expectedDurationMs } from './simulation.js';
 //   and message 'request_timeout' / 'network_error' / 'request_cancelled'. Only
 //   this case may be described as "结果未知"; never retry automatically.
 export async function request(path, data, signal) {
+  const isPost = data !== undefined;
+  const startedAt = Date.now();
+  const requestId = isPost
+    ? observe(() => logStore.beginRequest({ method: 'POST', path, params: data }))
+    : null;
   const controller = new AbortController();
   let timedOut = false;
   const abort = () => controller.abort();
@@ -17,8 +30,8 @@ export async function request(path, data, signal) {
   const timer = setTimeout(() => { timedOut = true; abort(); }, 1800);
   try {
     const response = await fetch(path, {
-      method: data === undefined ? 'GET' : 'POST', cache: 'no-store',
-      body: data === undefined ? undefined : new URLSearchParams(data),
+      method: isPost ? 'POST' : 'GET', cache: 'no-store',
+      body: isPost ? new URLSearchParams(data) : undefined,
       signal: controller.signal,
     });
     let payload = null;
@@ -36,8 +49,10 @@ export async function request(path, data, signal) {
       error.status = response.status;
       throw error;
     }
+    observe(() => noteSuccess({ path, isPost, requestId, response, payload, startedAt }));
     return payload;
   } catch (cause) {
+    observe(() => noteFailure({ path, isPost, requestId, cause, timedOut, signal, startedAt }));
     if (cause?.status) throw cause;
     const error = new Error(
       signal?.aborted ? 'request_cancelled' : timedOut ? 'request_timeout' : 'network_error',
@@ -48,6 +63,49 @@ export async function request(path, data, signal) {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
   }
+}
+
+// A POST is one start/result/error triple in the log. A GET only ever produces a
+// line when it fails (first failure, then the recovery) or when the polled state
+// actually changed - the 300 ms status poll must not become log spam.
+function noteSuccess({ path, isPost, requestId, response, payload, startedAt }) {
+  const durationMs = Date.now() - startedAt;
+  if (isPost) {
+    logStore.finishRequest(requestId, { path, status: response.status, body: payload, durationMs });
+    return;
+  }
+  // The board log owns its own dedup, restart and gap handling.
+  if (path.startsWith('/api/logs')) return;
+  logStore.noteGet({ path, ok: true });
+  if (path.split('?')[0] === '/api/status') logStore.noteStatus(payload);
+  else if (path === '/api/queue') logStore.noteQueue(payload);
+  else if (path === '/api/config-result') logStore.noteConfig(payload);
+  else if (path === '/api/limits') logStore.noteLimits(payload);
+}
+
+function noteFailure({ path, isPost, requestId, cause, timedOut, signal, startedAt }) {
+  const durationMs = Date.now() - startedAt;
+  // A caller-side cancel (an effect cleanup) is intentional: it is not a result
+  // and must not appear as a failure.
+  if (signal?.aborted) return;
+  if (isPost) {
+    if (cause?.status) {
+      // The board answered with a refusal: that is a result, with the reason.
+      logStore.finishRequest(requestId, { path, status: cause.status, body: cause.payload, durationMs });
+      return;
+    }
+    logStore.failRequest(requestId, {
+      path, status: 0, durationMs, uncertain: true,
+      error: timedOut ? 'request_timeout' : 'network_error',
+    });
+    return;
+  }
+  if (path.startsWith('/api/logs')) return;   // handled by noteBoardLogResult
+  logStore.noteGet({
+    path, ok: false, status: cause?.status ?? 0,
+    error: cause?.status ? '' : (timedOut ? 'request_timeout' : 'network_error'),
+    uncertain: !cause?.status,
+  });
 }
 
 const MIN_CURRENT_MA = 100; // firmware constraintCurrentMa floor
@@ -369,7 +427,9 @@ export const queueStateLabels = {
 
 export const queueActionLabels = {enable:'使能',disable:'失能',move:'相对移动',home:'回零',torque:'限速力矩',velocity:'限流速度',stop:'停止',wait:'等待',hex:'逻辑帧直通',can:'CAN 帧直通',none:'—'};
 export function queueMessageText(message) {
-  return ({idle:'尚未执行',running:'正在执行',done:'已完成受监督的动作',raw_frames_submitted:'程序发送结束；原始帧不判断机械动作完成',frames_submitted:'程序发送结束；原始帧不判断机械动作完成',cancelled:'已取消后续步骤并请求停止',stopped:'已停止队列',uart_stop:'已由串口停止队列',home_no_motion:'驱动报告已在零点或限位触发，本次未运动'})[message] || errorLabels[message] || message;
+  // The queue only ever reports transmission: every "done" wording says the
+  // frames went out, never that the motor reached anything.
+  return ({home_wait_ack:'等待本次回零指令应答（9A）',home_wait_end:'已观察到正在回零，等待运行标志清除',home_wait_start_or_done:'指令已接收，尚未观察到回零开始或明确完成应答',home_wait_fresh_feedback:'已记录回零完成证据，等待完成后的新鲜位置和速度',home_wait_stationary:'已记录回零完成证据，速度尚未满足静止条件',home_confirming_stationary:'已记录回零完成证据，正在累计两次静止确认',automatic_queries_paused:'自动查询已暂停；仍接收回包并判断完成',waiting_home:'等待回零完成',waiting_position:'等待移动到位',waiting_feedback:'等待新鲜反馈',idle:'尚未执行',running:'正在按顺序发送',done:'发送结束',raw_frames_submitted:'发送结束（含原始帧，不判断机械动作）',frames_submitted:'发送结束（含原始帧，不判断机械动作）',cancelled:'已取消后续步骤并请求停止',stopped:'已停止队列',uart_stop:'已由串口停止队列',control_state_cleared:'已清除板端状态',home_no_motion:'驱动报告已在零点或限位触发，本次未运动'})[message] || errorLabels[message] || message;
 }
 
 /**
@@ -404,7 +464,7 @@ export function readQueueStatus(payload) {
 /** Progress line for the queue: step/iteration/line, never an optimistic done. */
 export function queueProgressText(status) {
   if (!status) return '尚未读取到队列状态';
-  const label = queueStateLabels[status.state] || status.state;
+  const label = status.state==='done' && status.raw ? '发送结束' : queueStateLabels[status.state] || status.state;
   const step = status.step > 0 ? `第 ${status.step}/${status.total || '?'} 步` : '尚未开始第一步';
   const iteration = status.repeat > 1 ? ` · 第 ${status.iteration}/${status.repeat} 轮` : '';
   const line = status.line > 0 ? ` · 源程序第 ${status.line} 行` : '';
@@ -449,6 +509,16 @@ export function queueConflictReason(bytes, { running = false, unknown = false } 
 }
 
 export const errorLabels = {
+  driver_disabled:'驱动器反馈已失能，运动已终止',
+  move_timeout:'在配置的单步时长内未确认到位，请查看失败时的目标与实际位置',
+  config_pending:'回零参数正在等待应答或读回核对，请等待本次配置结束',
+  config_rejected:'驱动器拒绝回零参数配置',
+  config_ack_timeout:'未收到 4C 应答，配置结果未知，后续步骤未执行',
+  config_readback_timeout:'配置已接受，但未收到完整的 22 读回，后续步骤未执行',
+  config_mismatch:'回零参数读回与提交值不一致，后续步骤未执行',
+  config_read_tx_failed:'参数读回请求发送失败',
+  config_cancelled:'参数核对已取消',
+  enable_ack_timeout:'未确认本次使能：需 F3 应答与新的 3A 实际状态',
   wifi_busy:'Wi-Fi 正忙，请稍后再试', busy:'设备忙，请先停止并关闭使能',
   not_enabled:'尚未收到使能确认', can_unavailable:'CAN 控制器不可用', can_tx_failed:'CAN 发送失败，检查接线与终端电阻',
   feedback_unavailable:'缺少新鲜位置／速度反馈', feedback_stale:'电机反馈中断', stop_pending:'等待真实静止反馈',
@@ -474,6 +544,9 @@ export const errorLabels = {
   direction_invalid:'方向只能是 0（CW）或 1（CCW）',
   motion_mode_invalid:'运动模式只能是 0（相对上一输入目标）／1（绝对坐标零点）／2（相对当前位置）',
   direct_sync_not_supported:'板端只监督立即执行的直通位置（FB/CB）；缓存待 FF 触发的方式未接入，可用队列的原始帧下发',
+  // 清除板端状态 (POST /api/control/reset)
+  control_state_cleared_stop_unconfirmed:'板端已清除内部状态，但停止发送未确认：不要假定电机已停止，请先看反馈，再显式重新使能',
+  control_reset_unavailable:'板端没有 /api/control/reset 接口（固件未更新）：该按钮需要较新的固件',
   // Homing parameter writes (0x4C) and homing supervision (0x9A).
   home_current_out_of_range:'碰撞检测电流超出板端当前电流策略，请查看「调试限制」',
   home_velocity_out_of_range:'回零速度超出协议上限 3000 RPM',

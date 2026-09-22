@@ -26,6 +26,7 @@ await page.route('http://limits.test/**',async route=>{
  }
  if(url.pathname==='/api/limits')return limitsOffline?route.abort():json(limits);
  if(url.pathname==='/api/status')return json({id:1,canReady:true,online:true,enabled:true,state:'idle',positionDeg:0,speedRpm:0,currentMa:0,driverEnabled:true,fault:'none'});
+ if(url.pathname==='/api/config-result')return json({sequence:0});
  if(url.pathname==='/api/queue')return json({state:'idle',runId:0,step:0,total:0,iteration:0,repeat:1,line:0,action:'',message:'',raw:false});
  if(url.pathname==='/api/trace')return json({uptimeMs:10000,sequence:seq,frames:[{seq,atMs:9990,dir:'RX',id:256,extended:true,data:[0x3a,3,0x6b]}]});
  return json({});

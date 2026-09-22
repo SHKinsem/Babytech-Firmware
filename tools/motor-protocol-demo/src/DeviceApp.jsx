@@ -4,18 +4,64 @@ import { CommandPanel } from './components/CommandPanel.jsx';
 import { LimitsPanel } from './components/LimitsPanel.jsx';
 import { ManualPanel } from './components/ManualPanel.jsx';
 import { QueuePanel } from './components/QueuePanel.jsx';
+import { ConfigResult } from './components/ConfigResult.jsx';
+import { DebugLogPanel } from './components/DebugLogPanel.jsx';
+import { logStore } from './debug-log.js';
 import { queueActionLabels, queueMessageText } from './device-api.js';
 import { TracePanel } from './components/TracePanel.jsx';
 import { WifiPanel } from './components/WifiPanel.jsx';
 import { ScaleWorkbench } from './components/ScaleWorkbench.jsx';
 import { GlyphInfo } from './components/glyphs.jsx';
-import { COMMAND_GROUPS, getCommandItem, encodeCommand, buildFrames, frameAnnotation, formatBytes, formatCanId, hexByte, parseLogicalHex, identifyCommandBytes, validateAddress } from './protocol.js';
+import { COMMAND_GROUPS, getCommandItem, getFields, encodeCommand, buildFrames, frameAnnotation, formatBytes, formatCanId, hexByte, parseLogicalHex, identifyCommandBytes, validateAddress } from './protocol.js';
 import { planManualMove, MANUAL_DEFAULTS } from './simulation.js';
 import { decodeCanReply } from './manual-reference.js';
 import { deviceDefaults, experimentWindowText, limitsEqual, limitsToManualLimits, readLimitsPayload } from './device-limits.js';
+import { readDrafts, writeDrafts, safeStorage, getForm, putForm, lastVariantFor, getManual, putManual, putSelection, pickFields } from './device-drafts.js';
 import { request, supportReason, directPositionBoardNote, isMotionOpcode, isLimitDependentOpcode, stateLabels, errorLabels, readQueueStatus, queueProgressText, homeStatusText, queueConflictReason } from './device-api.js';
 
 const EMPTY = {id:0, enabled:false, online:false, positionDeg:null, speedRpm:null, currentMa:null};
+
+// 常规试动 fields: drafts are kept per motor, and the values stay exactly as the
+// user typed them (including partial or invalid text).
+const MANUAL_KEYS = ['dir', 'angle', 'speed', 'accel', 'decel', 'current'];
+const MANUAL_FIELDS = {...MANUAL_DEFAULTS, angle:'10', speed:'10', current:'300'};
+
+// One short, visible reminder: these inputs are local drafts, not read-backs of
+// the board's confirmed parameters.
+const DRAFT_NOTE = '表单与 HEX 内容都是本机草稿：切换电机／指令、切换标签页或刷新页面都会保留，也永远不会被自动发送；它们不是板端已确认的参数、使能或执行状态。';
+
+// Board-side ownership reasons (statusJson control.blockers[].reason), shown next
+// to the motor id. Unknown reasons are printed as they arrive, never guessed at.
+const blockerLabels = {
+  config_pending:'配置核对中', move_active:'移动进行中', home_active:'回零进行中',
+  experiment_active:'试验进行中', enable_pending:'等待使能应答', stop_pending:'等待停止反馈',
+};
+
+const fieldKeys = (item, variantKey) => getFields(item, variantKey).map(field => field.key);
+const variantKeyOf = (item, key) =>
+  item?.variants?.some(variant => variant.key === key) ? key : (item?.variants?.[0]?.key ?? 'base');
+
+// The context a reload comes back to: the last valid motor, command and variant,
+// with whatever the user had typed for them. Values are never sent anywhere.
+function bootContext(drafts) {
+  const motorCheck = validateAddress(drafts.lastMotorId);
+  const motorText = motorCheck.ok ? String(motorCheck.value) : '1';
+  const motorId = String(validateAddress(motorText).value);
+  const item = getCommandItem(drafts.lastCommandId) ?? getCommandItem('enable');
+  const variantKey = variantKeyOf(item, drafts.lastVariantKey);
+  const stored = getForm(drafts, motorId, item.id, variantKey);
+  // Limits are not confirmed yet at boot, so defaults are not clamped here; a
+  // restored draft is never clamped at all.
+  const base = deviceDefaults(item, variantKey, null);
+  return {
+    motorText, motorId, commandId: item.id, variantKey,
+    values: stored?.values ? {...base, ...pickFields(stored.values, fieldKeys(item, variantKey))} : base,
+    mode: stored?.mode === 'raw' ? 'raw' : 'form',
+    raw: stored?.raw ?? '',
+    dirty: !!stored?.dirty,
+    manual: {...MANUAL_FIELDS, ...pickFields(getManual(drafts, motorId) ?? {}, MANUAL_KEYS)},
+  };
+}
 
 // Catalog notes are written for the offline simulator and promise local
 // simulation. The device page keeps only the manual-grounded sentences and
@@ -47,7 +93,7 @@ function formatClock(timestamp) {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
 }
 
-function DeviceFeedback({ status, connected, live, notice, lab, address, opcode, records, experiment, limitsReady, queue, queueRunning, queueStale, directNote }) {
+function DeviceFeedback({ status, connected, live, notice, lab, address, opcode, records, experiment, limitsReady, queue, queueRunning, queueStale, directNote, draftNote }) {
   // Latest decoded reply for the address and function code currently selected.
   // Read-only history: it never feeds the gate, the metrics or the enable state.
   const query = lab && live && Number.isInteger(opcode)
@@ -76,9 +122,25 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
     </> : null}
     <div className="divider"/><h3 className="section__title">控制状态</h3>
     <p>{connected ? stateLabels[status.state] || status.state || '读取中' : '设备离线，读数已清空'}</p>
+    {/* Fresh board-side ownership summary: who is holding the board, and why.
+        Ages are not shown here on purpose - they change on every poll and say
+        nothing the reason does not. */}
+    {connected && status.control ? <p>
+      板端占用：{status.control.busy ? '忙' : '空闲'}
+      {Array.isArray(status.control.blockers) && status.control.blockers.length
+        ? ` · ${status.control.blockers.slice(0, 4).map((entry) => `电机 ${entry.id}（${blockerLabels[entry.reason] || entry.reason}）`).join('、')}`
+        : ''}
+      {Number(status.control.blockerCount) > 4 ? ` · 等共 ${status.control.blockerCount} 项` : ''}
+      {status.control.fault && status.control.fault !== 'none' ? ` · 故障 ${errorLabels[status.control.fault] || status.control.fault}` : ''}
+    </p> : null}
     <p>CAN：{status.busState || '—'} · TX 错误 {status.txErrors ?? '—'}</p>
     <p>驱动实际使能：{status.driverEnabled == null ? '未知' : status.driverEnabled ? '开' : '关'}</p>
     <p>最近控制应答：{status.lastAck || '—'}</p>
+    {status.lastMoveFailure && <details><summary>上次运动失败现场（历史）</summary>
+      <p>目标 {metric(status.lastMoveFailure.targetDeg,'°')} · 实际 {metric(status.lastMoveFailure.positionDeg,'°')}</p>
+      <p>速度 {metric(status.lastMoveFailure.speedRpm,'RPM')} · 已确认使能 {status.lastMoveFailure.enabled?'开':'关'}</p>
+      <p>耗时 {status.lastMoveFailure.elapsedMs} ms / 期限 {status.lastMoveFailure.deadlineMs} ms</p>
+    </details>}
     {home ? <p>回零：{home}</p> : null}
     {status.fault && status.fault !== 'none' && <p className="device-error" role="alert">{errorLabels[status.fault] || status.fault}</p>}
     {queue ? <>
@@ -89,6 +151,7 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
       <p className="capabilities__note">队列由板端独立执行：浏览器断开后，板端仍继续执行已提交的队列。本页只显示板端返回的状态。{queueRunning ? '运行期间常规试动与配置已锁定；「全部停止」会先取消队列。' : ''}</p>
     </> : null}
     <div className="divider"/><h3 className="section__title">请求结果</h3><p className="device-notice" role="status">{notice || '尚未提交操作'}</p>
+    {draftNote ? <p className="capabilities__note">{draftNote}</p> : null}
     <p className="capabilities__note">只有收到 202 才表示指令已入队；超时或断线时请求结果未知，本页不会自动重发。使能及停止仍以真实应答／反馈确认，未知应答仅保留原始字节。</p>
     <div className="divider"/><h3 className="section__title">试验边界</h3><p className="capabilities__note">{experiment ? `速度／力矩试验：${experiment}；反馈超时提前停止。` : '速度／力矩试验的时长由板端策略决定（未读取到限制）。'}回零（9A）已接入板端监督：等待应答、3B 回零标志与新鲜静止反馈；直通位置（FB/CB）也已接入：保留原功能码与字节，等待匹配的 FB/CB 应答、驱动器目标位置读值（0x33，手册 p70）与两对新鲜静止反馈；同步缓存与 FD 仍只可预览。参数写入需要驱动关闭使能且静止。</p>
     <p className="capabilities__note">{limitsReady ? '运动数值按「调试限制」中已确认的板端策略校验。' : '尚未确认板端限制（/api/limits）：运动指令保持禁用，读取、停止与失能不受影响。'}</p>
@@ -106,15 +169,24 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
 
 export function DeviceApp() {
   useEffect(() => {document.body.classList.add('device-body');return () => document.body.classList.remove('device-body');},[]);
-  const [draft,setDraft] = useState('1'), [tab,setTab] = useState('manual');
+  // Local drafts (browser storage). Read once, before the first render, so the
+  // first paint already shows the restored form: no effect can then save a
+  // freshly defaulted form over a restored draft.
+  const draftsRef = useRef(null);
+  if (draftsRef.current === null) draftsRef.current = readDrafts(safeStorage());
+  const bootRef = useRef(null);
+  if (bootRef.current === null) bootRef.current = bootContext(draftsRef.current);
+  const boot = bootRef.current;
+  const [draft,setDraft] = useState(boot.motorText), [tab,setTab] = useState('manual');
   const check = validateAddress(draft), address = check.ok ? check.value : 0;
   const [status,setStatus] = useState(EMPTY), [connected,setConnected] = useState(false), [notice,setNotice] = useState('');
   const [busy,setBusy] = useState(false), busyRef = useRef(false);
-  const [selected,setSelected] = useState('enable'), [variant,setVariant] = useState('base');
-  const [values,setValues] = useState(() => deviceDefaults(getCommandItem('enable'),'base',null));
-  const [mode,setMode] = useState('form'), [raw,setRaw] = useState(''), [dirty,setDirty] = useState(false);
+  const [selected,setSelected] = useState(boot.commandId), [variant,setVariant] = useState(boot.variantKey);
+  const [values,setValues] = useState(boot.values);
+  const [mode,setMode] = useState(boot.mode), [raw,setRaw] = useState(boot.raw), [dirty,setDirty] = useState(boot.dirty);
   const [query,setQuery] = useState(''), [groups,setGroups] = useState(() => Object.fromEntries(COMMAND_GROUPS.map(g => [g.id,!!g.open])));
-  const [manual,setManual] = useState({...MANUAL_DEFAULTS, angle:'10',speed:'10',current:'300'});
+  const [manual,setManual] = useState(boot.manual);
+  const [pollingBusy, setPollingBusy] = useState(false);
   const [records,setRecords] = useState([]), [filter,setFilter] = useState('all'), [traceQuery,setTraceQuery] = useState(''), [frozen,setFrozen] = useState(null);
   // Board motion policy. `limits` stays null until /api/limits answered: the
   // page never assumes 120/240 were loaded, it keeps motion disabled instead.
@@ -131,6 +203,13 @@ export function DeviceApp() {
   const [queue,setQueue] = useState(null), [queueState,setQueueState] = useState('loading'), [queueError,setQueueError] = useState(null);
   const [queueLock,setQueueLock] = useState({pending:false,unconfirmed:false}), [queueNonce,setQueueNonce] = useState(0);
   const idleStreakRef = useRef(0);
+  // 清除板端状态 (POST /api/control/reset). Not a re-enable flow: it takes the
+  // board back to a clean volatile state and the operator must enable again
+  // explicitly. `resetGeneration` invalidates answers of requests that were
+  // already in flight, so a late submission cannot overwrite the reset notice.
+  const [resetPending,setResetPending] = useState(false);
+  const resetPendingRef = useRef(false);
+  const resetGenerationRef = useRef(0);
   // Bumped by every board answer to a start/cancel request. A status read that
   // was already in flight when that answer landed describes the board from
   // before the mutation, so it is discarded instead of overwriting the newer
@@ -144,6 +223,12 @@ export function DeviceApp() {
   const queueBusy = queueRunning || queueLock.pending || queueLock.unconfirmed;
   const queueUnknown = queueLock.unconfirmed && !queueRunning;
   const targetRef = useRef(address); targetRef.current = address;
+  // The lab form the inputs currently belong to, and the motor whose trial-field
+  // draft is being edited. Edits are stored under exactly these keys.
+  const contextRef = useRef({motorId:boot.motorId, commandId:boot.commandId, variantKey:boot.variantKey});
+  const activeMotorRef = useRef(Number(boot.motorId));
+  const storageRef = useRef(undefined);
+  if (storageRef.current === undefined) storageRef.current = safeStorage();
   const limitsReady = limitsState === 'ready' && limits !== null;
   const experiment = limitsReady ? experimentWindowText(limits) : null;
   const item = cleanItem(getCommandItem(selected));
@@ -186,8 +271,9 @@ export function DeviceApp() {
     async function poll() {
       try {
         if (!address) return;
+        const generation = resetGenerationRef.current;
         const next = await request(`/api/status?id=${address}`,undefined,controller.signal);
-        if (!disposed && targetRef.current === address) {setStatus(next);setConnected(true);}
+        if (!disposed && targetRef.current === address && !resetPendingRef.current && generation === resetGenerationRef.current) {setStatus(next);setConnected(true);}
       } catch { if (!disposed) {setConnected(false);setStatus({...EMPTY,id:address});} }
       if (!disposed) timer = setTimeout(poll,300);
     }
@@ -237,7 +323,7 @@ export function DeviceApp() {
       try {
         const payload = await request('/api/queue',undefined,controller.signal);
         if (disposed) return;
-        if (queueMutationRef.current === epoch) {
+        if (!resetPendingRef.current && queueMutationRef.current === epoch) {
           const parsed = readQueueStatus(payload);
           if (parsed.ok) next = parsed.status;
           else failed = parsed.error;
@@ -287,11 +373,15 @@ export function DeviceApp() {
           // The board restarted: drop every retained record so decoded replies
           // and diagnostics from the previous run cannot survive the reboot.
           setRecords([]); setFrozen(prev => prev ? [] : null); setTraceWarning('');
+          logStore.noteTraceRestart();
         }
         uptime = data.uptimeMs;
         const incoming = data.frames.filter(f => f.seq > seq);
         const lost = incoming.length && seq && incoming[0].seq > seq+1;
-        if (lost) setTraceWarning('部分总线记录已被环形缓冲区覆盖；以下仅为保留记录，较早的收发与解析已丢失。');
+        if (lost) {
+          setTraceWarning('部分总线记录已被环形缓冲区覆盖；以下仅为保留记录，较早的收发与解析已丢失。');
+          logStore.noteTraceGap('总线记录缺口：较早的帧已被板端环形缓冲覆盖，无法补齐');
+        }
         const rows = incoming.map(f => {
           // Only the pure manual decoder decides what a reply means; TX frames
           // and anything the manual does not describe stay undecoded.
@@ -300,29 +390,66 @@ export function DeviceApp() {
           return {id:`${generation}-${f.seq}`,at:Date.now()-(data.uptimeMs-f.atMs),dir:f.dir,canId:f.id,dlc:f.data.length,data:f.data,decoded:decoded || null,note:decoded ? `${base} · ${decoded.title}：${oneLine(decoded.text)}` : base};
         });
         seq=data.sequence;
-        if (rows.length) setRecords(prev => [...prev,...rows].slice(-400));
+        if (rows.length) {
+          setRecords(prev => [...prev,...rows].slice(-400));
+          // The diagnostic log reuses these already-accepted rows instead of
+          // polling /api/trace a second time. Only notable frames are kept.
+          logStore.recordTraceRows(rows);
+        }
       } catch { /* Status poll owns connection state. Never fabricate RX. */ }
       if (!disposed) timer=setTimeout(poll,500);
     }
     poll(); return () => {disposed=true;controller.abort();clearTimeout(timer);};
   },[]);
 
+  // Board-side diagnostic log (read-only RAM ring). Polled regardless of the
+  // active tab so a fault that happened on another tab is still captured; a
+  // missing endpoint slows the poll down instead of pretending the board is
+  // offline, and it is reported once by the log store itself.
+  const [boardLogNonce,setBoardLogNonce] = useState(0);
+  useEffect(() => {
+    let disposed = false, timer = null;
+    const controller = new AbortController();
+    async function poll() {
+      let interval = 2000;
+      try {
+        const payload = await request('/api/logs',undefined,controller.signal);
+        if (!disposed) {
+          // An endpoint that answers with something that is not this contract is
+          // treated like a missing one: one entry, then a slower poll.
+          const result = logStore.mergeBoardLog(payload);
+          if (result && result.accepted === false) interval = 5000;
+        }
+      } catch (e) {
+        if (!disposed) {
+          logStore.noteBoardLogResult({ok:false,status:e.status ?? 0,error:e.message});
+          interval = e.status === 404 ? 30000 : 5000;
+        }
+      }
+      if (!disposed) timer = setTimeout(poll,interval);
+    }
+    poll(); return () => {disposed=true;controller.abort();clearTimeout(timer);};
+  },[boardLogNonce]);
+
   async function submit(path,data,{stop=false}={}) {
-    if (!stop && busyRef.current) return;
+    if (!stop && (busyRef.current || resetPendingRef.current)) return;
     if (!stop) {busyRef.current=true;setBusy(true);}
     const id = data.id ?? address;
     const target = stop && path.endsWith('stop-all') ? '全部' : id;
+    // An answer that arrives after a reset describes the state from before it.
+    const generation = resetGenerationRef.current;
+    const announce = (text) => { if (resetGenerationRef.current === generation) setNotice(text); };
     try {
       const result = await request(path,data);
       // The trial window is whatever the board is configured with — never a
       // hardcoded number in the page.
       const queued = result?.message === 'queued_experiment' || result?.message === 'queued_auto_stop_5s';
-      setNotice(`电机 ${target}：${queued
+      announce(`电机 ${target}：${queued
         ? `已入队，${experiment || '时长由板端策略决定'}`
         : '请求已入队，等待真实反馈'}`);
     } catch (e) {
       const detail = errorLabels[e.message] || e.message;
-      setNotice(e.uncertain
+      announce(e.uncertain
         ? `${detail}：请求结果未知，超时或断线不代表设备未执行；本页不会自动重发。`
         : `板端拒绝：${detail}（HTTP ${e.status}）`);
     }
@@ -330,6 +457,67 @@ export function DeviceApp() {
     // way the board can guarantee no interleaving), so the queue status is
     // re-read right away instead of waiting for the next poll.
     finally {if (!stop) {busyRef.current=false;setBusy(false);} else setQueueNonce(n=>n+1);}
+  }
+
+  // One immediate status read for paths that changed the board outside the poll
+  // (a reset). It never touches `connected`: the poll owns that.
+  async function refreshStatus() {
+    if (!address) return;
+    try {
+      const next = await request(`/api/status?id=${address}`);
+      if (targetRef.current === address) { setStatus(next); setConnected(true); }
+    } catch { /* the status poll owns connection state */ }
+  }
+
+  // 清除板端状态: cancels the queue, asks the board to stop once and clears its
+  // volatile ownership. It is not a re-enable flow and it proves nothing about
+  // the shaft: the page only reports what the board answered and then re-reads
+  // the real status, so no confirmation is invented locally.
+  async function resetControlState() {
+    if (resetPendingRef.current) return;      // one at a time; 全部停止 stays usable
+    resetPendingRef.current = true;
+    setResetPending(true);
+    // Every answer already on the wire describes the state before this reset.
+    resetGenerationRef.current += 1;
+    queueMutationRef.current += 1;
+    try {
+      const payload = await request('/api/control/reset',{});
+      if (payload?.stateCleared === true) {
+        // The board cleared its own bookkeeping. Local ownership is dropped and
+        // the state is re-read instead of assumed.
+        setQueueLock({pending:false,unconfirmed:false});
+        idleStreakRef.current = 0;
+        setNotice(payload.stopSent === true
+          ? '已清除板端内部状态；停止帧已发送（发送成功不等于电机已物理停止）。需要时请显式重新使能。'
+          : `板端已清除内部状态，但停止发送未确认：${errorLabels.control_state_cleared_stop_unconfirmed}`);
+      } else {
+        setNotice('板端返回了未预期的内容，未清除本地状态；请重新读取状态后再操作。');
+      }
+      setQueueNonce(n=>n+1);
+      refreshStatus();
+    } catch (e) {
+      if (e.status === 404) {
+        setNotice(errorLabels.control_reset_unavailable);
+      } else if (e.uncertain) {
+        // Unknown means unknown: the local view is not cleared on a guess.
+        setNotice(`${errorLabels[e.message] || e.message}：清除结果未知，本页不会自动重试；请重新读取状态判断。`);
+      } else if (e.payload?.stateCleared === true) {
+        // The board did clear its state; the stop is what is unconfirmed.
+        setQueueLock({pending:false,unconfirmed:false});
+        setNotice(`板端：${errorLabels[e.message] || errorLabels.control_state_cleared_stop_unconfirmed}（HTTP ${e.status}）`);
+        setQueueNonce(n=>n+1);
+        refreshStatus();
+      } else {
+        setNotice(`板端拒绝：${errorLabels[e.message] || e.message}（HTTP ${e.status}）`);
+      }
+    } finally {
+      queueMutationRef.current += 1;
+      resetGenerationRef.current += 1;
+      resetPendingRef.current = false;
+      setResetPending(false);
+      setQueueNonce(n=>n+1);
+      refreshStatus();
+    }
   }
 
   // The board answers POST /api/limits with the complete saved set; only that
@@ -364,7 +552,72 @@ export function DeviceApp() {
     } finally {setLimitsSaving(false);}
   }
 
-  function choose(id) {const next=getCommandItem(id);setSelected(id);setVariant(next.variants[0].key);setValues(deviceDefaults(next,next.variants[0].key,limitsReady?limits:null));setDirty(false);setMode('form');}
+  // Every edit is written straight away, so a reload never loses it. Context
+  // switches only READ: they save the incoming selection, never the outgoing
+  // form, which is what keeps a restored draft from being overwritten by the
+  // defaults of the form that is being left behind.
+  function persist(next) {
+    draftsRef.current = next;
+    writeDrafts(storageRef.current, next);
+  }
+  function saveForm(patch, ctx = contextRef.current) {
+    persist(putForm(draftsRef.current, ctx.motorId, ctx.commandId, ctx.variantKey, patch));
+  }
+  function saveManual(next) {
+    persist(putManual(draftsRef.current, String(activeMotorRef.current), next));
+  }
+
+  // Restores the draft of one motor+command+variant. Defaults are used only for
+  // a form that was never edited; a restored draft is never clamped, it is
+  // validated against the confirmed limits by the gate like a typed value.
+  function applyContext(motorId, commandId, wantedVariant = null) {
+    const item = getCommandItem(commandId) ?? getCommandItem('enable');
+    const remembered = lastVariantFor(draftsRef.current, motorId, item.id);
+    const variantKey = variantKeyOf(item, wantedVariant ?? remembered);
+    const stored = getForm(draftsRef.current, motorId, item.id, variantKey);
+    const base = deviceDefaults(item, variantKey, limitsReady ? limits : null);
+    contextRef.current = {motorId:String(motorId), commandId:item.id, variantKey};
+    setSelected(item.id);
+    setVariant(variantKey);
+    setValues(stored?.values ? {...base, ...pickFields(stored.values, fieldKeys(item, variantKey))} : base);
+    setMode(stored?.mode === 'raw' ? 'raw' : 'form');
+    setRaw(stored?.raw ?? '');
+    setDirty(!!stored?.dirty);
+    // Selecting marks this key as the most recently used one, so coming back
+    // later returns to this command and variant. Nothing is sent.
+    persist(putSelection(
+      putForm(draftsRef.current, motorId, item.id, variantKey, {}),
+      {motorId:String(motorId), commandId:item.id, variantKey},
+    ));
+  }
+
+  function choose(id) { applyContext(activeMotorRef.current, id); }
+  function changeVariant(key) { applyContext(activeMotorRef.current, selected, key); }
+
+  // The CAN ID field keeps whatever is typed, but only a VALID address switches
+  // the draft context: a partial or out-of-range intermediate never overwrites a
+  // motor's drafts, and the inactive address still blocks sending as before.
+  function changeMotor(text) {
+    setDraft(text);
+    const next = validateAddress(text);
+    if (!next.ok) return;
+    if (next.value === activeMotorRef.current) return;
+    activeMotorRef.current = next.value;
+    setManual({...MANUAL_FIELDS, ...pickFields(getManual(draftsRef.current, next.value) ?? {}, MANUAL_KEYS)});
+    applyContext(next.value, selected);
+  }
+
+  function changeEditorMode(next) {
+    if (next === mode) return;
+    // The mode is remembered per key; the HEX text and its "edited" flag are kept
+    // as they are, so switching to the form and back never destroys an unsent HEX
+    // edit. The explicit reset stays on the existing 「恢复默认」 button.
+    setMode(next);
+    saveForm({mode:next});
+  }
+
+  function editValues(next) { setValues(next); saveForm({values:next}); }
+  function editManual(next) { setManual(next); saveManual(next); }
   async function copy(text) {
     try {
       if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
@@ -372,11 +625,42 @@ export function DeviceApp() {
       setNotice('已复制');
     } catch {setNotice('复制失败，请手动选择报文。');}
   }
+  // The log tab subscribes to the store only while it is visible: the history
+  // keeps collecting either way, and the rest of the page is not re-rendered for
+  // every observed frame. Restoring history never feeds the controls.
+  const [logSnapshot,setLogSnapshot] = useState(() => logStore.snapshot());
+  useEffect(() => {
+    setLogSnapshot(logStore.snapshot());
+    if (tab !== 'log') return undefined;
+    return logStore.subscribe(() => setLogSnapshot(logStore.snapshot()));
+  },[tab]);
+  const logContext = {
+    origin: typeof location !== 'undefined' ? location.origin : '',
+    boardId: logSnapshot.bootId,
+    motorId: address || null,
+    // The confirmed set is preferred; what the polls actually observed is the
+    // fallback, so an export still describes the board while offline.
+    limits: limitsReady ? limits : logSnapshot.limits,
+    motor: {...logSnapshot.status, id: address || null},
+    queue: logSnapshot.queue,
+    config: logSnapshot.config,
+  };
   const manualLimits=limitsReady ? limitsToManualLimits(limits) : undefined;
   const prediction=planManualMove(manual,manualLimits);
   const moveEncoded=prediction.ok ? encodeCommand({item:getCommandItem('position'),variantKey:'limit',values:prediction.plan,address:address || 1}) : {bytes:[],labels:[]};
   const moveFrames=buildFrames(moveEncoded.bytes || []);
   const manualGate=!address ? check.error : !connected ? '等待设备连接' : !current.canReady ? 'CAN 控制器不可用' : queueBusy ? (queueRunning ? '板端队列正在运行：常规试动已锁定，请先「取消队列」或使用「全部停止」' : '队列提交结果未知：请先「取消队列」核对状态，再试动') : busy ? '等待请求返回' : !limitsReady ? '未读取到板端限制（/api/limits）：常规试动已禁用' : !prediction.ok ? Object.values(prediction.errors)[0] : !current.enabled ? '请先发送使能，并等待确认' : !current.online ? '等待新鲜电机反馈' : current.fault && current.fault !== 'none' ? '故障未清除，请停止后重新使能' : current.activeId || current.state === 'moving' || current.state === 'homing' || current.state === 'experiment_running' || current.state === 'stop_requested' ? '电机忙，请等待停止' : null;
+  const pollingPaused = status.autoQueriesEnabled === false;
+  async function togglePolling() {
+    if (pollingBusy) return;
+    setPollingBusy(true);
+    try {
+      const result = await request('/api/polling', {enabled: pollingPaused ? 1 : 0});
+      if (typeof result.autoQueriesEnabled !== 'boolean') throw new Error('板端未返回轮询状态');
+      setStatus(previous => ({...previous, autoQueriesEnabled: result.autoQueriesEnabled}));
+    } catch (error) { setNotice(`设置自动查询失败：${error.message}，请刷新确认板端状态`); }
+    finally { setPollingBusy(false); }
+  }
   const shown=(frozen ?? records).filter(r => (filter==='all'||r.dir===filter) && `${formatBytes(r.data)} ${formatCanId(r.canId)} ${r.note}`.toLowerCase().includes(traceQuery.toLowerCase()));
   // Configuration pages keep their panels; the banner says why a save would be
   // refused instead of letting the board answer with a lost-looking error.
@@ -384,14 +668,17 @@ export function DeviceApp() {
     ? '板端队列正在运行：板端会拒绝限制／Wi-Fi 等配置改动，请先「取消队列」或使用「全部停止」。'
     : '队列提交结果未知：配置改动可能被板端拒绝，请先「取消队列」核对状态。'}</span></p> : null;
 
+  const renderGeneration = resetGenerationRef.current;
   return <div className="app device-app">
     <header className="toolbar"><div className="toolbar__brand"><span className="toolbar__logo">Babytech</span><span className="toolbar__divider">/</span><h1 className="toolbar__title">电机协议工作台</h1></div>
-      <div className="toolbar__right"><span className="chip chip--soft">实机 · X 协议</span><label className="toolbar__field">CAN ID <input aria-label="CAN ID" className="input input--mono toolbar__address" value={draft} onChange={e=>setDraft(e.target.value)} inputMode="numeric" aria-invalid={!check.ok}/></label><span>CAN 500 kbit/s</span><span className={`chip ${connected?'chip--ok':'chip--muted'}`}>{connected?'设备在线':'设备未连接'}</span><button className="button button--danger" onClick={()=>submit('/api/stop-all',{}, {stop:true})}>全部停止</button></div></header>
-    <nav className="tabs" role="tablist" aria-label="工作模式">{[['manual','常规试动'],['queue','编排队列'],['scale','称重传感器'],['lab','指令实验室'],['limits','调试限制'],['wifi','Wi-Fi 设置']].map(([id,label])=><button key={id} role="tab" aria-selected={tab===id} className={`tabs__item${tab===id?' is-active':''}`} onClick={()=>setTab(id)}>{label}</button>)}<span className="device-network-note">板端真实接口 · 不自动重发操作</span></nav>
-    {tab==='queue' ? <QueuePanel connected={connected} limits={limits} limitsReady={limitsReady}
+      <div className="toolbar__right"><span className="chip chip--soft">实机 · X 协议</span><label className="toolbar__field">CAN ID <input aria-label="CAN ID" className="input input--mono toolbar__address" value={draft} onChange={e=>changeMotor(e.target.value)} inputMode="numeric" aria-invalid={!check.ok}/></label><span>CAN 500 kbit/s</span><span className={`chip ${connected?'chip--ok':'chip--muted'}`}>{connected?'设备在线':'设备未连接'}</span><button type="button" className="button button--outline" disabled={resetPending} title="取消编排队列并尝试停止一次，然后清除板端易失的忙／故障／应答状态；不改配置、不改草稿、不重启。停止帧发送成功也不代表电机已物理停止，之后需要显式重新使能。" onClick={resetControlState}>{resetPending ? '正在清除…' : '清除板端状态'}</button><button className="button button--danger" onClick={()=>submit('/api/stop-all',{}, {stop:true})}>全部停止</button></div></header>
+    <nav className="tabs" role="tablist" aria-label="工作模式">{[['manual','常规试动'],['queue','编排队列'],['scale','称重传感器'],['lab','指令实验室'],['limits','调试限制'],['log','调试日志'],['wifi','Wi-Fi 设置']].map(([id,label])=><button key={id} role="tab" aria-selected={tab===id} className={`tabs__item${tab===id?' is-active':''}`} onClick={()=>setTab(id)}>{label}</button>)}<span className="device-network-note">板端真实接口 · 不自动重发操作</span></nav>
+    <ConfigResult/>
+    {tab==='queue' ? <QueuePanel connected={connected && !resetPending} limits={limits} limitsReady={limitsReady}
       queue={queue} queueState={queueState} queueError={queueError} queueUnknown={queueUnknown}
-      onQueueBusy={setQueueLock}
+      onQueueBusy={next=>{if(renderGeneration===resetGenerationRef.current) setQueueLock(next);}}
       onQueueStatus={next=>{
+        if(renderGeneration!==resetGenerationRef.current) return;
         // A start/cancel answer makes any status read that is still on the wire
         // obsolete: bump the counter so the poll drops it instead of letting an
         // older idle/running state overwrite this one.
@@ -400,18 +687,23 @@ export function DeviceApp() {
         setQueue(next);setQueueState('ready');setQueueError(null);
       }}
       onRefreshQueue={()=>setQueueNonce(n=>n+1)}/>
-      : tab==='scale' ? <ScaleWorkbench/> : tab==='wifi' ? <div className="device-tab-fill">{queueBanner}<WifiPanel notify={setNotice}/></div> : tab==='limits' ? <div className="device-tab-fill">{queueBanner}<LimitsPanel
+      : tab==='scale' ? <ScaleWorkbench/> : tab==='log' ? <DebugLogPanel
+        store={logStore} snapshot={logSnapshot} context={logContext}
+        onCopy={copy} onClear={()=>{logStore.clear();setLogSnapshot(logStore.snapshot());}}
+        onRefresh={()=>setBoardLogNonce(n=>n+1)}/>
+      : tab==='wifi' ? <div className="device-tab-fill">{queueBanner}<WifiPanel notify={setNotice}/></div> : tab==='limits' ? <div className="device-tab-fill">{queueBanner}<LimitsPanel
       limits={limits} state={limitsState} loadError={limitsError} connected={connected}
       saving={limitsSaving} saveError={limitsSaveError} saveNotice={limitsSaveNotice}
       onSave={saveLimits} onReload={()=>{setLimitsState('loading');setLimitsError(null);setLimitsNonce(n=>n+1);}} onDraftEdit={()=>{setLimitsSaveError(null);setLimitsSaveNotice(null);}}/></div> : <main className={`workspace workspace--${tab}`}>
       {tab==='lab' ? <><CommandLibrary query={query} onQueryChange={setQuery} openGroups={groups} onToggleGroup={id=>setGroups(g=>({...g,[id]:!g[id]}))} selectedId={selected} onSelect={choose}/>
-      <CommandPanel device item={item} variantKey={variant} onVariantChange={key=>{setVariant(key);setValues(deviceDefaults(item,key,limitsReady?limits:null));setDirty(false);}} values={values} onValueChange={(key,value)=>setValues(v=>({...v,[key]:value}))} editorMode={mode} onEditorModeChange={m=>{setMode(m);setRaw(formatBytes(form.bytes || []));setDirty(false);}} rawText={dirty?raw:formatBytes(form.bytes || [])} onRawTextChange={text=>{setRaw(text);setDirty(true);}} onRawTextReplace={text=>{setRaw(text);setDirty(true);}} rawDirty={dirty} onResetRaw={()=>setDirty(false)} identifiedItem={model.identified?model.item:null} model={model} frames={frames} annotations={annotations} address={address || 1} addressError={check.ok?null:check.error} gateReason={gate} onSend={()=>{if(!gate)submit('/api/command',{hex:formatBytes(model.bytes).replaceAll(' ','')});}} onCopy={copy}/></> : <ManualPanel device values={manual} errors={prediction.errors} onChange={(key,value)=>setManual(v=>({...v,[key]:value}))} motor={{enabled:current.enabled,positionTenths:current.positionDeg==null?null:current.positionDeg*10}} address={address || 1} prediction={prediction} limits={manualLimits} limitsConfirmed={limitsReady} bytes={moveEncoded.bytes || []} frames={moveFrames} annotations={moveFrames.map(f=>frameAnnotation(moveEncoded.bytes,moveEncoded.labels,f))} gateReason={manualGate} onSend={()=>{if(!manualGate)submit('/api/move',{id:address,angle:Number(manual.angle)*(Number(manual.dir)===1?-1:1),speed:manual.speed,accel:manual.accel,decel:manual.decel,current:manual.current});}} onStop={()=>{if(address)submit('/api/stop',{id:address},{stop:true});}} onCopy={copy} onGoToEnable={()=>{setTab('lab');choose('enable');}}/>}
-      <DeviceFeedback status={current} connected={connected} live={connected && status.id === address} notice={notice} lab={tab==='lab'} address={address} opcode={selectedOpcode} records={records} experiment={experiment} limitsReady={limitsReady} queue={queue} queueRunning={queueRunning} queueStale={queueStale} directNote={tab==='lab' ? directPositionBoardNote(model.bytes) : null}/>
+      <CommandPanel device item={item} variantKey={variant} onVariantChange={changeVariant} values={values} onValueChange={(key,value)=>editValues({...values,[key]:value})} editorMode={mode} onEditorModeChange={changeEditorMode} rawText={dirty?raw:formatBytes(form.bytes || [])} onRawTextChange={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} onRawTextReplace={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} rawDirty={dirty} onResetRaw={()=>{setDirty(false);saveForm({dirty:false});}} identifiedItem={model.identified?model.item:null} model={model} frames={frames} annotations={annotations} address={address || 1} addressError={check.ok?null:check.error} gateReason={gate} onSend={()=>{if(!gate)submit('/api/command',{hex:formatBytes(model.bytes).replaceAll(' ','')});}} onCopy={copy}/></> : <ManualPanel device values={manual} errors={prediction.errors} onChange={(key,value)=>editManual({...manual,[key]:value})} motor={{enabled:current.enabled,positionTenths:current.positionDeg==null?null:current.positionDeg*10}} address={address || 1} prediction={prediction} limits={manualLimits} limitsConfirmed={limitsReady} bytes={moveEncoded.bytes || []} frames={moveFrames} annotations={moveFrames.map(f=>frameAnnotation(moveEncoded.bytes,moveEncoded.labels,f))} gateReason={manualGate} onSend={()=>{if(!manualGate)submit('/api/move',{id:address,angle:Number(manual.angle)*(Number(manual.dir)===1?-1:1),speed:manual.speed,accel:manual.accel,decel:manual.decel,current:manual.current});}} onStop={()=>{if(address)submit('/api/stop',{id:address},{stop:true});}} onCopy={copy} onGoToEnable={()=>{setTab('lab');choose('enable');}}/>}
+      <DeviceFeedback status={current} connected={connected} live={connected && status.id === address} notice={notice} lab={tab==='lab'} address={address} opcode={selectedOpcode} records={records} experiment={experiment} limitsReady={limitsReady} queue={queue} queueRunning={queueRunning} queueStale={queueStale} directNote={tab==='lab' ? directPositionBoardNote(model.bytes) : null} draftNote={tab==='lab'||tab==='manual' ? DRAFT_NOTE : null}/>
     </main>}
     {tab!=='scale' && <div className="device-trace">
+      {pollingPaused && <p className="device-trace-warning" role="status">板端自动查询已暂停；接收、记录和手动查询继续。await 可能等待新的完成反馈，恢复查询后继续判断。</p>}
       {traceWarning ? <p className="device-trace-warning" role="status"><GlyphInfo /><span>{traceWarning}</span><button type="button" className="link-button" onClick={()=>setTraceWarning('')}>知道了</button></p> : null}
-      <TracePanel device records={shown} totalCount={records.length} hiddenCount={0} filter={filter} onFilterChange={setFilter} query={traceQuery} onQueryChange={setTraceQuery} paused={frozen!==null} onTogglePause={()=>setFrozen(frozen?null:[...records])} onClear={()=>{setRecords([]);if(frozen)setFrozen([]);setTraceWarning('');}} onCopy={copy}/>
+      <TracePanel device pollingPaused={pollingPaused} pollingBusy={pollingBusy} onTogglePolling={togglePolling} records={shown} totalCount={records.length} hiddenCount={0} filter={filter} onFilterChange={setFilter} query={traceQuery} onQueryChange={setTraceQuery} paused={frozen!==null} onTogglePause={()=>setFrozen(frozen?null:[...records])} onClear={()=>{setRecords([]);if(frozen)setFrozen([]);setTraceWarning('');}} onCopy={copy}/>
     </div>}
-    {tab==='wifi' && notice && <div className="toast" role="status">{notice}</div>}
+    {!['manual','lab'].includes(tab) && notice && <div className="toast" role="status">{notice}</div>}
   </div>;
 }

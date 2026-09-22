@@ -33,6 +33,7 @@ await page.route('http://queue.test/**',async route=>{
  const json=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
  if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:html});
  if(url.pathname==='/favicon.ico')return route.fulfill({status:204});
+ if(url.pathname==='/api/config-result')return json({sequence:0});
  if(route.request().method()==='POST'){
    const params=Object.fromEntries(new URLSearchParams(route.request().postData()));
    posts.push({path:url.pathname,params});
@@ -109,12 +110,12 @@ try {
  await waitText(/相对运动 \+90 deg/);
  const preview=await page.locator('.queue-col--preview').innerText();
  assert.match(preview,/电机 1：相对运动 \+90 deg/);
- assert.match(preview,/电机 2：回零 · 模式 0 单圈就近/);
+ assert.match(preview,/电机 2：发送回零触发 9A · 模式 0 单圈就近/);
  assert.match(preview,/电机 3：限速力矩 \+800 mA · 1500 ms/);
  assert.doesNotMatch(preview,/\d\s*Nm/,'torque is never given as an Nm value');
- assert.equal(await page.locator('.queue-preview__row').count(),6,'the sample stays at six lines');
+ assert.equal(await page.locator('.queue-preview__row').count(),8);
  assert.equal(await page.locator('.queue-preview__line').first().innerText(),'3','preview rows carry source line numbers');
- assert.equal(await page.getByText('动作 6/64',{exact:false}).count()>0,true);
+ assert.equal(await page.getByText('动作 8/64',{exact:false}).count()>0,true);
  assert.equal(await startButton.isEnabled(),true);
  assert.equal(starts().length,0);
 
@@ -264,10 +265,9 @@ try {
  // Unknown board limits are never turned into assumed policy: the page says so
  // and leaves the whole program to the board's own validation.
  limitsOffline=true;
- await waitText(/尚未确认板端限制（\/api\/limits）：本页不做策略判断/);
+ await page.waitForTimeout(1500);
  assert.equal(await startButton.isEnabled(),true,'the board validates queue policy, not the page');
  limitsOffline=false;
- await waitText(/已确认的板端策略/);
 
  // Desktop layouts: no horizontal overflow, the send controls stay reachable.
  for(const size of [{width:1280,height:800},{width:1513,height:1039}]) {

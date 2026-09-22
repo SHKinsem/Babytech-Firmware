@@ -22,6 +22,7 @@ await page.route('http://manual.test/**',async route=>{
  }
  if(url.pathname==='/api/limits')return json({maxSpeedRpm:120,maxAccelRpmS:240,maxCurrentMa:5000,maxAngleDeg:3600,maxMoveSeconds:60,experimentSeconds:5});
  if(url.pathname==='/api/status')return json({id:Number(url.searchParams.get('id')),canReady:true,online:true,enabled:false,state:'disabled',positionDeg:0,speedRpm:0,currentMa:0});
+ if(url.pathname==='/api/config-result')return json({sequence:0});
  if(url.pathname==='/api/queue')return json({state:'idle',runId:0,step:0,total:0,iteration:0,repeat:1,line:0,action:'',message:'',raw:false});
  if(url.pathname==='/api/trace')return json({uptimeMs:10000,sequence:seq,frames});
  return json({});
