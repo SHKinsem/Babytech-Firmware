@@ -23,6 +23,7 @@ using namespace fakecan;
 
 // Independent wire opcode; controller keeps its own private constant.
 constexpr uint8_t kFrameHome = 0x9A;
+static CanRawFrame makeFlags(uint8_t addr, uint8_t flags);
 
 // --- Minimal check harness -------------------------------------------------
 
@@ -70,6 +71,7 @@ static void enableAndConfirm(Rig& rig, uint8_t id, uint32_t atMs) {
     setMillis(atMs);
     rig.mc.enable(id, true);
     injectRx(makeAck(id, kFrameEnable, 0x02));
+    injectRx(makeFlags(id, 1));
     setMillis(atMs + 20);
     rig.mc.poll();
 }
@@ -326,6 +328,11 @@ static void test_enable_confirmed_only_after_f3_02() {
 
     injectRx(makeAck(1, kFrameEnable, 0x02));
     setMillis(80);
+    rig.mc.poll();
+
+    CHECK(status(rig, 1).find("\"enabled\":false") != std::string::npos);
+    injectRx(makeFlags(1, 1));
+    setMillis(90);
     rig.mc.poll();
 
     const std::string j = status(rig, 1);
@@ -2232,6 +2239,58 @@ static void test_closed_loop_current_limit_write() {
     }
 }
 
+static void test_stop_all_does_not_invent_unseen_target() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    // A browser selection is not evidence of a connected or commanded motor.
+    rig.mc.watch(99);
+    CHECK(rig.mc.stopAll().code == kCodeQueued);
+    CHECK(countTx(TxKind::Stop) > 0);
+    CHECK(!rig.mc.snapshot(99).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    enableAndConfirm(rig, 2, 100);
+    CHECK(rig.mc.snapshot(2).enabled);
+    // A real, confirmed target must still provide fresh stationary feedback.
+    rig.mc.watch(99);
+    setMillis(200);
+    CHECK(rig.mc.stopAll().code == kCodeQueued);
+    CHECK(rig.mc.snapshot(2).stopPending);
+    CHECK(!rig.mc.snapshot(99).stopPending);
+    CHECK(rig.mc.operationBusy());
+    injectRx(makePosition(2, 0));
+    injectRx(makeVelocity(2, 0));
+    setMillis(220);
+    rig.mc.poll();
+    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.snapshot(2).enabled);
+    // An explicit stop to an unresponsive node remains unconfirmed.
+    CHECK(rig.mc.stop(99).code == kCodeQueued);
+    CHECK(rig.mc.snapshot(99).stopPending);
+    CHECK(rig.mc.operationBusy());
+    CHECK(status(rig, 2).find("\"id\":99,\"reason\":\"stop_pending\"") != std::string::npos);
+    const auto savedLimits = rig.mc.debugLimits();
+    const size_t beforeClear = capturedTX.size();
+    rig.mc.clearControlState();
+    CHECK(!rig.mc.operationBusy());
+    CHECK(!rig.mc.hasFault());
+    CHECK(!rig.mc.snapshot(2).enabled);
+    CHECK(!rig.mc.snapshot(2).positionValid);
+    CHECK(rig.mc.debugLimits().maxCurrentMa == savedLimits.maxCurrentMa);
+    CHECK(capturedTX.size() == beforeClear); // no enable, move, retry or CAN reinit
+    injectRx(makeAck(2, kFrameEnable, 0x02));
+    setMillis(240);
+    rig.mc.poll();
+    CHECK(!rig.mc.snapshot(2).enabled); // stale ACK cannot resurrect confirmation
+    rig.mc.watch(2);
+    injectRx(makeAck(2, kFrameEnable, 0xE2));
+    injectRx(makeAck(2, kFrameMove, 0xEE));
+    injectRx(makeAck(2, kFrameStop, 0xE2));
+    setMillis(260);
+    rig.mc.poll();
+    CHECK(!rig.mc.hasFault());
+    CHECK(!rig.mc.operationBusy());
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -2239,6 +2298,7 @@ struct TestCase {
 
 int main() {
     const TestCase tests[] = {
+        {"broadcast stop does not lock the board on an unseen UI selection", test_stop_all_does_not_invent_unseen_target},
         {"configurable limits and trial timeout, continuous freshness guard", test_configurable_debug_limits},
         {"protocol truncation, limits and sync rejection", test_protocol_validation_bounds},
         {"experiment 5s deadline and failed TX stop", test_experiment_deadline_and_partial_failure},

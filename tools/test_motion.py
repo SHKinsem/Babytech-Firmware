@@ -12,7 +12,12 @@ with tempfile.TemporaryDirectory(prefix='babytech-motion-') as output:
     common = [compiler, '-std=c++11', '-Wall', '-Wextra', '-Werror',
         '-I', str(root / 'motion/include'), '-I', str(root / 'motion/lib/XMotor/src')]
     suites = [
+        ('config-recovery', ['-I', str(root / 'tests/fakes'), '-I', str(root / 'motion/src'),
+            str(root / 'tests/test_config_recovery.cpp'), str(root / 'tests/fakes/fake_x42s.cpp'),
+            str(root / 'motion/src/MotorControl.cpp'), str(root / 'motion/src/CommandQueue.cpp')]),
         ('core', [str(root / 'tests/test_motion_core.cpp')]),
+        ('debug-log', ['-I', str(root / 'motion/src'),
+            str(root / 'tests/test_debug_log.cpp')]),
         ('load-cell', ['-I', str(root / 'motion/lib/LoadCell/src'),
             str(root / 'tests/test_load_cell.cpp'),
             str(root / 'motion/lib/LoadCell/src/LoadCellProcessor.cpp')]),

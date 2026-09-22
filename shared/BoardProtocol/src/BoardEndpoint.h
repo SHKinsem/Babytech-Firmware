@@ -26,6 +26,9 @@ public:
     bool handle(const Frame& request, uint32_t now, Frame& response);
     // Produces at most one event per call; call repeatedly until false.
     bool tick(uint32_t now, Frame& event);
+    // Local operator reset: preserve deduplication/results, terminate ownership.
+    // Caller cancels/stops the backend separately. No physical-stop claim.
+    bool cancelPending(Frame& event);
     bool busy() const { return exec_.valid || stop_.valid; }
     Status status(uint32_t now) const;
     const Parameters& parameters() const { return params_; }

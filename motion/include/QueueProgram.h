@@ -1,5 +1,12 @@
 #pragma once
-// Board queue DSL: the resolved plan plus strict parsing/validation.
+// Board queue DSL: the resolved plan plus strict parsing.
+//
+// The queue defaults to direct sending; move/home may explicitly await completion.
+// It translates readable lines
+// into CAN frames and sends them in order. Validation here is therefore limited
+// to what a *sender* needs - the grammar, the documented protocol field widths
+// and the resource bounds - and never asks the motor for permission: no enable
+// order, no feedback, no board policy limits and no planner estimation.
 //
 // One action per line, '#' starts a comment, commands and units are
 // case-insensitive. Numbers are parsed strictly (signed decimal, finite, integer
@@ -8,8 +15,8 @@
 // is a fixed 64-step array that stays immutable until the run is cancelled or
 // finished.
 //
-// The whole program is validated BEFORE any CAN frame is sent, so an invalid
-// line 2 can never let a valid line 1 run. The implementation lives in
+// The whole program is parsed BEFORE any CAN frame is sent, so an invalid line 2
+// can never let a valid line 1 run. The implementation lives in
 // CommandQueue.cpp so the host suite needs one extra source file, not two.
 //
 // Arduino-independent on purpose: the host tests compile this header directly.
@@ -30,6 +37,14 @@ constexpr uint8_t kQueueMaxRawBytes = 30;      // logical X command
 constexpr uint8_t kQueueMaxCanBytes = 8;
 constexpr double kQueueMinRotationMm = 0.000001;
 constexpr double kQueueMaxRotationMm = 1000000.0;
+
+// Documented wire ranges (X firmware, manual V1.0.5). These are protocol facts,
+// not board policy: the queue encodes what the user wrote as long as the field
+// can carry it. Nothing here reads DebugLimits.
+constexpr uint32_t kQueueMaxSpeedTenths = 30000;  // 0..3000.0 RPM
+constexpr uint32_t kQueueMaxCurrentMa = 5000;     // 0000-1388 on every current field
+constexpr uint32_t kQueueMaxAccelRpmS = 65535;    // uint16 RPM/s
+constexpr int64_t kQueueMaxMoveTenths = 0x7FFFFFFFLL;  // int32 angle field
 
 enum class QueueAction : uint8_t {
     None = 0,
@@ -66,6 +81,7 @@ struct QueueStep {
     QueueAction action = QueueAction::None;
     uint16_t line = 0;
     uint8_t id = 0;
+    bool awaitCompletion = false;  // explicit trailing await on move/home only
 
     // move: resolved at validation, 0.1 degree, the sign carries the direction.
     int32_t distanceTenths = 0;
@@ -77,14 +93,15 @@ struct QueueStep {
     // home
     uint8_t mode = 0;
 
-    // timed torque (C5) / velocity (C6)
+    // torque (C5) / velocity (C6). `durationMs == 0` is the short form: the
+    // frame is sent and the next step follows immediately, with no implicit stop.
     int32_t torqueMa = 0;            // signed, |value| is transmitted
     int32_t velocityTenths = 0;      // signed 0.1 RPM
     uint16_t maxSpeedTenths = 0;     // C5 maximum speed
     uint16_t rampMaPerSec = 0;       // C5 slope
     uint16_t timedAccel = 0;         // C6 acceleration (whole RPM/s)
     uint16_t timedCurrentMa = 0;     // C6 current limit
-    uint32_t durationMs = 0;
+    uint32_t durationMs = 0;         // 0 = send only, no timer and no stop
 
     // wait
     uint32_t waitMs = 0;
@@ -107,14 +124,15 @@ struct QueueProgram {
 };
 
 /**
- * Parses and validates a whole program.
+ * Parses a whole program into a send plan.
  *
- * `limits` is the confirmed DebugLimits the run will execute under. `rotation`
- * resolves mm steps; a move in mm for an id without a stored rotation distance
- * is rejected instead of guessed. On failure `program` is cleared and `error`
- * carries the stable reason plus the offending 1-based source line.
+ * `rotation` resolves mm steps; a move in mm for an id without a stored rotation
+ * distance is rejected instead of guessed (the sender cannot invent a value it
+ * does not have). No board policy is consulted: the plan is only checked against
+ * the documented protocol field widths. On failure `program` is cleared and
+ * `error` carries the stable reason plus the offending 1-based source line.
  */
-bool parseQueueProgram(const char* text, size_t length, const DebugLimits& limits,
+bool parseQueueProgram(const char* text, size_t length,
                        const QueueRotationSource& rotation, QueueProgram& program,
                        QueueError& error);
 

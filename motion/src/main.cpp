@@ -17,6 +17,7 @@
 #include <Hx711Scale.h>
 #include "QueueBoardMotion.h"
 #include "CommandQueue.h"
+#include "DebugLog.h"
 #include "ProtocolGate.h"
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
@@ -50,6 +51,177 @@ WiFiSetup wifiSetup(server, motionBusy);
 uint32_t lastBrainByteAt = 0;
 int scaleDoutPin = kScaleDoutPin;
 int scaleSckPin = kScaleSckPin;
+
+// ---------------------------------------------------------------------------
+// Diagnostic log (RAM only, see DebugLog.h)
+//
+// The log only observes: it cannot move, enable or stop anything, and it adds no
+// serial output. State is sampled as cheap scalars once per loop and only
+// TRANSITIONS are recorded, so a steady board writes nothing and no status JSON
+// string is ever built for logging. This is a board-side convenience history,
+// not a complete audit: raw/UART actions performed between two polls are only
+// visible through the state they leave behind, and queue steps are summarised by
+// state changes rather than replayed one by one.
+// ---------------------------------------------------------------------------
+motion::DebugLog debugLog;
+
+String bootIdHex(uint64_t value) {
+    char buffer[17];
+    snprintf(buffer, sizeof(buffer), "%016llX", static_cast<unsigned long long>(value));
+    return String(buffer);
+}
+
+// POST routes worth an entry. Nothing else is logged, so an unknown path or a
+// query string can never end up in the log or in an export, and the Wi-Fi routes
+// (which carry credentials) are deliberately absent.
+const char* const kLoggedPostRoutes[] = {
+    "/api/command", "/api/move", "/api/enable", "/api/stop", "/api/stop-all",
+    "/api/control/reset",
+    "/api/queue/start", "/api/queue/cancel", "/api/limits", "/api/motor-distance",
+    "/api/scale/tare", "/api/scale/calibrate", "/api/scale/config",
+};
+
+bool loggedPostRoute(const String& uri) {
+    for (const char* route : kLoggedPostRoutes) {
+        if (uri == route) return true;
+    }
+    return false;
+}
+
+// Request parameters are taken from a fixed allowlist - never enumerated - so an
+// arbitrary argument and any credential field cannot reach the log. Queue
+// programs are excluded on purpose: the browser already owns that text.
+const char* const kLoggedArgs[] = {
+    "id", "hex", "angle", "speed", "accel", "decel", "current", "enabled",
+    "repeat", "knownWeightG", "doutPin", "sckPin", "rotationDistance",
+    "maxSpeedRpm", "maxAccelRpmS", "maxCurrentMa", "maxAngleDeg",
+    "maxMoveSeconds", "experimentSeconds",
+};
+
+void appendLoggedArgs(String& out) {
+    for (const char* name : kLoggedArgs) {
+        if (!server.hasArg(name)) continue;
+        const String value = server.arg(name);
+        if (value.length() == 0) continue;
+        out += ' ';
+        out += name;
+        out += '=';
+        for (unsigned int i = 0; i < value.length() && i < 24; ++i) out += value[i];
+    }
+}
+
+// The response itself is never stored: only the status code, the body length and
+// the documented message/error text (bounded), so no arbitrary body can leak.
+void appendResponseSummary(String& out, int code, const String& body) {
+    out += " code=";
+    out += code;
+    out += " bytes=";
+    out += static_cast<unsigned int>(body.length());
+    String needle = F("\"message\":\"");
+    int at = body.indexOf(needle);
+    const char* label = " message=";
+    if (at < 0) {
+        needle = F("\"error\":\"");
+        at = body.indexOf(needle);
+        label = " error=";
+    }
+    if (at < 0) return;
+    out += label;
+    const unsigned int start = static_cast<unsigned int>(at) + needle.length();
+    for (unsigned int i = start; i < body.length(); ++i) {
+        const char c = body[i];
+        if (c == '"' || c == '\\') break;
+        out += c;
+    }
+}
+
+// One loop-time sample of the board's cheap scalar state. Strings are copied
+// into fixed buffers because their source may be rewritten in place.
+struct DebugSnapshot {
+    bool primed = false;
+    bool motorReady = false;
+    uint8_t moveOutcome = 0, homeOutcome = 0, homeId = 0;
+    uint8_t queueState = 0;
+    uint32_t queueRunId = 0;
+    uint16_t queueErrorLine = 0;
+    int wifiStatus = 0;
+    char fault[24] = {};
+    char config[24] = {};
+    char queueMessage[32] = {};
+};
+
+DebugSnapshot debugSnapshot;
+
+void copyBounded(char* out, size_t capacity, const char* text) {
+    size_t i = 0;
+    if (text) {
+        for (; text[i] != '\0' && i + 1 < capacity; ++i) out[i] = text[i];
+    }
+    out[i] = '\0';
+}
+
+void debugLogPoll(uint32_t now) {
+    DebugSnapshot next;
+    next.motorReady = motor.ready();
+    next.moveOutcome = static_cast<uint8_t>(motor.moveOutcome());
+    next.homeOutcome = static_cast<uint8_t>(motor.homeOutcome());
+    next.homeId = motor.homeId();
+    next.queueState = static_cast<uint8_t>(queue.state());
+    next.queueRunId = queue.runId();
+    next.queueErrorLine = queue.lastErrorLine();
+    next.wifiStatus = static_cast<int>(WiFi.status());
+    copyBounded(next.fault, sizeof(next.fault), motor.faultTag());
+    copyBounded(next.config, sizeof(next.config), motor.configMessage());
+    copyBounded(next.queueMessage, sizeof(next.queueMessage), queue.message());
+
+    if (!debugSnapshot.primed) {
+        // The first pass only establishes a baseline: the startup events are
+        // already in the log, and nothing is reported that was never observed.
+        debugSnapshot = next;
+        debugSnapshot.primed = true;
+        return;
+    }
+
+    if (next.motorReady != debugSnapshot.motorReady) {
+        debugLog.addf(now, next.motorReady ? "info" : "error", "can.state",
+                      "ready=%d", next.motorReady ? 1 : 0);
+    }
+    if (strcmp(next.fault, debugSnapshot.fault) != 0) {
+        debugLog.addf(now, "error", "motor.fault", "fault=%s", next.fault);
+    }
+    if (next.moveOutcome != debugSnapshot.moveOutcome) {
+        debugLog.addf(now, "info", "move.outcome", "outcome=%u",
+                      static_cast<unsigned>(next.moveOutcome));
+    }
+    if (next.homeOutcome != debugSnapshot.homeOutcome || next.homeId != debugSnapshot.homeId) {
+        debugLog.addf(now, "info", "home.outcome", "id=%u outcome=%u",
+                      static_cast<unsigned>(next.homeId),
+                      static_cast<unsigned>(next.homeOutcome));
+    }
+    if (strcmp(next.config, debugSnapshot.config) != 0) {
+        debugLog.addf(now, "info", "config.state", "state=%s", next.config);
+    }
+    if (next.queueState != debugSnapshot.queueState || next.queueRunId != debugSnapshot.queueRunId) {
+        debugLog.addf(now, "info", "queue.state", "run=%lu state=%u",
+                      static_cast<unsigned long>(next.queueRunId),
+                      static_cast<unsigned>(next.queueState));
+    }
+    if (strcmp(next.queueMessage, debugSnapshot.queueMessage) != 0) {
+        const bool failed = next.queueState == static_cast<uint8_t>(motion::QueueState::Failed);
+        debugLog.addf(now, failed ? "error" : "info", "queue.message",
+                      "run=%lu message=%s", static_cast<unsigned long>(next.queueRunId),
+                      next.queueMessage);
+    }
+    if (next.queueErrorLine != debugSnapshot.queueErrorLine) {
+        debugLog.addf(now, "info", "queue.error_line", "line=%u",
+                      static_cast<unsigned>(next.queueErrorLine));
+    }
+    if (next.wifiStatus != debugSnapshot.wifiStatus) {
+        debugLog.addf(now, "info", "wifi.status", "status=%d", next.wifiStatus);
+    }
+    debugSnapshot = next;
+    debugSnapshot.primed = true;  // the baseline is kept, only the values change
+}
 
 // ---------------------------------------------------------------------------
 // Per-motor rotation distance (mm per revolution), stored in NVS.
@@ -204,6 +376,19 @@ motion::Hx711ScaleConfig makeScaleConfig() {
 void sendJson(int code, const String& body) {
     server.sendHeader("Cache-Control", "no-store");
     server.send(code, "application/json", body);
+    // Diagnostic log, written after the response is already on the wire so the
+    // response itself cannot be affected. Only allowlisted POST routes are
+    // recorded: the frequent GET polls cost one method comparison and allocate
+    // nothing, GET /api/logs never logs itself, and the query string is never
+    // read. A POST that this board refused is recorded with its status and the
+    // documented reason, which is exactly what is hard to see while debugging.
+    if (server.method() != HTTP_POST) return;
+    const String uri = server.uri();
+    if (!loggedPostRoute(uri)) return;
+    String detail = uri;
+    appendLoggedArgs(detail);
+    appendResponseSummary(detail, code, body);
+    debugLog.add(millis(), code < 400 ? "info" : "warn", "http.result", detail.c_str());
 }
 
 void sendError(int code, const __FlashStringHelper* message) {
@@ -607,6 +792,58 @@ void handleStop() {
     sendResult("stop", id, motor.stop(target));
 }
 
+// Operator-requested software reset of the board's volatile control ownership.
+//
+// It is deliberately NOT behind motionBusy(): taking ownership away from a stuck
+// queue, UART exec, fault or pending stop is exactly what it is for. It never
+// enables, moves, re-inits CAN, writes NVS, touches Wi-Fi/limits/rotation, and
+// it never claims the shaft physically stopped - clearing internal bookkeeping
+// is not evidence of that. GET cannot reach this handler.
+void handleControlReset() {
+    // First record what is being cleared: without this the reset itself would
+    // erase the only evidence of the state it repaired.
+    debugLog.addf(millis(), "warn", "control.reset",
+                  "before: queue=%u run=%lu msg=%s busy=%d motion=%d uart=%d fault=%s",
+                  static_cast<unsigned>(queue.state()),
+                  static_cast<unsigned long>(queue.runId()),
+                  queue.message() ? queue.message() : "",
+                  motor.operationBusy() ? 1 : 0,
+                  motor.hasActiveMotion() ? 1 : 0,
+                  endpoint.busy() ? 1 : 0,
+                  motor.faultTag() ? motor.faultTag() : "none");
+
+    // Terminate UART ownership first: at most one exec and one stop record, each
+    // finished as Cancelled exactly once and answered to the brain.
+    babytech::v2::Frame event;
+    uint8_t cancelled = 0;
+    while (cancelled < 2 && endpoint.cancelPending(event)) {
+        sendFrame(event);
+        ++cancelled;
+    }
+
+    // One queue reset: it cancels the run (the existing cancel path sends the
+    // abort/stop once), then clears queue and controller ownership whether or not
+    // that stop could actually be transmitted.
+    const motion::Result stopped = queue.clearControlState();
+    const bool stopSent = stopped.code < 300;
+    debugLog.addf(millis(), stopSent ? "warn" : "error", "control.cleared",
+                  "uart_cancelled=%u stop_code=%u stop_sent=%d stop_message=%s",
+                  static_cast<unsigned>(cancelled),
+                  static_cast<unsigned>(stopped.code),
+                  stopSent ? 1 : 0,
+                  stopped.message ? stopped.message : "");
+
+    if (stopSent) {
+        sendJson(200, F("{\"ok\":true,\"stateCleared\":true,\"stopSent\":true,"
+                        "\"message\":\"control_state_cleared\"}"));
+        return;
+    }
+    // The internal state WAS cleared; the stop could not be confirmed. Both facts
+    // are reported, and nothing implies the motor is physically stopped.
+    sendJson(503, F("{\"ok\":false,\"stateCleared\":true,\"stopSent\":false,"
+                    "\"error\":\"control_state_cleared_stop_unconfirmed\"}"));
+}
+
 void handleStopAll() {
     const auto result = queue.cancel("stopped");
     sendResult("stop-all", -1, result.code < 300 ? motion::Result{202,"queued"} : result);
@@ -797,10 +1034,11 @@ void sendQueueResult(const motion::Result& result, bool started) {
 }
 
 void handleQueueStart() {
-    if (endpoint.busy() || wifiSetup.busy() || motor.operationBusy() || queue.active()) {
-        sendError(409, F("queue_busy"));
-        return;
-    }
+    // The queue is a command sender: a fault, a pending stop, a busy UART/Wi-Fi
+    // or an unloaded limit set must not refuse a program the operator wrote. Only
+    // a queue that is already running is refused (one program owns the order of
+    // frames), and the text itself has to parse.
+    if (queue.active()) { sendError(409, F("queue_busy")); return; }
     if (!server.hasArg("program")) { sendError(400, F("program_required")); return; }
     long repeat = 1;
     if (!argInteger("repeat", repeat) || repeat < 1 ||
@@ -809,7 +1047,20 @@ void handleQueueStart() {
         return;
     }
     const String program = server.arg("program");
-    sendQueueResult(queue.start(program.c_str(), program.length(), repeat, boardRotation, millis()), true);
+    const motion::Result started =
+        queue.start(program.c_str(), program.length(), repeat, boardRotation, millis());
+    if (started.code < 300) {
+        // Only a started program takes the bus over: finish any pending UART
+        // record so the two owners cannot interleave. An invalid program has no
+        // side effects at all - nothing is cancelled and nothing is sent.
+        babytech::v2::Frame event;
+        uint8_t cancelled = 0;
+        while (cancelled < 2 && endpoint.cancelPending(event)) {
+            sendFrame(event);
+            ++cancelled;
+        }
+    }
+    sendQueueResult(started, true);
 }
 
 void handleQueueCancel() {
@@ -827,6 +1078,11 @@ void setup() {
     Serial.println("[boot] Babytech Motion: AP + HTTP debug bridge. No motion on boot.");
 
     uint64_t boot=(uint64_t(esp_random())<<32)|esp_random();
+    // The diagnostic log starts with this boot's identity and the reset reason,
+    // once. It stores no credentials and nothing about the previous session.
+    debugLog.begin(bootIdHex(boot).c_str());
+    debugLog.addf(millis(), "info", "boot", "boot=%s reset=%d",
+                  debugLog.bootId(), static_cast<int>(esp_reset_reason()));
     endpoint.begin(boot);
     brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
     Serial.println("[uart] brain link ready on TX43/RX44 @115200");
@@ -842,8 +1098,11 @@ void setup() {
 
     if (!motor.begin(kCanTxPin, kCanRxPin, kCanBitrate)) {
         Serial.println("[can] init failed; HTTP stays up, motor commands will be rejected");
+        debugLog.addf(millis(), "error", "can.init", "ready=0 tx=%d rx=%d", kCanTxPin, kCanRxPin);
     } else {
         Serial.printf("[can] ready on TX%d/RX%d @%ld\n", kCanTxPin, kCanRxPin, kCanBitrate);
+        debugLog.addf(millis(), "info", "can.init", "ready=1 tx=%d rx=%d bitrate=%ld",
+                      kCanTxPin, kCanRxPin, kCanBitrate);
     }
 
     loadDebugLimits();
@@ -855,7 +1114,28 @@ void setup() {
     server.on("/api/limits", HTTP_GET, []() { sendJson(200, limitsJson()); });
     server.on("/api/limits", HTTP_POST, handleLimits);
     server.on("/api/can-debug", HTTP_GET, []() { sendJson(200, motor.canDebugJson()); });
+    server.on("/api/config-result", HTTP_GET, []() { sendJson(200, motor.configJson()); });
+    server.on("/api/polling", HTTP_POST, []() {
+        long enabled = 0;
+        if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
+            sendError(400, F("enabled must be 0 or 1"));
+            return;
+        }
+        motor.setAutoQueriesEnabled(enabled == 1);
+        sendJson(200, enabled ? "{\"autoQueriesEnabled\":true}" : "{\"autoQueriesEnabled\":false}");
+    });
     server.on("/api/trace", HTTP_GET, []() { sendJson(200, motor.traceJson()); });
+    // Read-only diagnostic log of this boot (RAM ring). It never logs its own
+    // request and never changes any board state.
+    server.on("/api/logs", HTTP_GET, []() {
+        static char logJson[motion::DebugLog::kJsonMax];
+        const size_t length = debugLog.writeJson(logJson, sizeof(logJson), millis());
+        if (length == 0) {
+            sendJson(500, F("{\"ok\":false,\"message\":\"log_json_overflow\"}"));
+            return;
+        }
+        sendJson(200, String(logJson, length));
+    });
     server.on("/api/scale", HTTP_GET, []() { sendJson(200, scaleStatusJson()); });
     server.on("/api/scale/config", HTTP_POST, handleScaleConfig);
     server.on("/api/scale/tare", HTTP_POST, handleScaleTare);
@@ -865,6 +1145,9 @@ void setup() {
     server.on("/api/move", HTTP_POST, handleMove);
     server.on("/api/stop", HTTP_POST, handleStop);
     server.on("/api/stop-all", HTTP_POST, handleStopAll);
+    // Operator reset of volatile control ownership: POST only, available while
+    // the queue, UART or a supervised action is busy, and never a re-enable.
+    server.on("/api/control/reset", HTTP_POST, handleControlReset);
     // Board queue: GET never executes anything, start validates the whole
     // program before the first CAN frame, cancel also stops everything.
     server.on("/api/queue", HTTP_GET, []() { sendJson(200, queue.statusJson()); });
@@ -874,10 +1157,17 @@ void setup() {
     server.on("/api/motor-distance", HTTP_POST, handleMotorDistance);
     server.onNotFound(handleNotFound);
     server.begin();
+    debugLog.add(millis(), "info", "http.ready", "port=80 no_motion_on_boot");
     Serial.println("[http] listening on port 80; no enable or movement command sent on boot");
+    // Establish the state baseline without reporting anything: the first poll
+    // must not invent transitions for states that were never observed changing.
+    debugLogPoll(millis());
 }
 
 void loop() {
+    // Cheap scalar sampling for the diagnostic log: comparisons only, and an
+    // entry is written only when something actually changed.
+    debugLogPoll(millis());
     powderScale.poll(millis());
     motor.poll();
     // The queue drives one supervised action per poll and never blocks.

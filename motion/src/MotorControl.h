@@ -28,6 +28,8 @@ public:
 
     // Bounded housekeeping (CAN TX may briefly block). Call often from loop().
     void poll();
+    void setAutoQueriesEnabled(bool enabled) { autoQueriesEnabled_ = enabled; }
+    bool autoQueriesEnabled() const { return autoQueriesEnabled_; }
 
     // Selects the address the module tracks (1..255). Selecting a new id never
     // consumes a slot: queries always cover the selected id, the active job and
@@ -35,7 +37,7 @@ public:
     void watch(uint8_t id);
 
     // Requests the firmware enable state. Result is 202 queued; the enable is
-    // only reported as true after the matching F3 acknowledgement arrives.
+    // only reported as true after matching F3 ACK and fresh enabled 3A flags.
     Result enable(uint8_t id, bool enabled);
 
     // Queues one relative position move. Requires a confirmed enable and fresh,
@@ -77,6 +79,11 @@ public:
     // Confirmed enables survive, in-flight enables do not.
     Result stopAll();
 
+    // Operator-requested software reset, after the caller has cancelled writers
+    // and attempted broadcast stop. No CAN re-init, NVS write, enable or motion.
+    // Clears stale ownership; it is NOT evidence of physical stop.
+    void clearControlState();
+
     // Complete JSON object for one address. Fields without fresh data are null.
     String statusJson(uint8_t id) const;
     String canDebugJson() const;
@@ -88,9 +95,20 @@ public:
     // --- Raw transport for the board queue (see queue-contract.md) ----------
     // Both require a ready bus and no active supervised operation, and neither
     // stops nor enables anything implicitly. They report transmission only:
-    // no acknowledgement, no completion, no parameter policy.
+    // no motion completion or parameter policy. Known 4C logical frames are
+    // tracked separately through ACK and 22 readback before queue advancement.
     bool rawLogical(const uint8_t* bytes, uint8_t length);
     bool rawCanFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length);
+
+    // --- Queue-only direct transport ----------------------------------------
+    // The board queue is a command sender (see CommandQueue.h): these put one
+    // frame on the bus and report transmission only. They check the buffer / ID /
+    // DLC bounds and CAN readiness and nothing else - no operationBusy gate, no
+    // supervision, no enable/job/home state, no configuration transaction - so a
+    // running program can send the next line immediately. The manual and lab
+    // paths above keep their existing semantics unchanged.
+    bool queueSendLogical(const uint8_t* bytes, uint8_t length);
+    bool queueSendFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length);
 
     // A raw frame was put on the bus: every software confirmation that depended
     // on the previous bus state is dropped (enable, position/velocity freshness,
@@ -132,6 +150,11 @@ public:
     bool operationBusy() const;
     bool stopping() const { return anyStopPending(); }
     bool hasFault() const { return faultTag_ && strcmp(faultTag_, "none") != 0; }
+    bool canRecover(uint8_t id) const { return !faultGlobal_ && faultId_ == id; }
+    bool configPending() const { return config_.state == 1 || config_.state == 2; }
+    bool configFailed() const { return config_.state >= 4; }
+    const char* configMessage() const;
+    String configJson() const;
     // Stable identifier of the latched fault ("none" when there is none), so a
     // supervisor (the board queue) can report WHY a run ended instead of a
     // generic "fault_active".
@@ -147,6 +170,25 @@ public:
     bool homeActive() const { return home_.active; }
 
 private:
+    friend class CommandQueue;
+    uint8_t queueObserveId_ = 0;
+    struct MoveFailure {
+        uint8_t id = 0;
+        int64_t target = 0;
+        int32_t position = 0, velocity = 0;
+        uint32_t elapsed = 0, deadline = 0;
+        bool positionValid = false, velocityValid = false, enabled = false;
+    } moveFailure_;
+    // One serialized 4C write and its 22 readback. Terminal evidence is retained
+    // independently of the rolling CAN trace and ordinary feedback polling.
+    struct ConfigTransaction {
+        uint32_t sequence = 0, started = 0, readAt = 0;
+        uint8_t id = 0, state = 0, ack = 0, packet = 0, received = 0;
+        uint8_t expected[15] = {}, actual[16] = {};
+    } config_;
+    void startConfig(const uint8_t* bytes);
+    bool configFrame(const CanRawFrame& frame, uint32_t now);
+    void pollConfig(uint32_t now);
     DebugLimits limits_;
     static void traceSink(void* context, const CanRawFrame& frame, bool tx);
     struct TraceEntry { CanRawFrame frame; uint32_t sequence = 0, atMs = 0; bool tx = false; };
@@ -205,6 +247,12 @@ private:
         uint32_t stopRequestedMs = 0;
 
         const char* lastAck = "none";
+        uint8_t queueAckFunction = 0, queueAckStatus = 0;
+        uint8_t queueExpectedFunction = 0;
+        bool queueAckPending = false;
+        uint32_t queueAckMs = 0;
+        bool queueHomeRunning = false, queueHomeComplete = false, queueHomeFailed = false;
+        uint32_t queueHomeProofMs = 0;
         uint32_t lastAckMs = 0;
     };
 
@@ -355,6 +403,7 @@ private:
     bool faultGlobal_ = false;
 
     uint32_t lastQueryMs_ = 0;
+    bool autoQueriesEnabled_ = true;
     uint8_t querySlot_ = 0;
     uint8_t queryFieldIndex_ = 0;
 

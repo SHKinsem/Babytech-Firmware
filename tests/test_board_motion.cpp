@@ -13,7 +13,8 @@ struct Rig {
     void enable() {
         setMillis(10);assert(bridge.enable(1,true)==Reason::None);
         Reason reason;assert(bridge.operation(reason)==Outcome::Accepted);
-        injectRx(makeAck(1,motion::kFrameEnable,0x02));feedback(20,0);
+        injectRx(makeAck(1,motion::kFrameEnable,0x02));
+        const uint8_t flags[]={0x3A,1,0x6B};injectRx(makeFrame(1,flags,sizeof(flags)));feedback(20,0);
         assert(bridge.operation(reason)==Outcome::Done);
     }
     Frame run(uint32_t seq=1) {

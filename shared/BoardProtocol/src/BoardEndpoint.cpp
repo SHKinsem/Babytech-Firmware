@@ -40,6 +40,12 @@ Frame Endpoint::finish(Record& r,Outcome outcome,Reason reason) {
     }
     Frame event=r.response; r.valid=false; return event;
 }
+bool Endpoint::cancelPending(Frame& event) {
+    if (exec_.valid) { event=finish(exec_,Outcome::Cancelled,Reason::None); return true; }
+    if (stop_.valid) { event=finish(stop_,Outcome::Cancelled,Reason::StopUnconfirmed); return true; }
+    linkLost_=false;
+    return false;
+}
 Frame Endpoint::read(const Frame& q,Reader& r,uint32_t now,bool discovery) {
     const uint8_t count=r.get(1);
     if (!count || r.remaining()!=size_t(count)*5) return reject(q,Reason::InvalidParam);

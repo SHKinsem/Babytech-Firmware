@@ -26,5 +26,26 @@ int main() {
     const size_t transmissions=fakecan::capturedTX.size();assert(transmissions>0);
     endpoint.handle(stop,0,response);assert(fakecan::capturedTX.size()==transmissions);
     queue.poll(2000);assert(queue.state()==motion::QueueState::Cancelled);
+    // Explicit reset releases both HTTP queue and UART transaction ownership,
+    // keeps the original request's terminal cancellation cached, and never
+    // reports a physically confirmed stop merely because memory was cleared.
+    Frame event;
+    assert(endpoint.busy());
+    assert(endpoint.cancelPending(event));
+    assert(result(event,outcome,reason));
+    assert(outcome==Outcome::Cancelled && reason==Reason::StopUnconfirmed);
+    assert(!endpoint.cancelPending(event));
+    const auto reset=queue.clearControlState();assert(reset.code<300);
+    assert(queue.state()==motion::QueueState::Idle && !motor.operationBusy());
+    assert(!endpoint.busy());
+    const size_t afterClear=fakecan::capturedTX.size();
+    endpoint.handle(stop,2200,response);
+    assert(result(response,outcome,reason) && outcome==Outcome::Cancelled);
+    assert(fakecan::capturedTX.size()==afterClear);
+    queue.poll(5000);assert(!queue.active());
+    assert(fakecan::capturedTX.size()==afterClear);
+    assert(queue.start(program,strlen(program),1,rotation,5010).code==202);
+    queue.clearControlState();queue.poll(7000);
+    assert(queue.state()==motion::QueueState::Idle);
     puts("PASS queue + actual UART endpoint: malformed/wrong-boot STOP has no effects, accepted STOP cancels, duplicate STOP does not retransmit");
 }

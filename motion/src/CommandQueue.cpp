@@ -5,26 +5,9 @@
 namespace motion {
 namespace {
 
-// --- Limits of the executor -------------------------------------------------
-// Queue watchdogs for the two steps the controller does not bound itself. An
-// enable is additionally bounded by the controller's own ack timeout, which is
-// shorter, so its verdict is reported first.
-constexpr uint32_t kEnableWaitMs = 5000;
-constexpr uint32_t kStopWaitMs = 5000;
-// Raw steps keep at least this gap, as the contract requires.
+// --- Limits of the sender ---------------------------------------------------
+// The only pacing left is the documented gap between the packets of raw frames.
 constexpr uint32_t kRawSpacingMs = 2;
-// Same "approximately stopped" band the controller uses (0.1 RPM units).
-constexpr int32_t kQueueStopTenths = 5;
-// Queue bounds for the phases the controller does not bound itself: waiting for
-// a supervised step's target evidence and for post-answer evidence (12/22).
-// Both are bounded so a silent node can never keep a run alive forever.
-constexpr uint32_t kEvidenceWaitMs = 3000;
-// A supervised motion step only dispatches on evidence the controller itself
-// demands (fresh, approximately stationary feedback of its own target).
-bool requiresStationaryBeforeDispatch(QueueAction action) {
-    return action == QueueAction::Move || action == QueueAction::Home ||
-           action == QueueAction::Torque || action == QueueAction::Velocity;
-}
 // Default arguments of the readable DSL.
 constexpr double kDefaultMoveRpm = 30.0;
 constexpr long kDefaultMoveAccel = 60;
@@ -192,16 +175,11 @@ bool failAt(QueueError& error, uint16_t line, const char* message) {
     return false;
 }
 
-// Shared duration policy: a bounded integer within the DSL limit, and when the
-// board policy sets an experiment window it is an upper bound (reject, never
-// silently stop early).
-bool validateDuration(long durationMs, const DebugLimits& limits, QueueError& error, uint16_t line) {
+// The only duration bound is the DSL resource bound: the timer is the user's own
+// instruction and no board policy shortens or rejects it.
+bool validateDuration(long durationMs, QueueError& error, uint16_t line) {
     if (durationMs < 1 || durationMs > long(kQueueMaxDurationMs)) {
         return failAt(error, line, "timed_duration_out_of_range");
-    }
-    if (limits.experimentDurationMs != 0 &&
-        uint32_t(durationMs) > limits.experimentDurationMs) {
-        return failAt(error, line, "timed_duration_exceeds_policy");
     }
     return true;
 }
@@ -254,7 +232,7 @@ bool parseId(const Tokens& tokens, uint8_t index, uint8_t& id, QueueError& error
     return true;
 }
 
-bool parseMoveStep(const Tokens& tokens, const DebugLimits& limits,
+bool parseMoveStep(const Tokens& tokens,
                    const QueueRotationSource& rotation, QueueStep& step, QueueError& error) {
     // move ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]] is eight tokens
     // in its longest form.
@@ -287,10 +265,17 @@ bool parseMoveStep(const Tokens& tokens, const DebugLimits& limits,
         degrees = distance / rotationMm * 360.0;
     }
     const double tenths = degrees * 10.0;
-    if (!(tenths >= -double(limits.maxAngleTenths) && tenths <= double(limits.maxAngleTenths))) {
+    // The angle field is a signed 32-bit count on the wire: that implementation
+    // bound is kept explicit (reject, never wrap), and it is the ONLY distance
+    // bound - the board's configured travel policy is not consulted here.
+    if (!(tenths >= -double(kQueueMaxMoveTenths) && tenths <= double(kQueueMaxMoveTenths))) {
         return failAt(error, step.line, "move_angle_out_of_range");
     }
-    const long rounded = static_cast<long>(tenths >= 0 ? tenths + 0.5 : tenths - 0.5);
+    const double roundedValue = tenths >= 0 ? tenths + 0.5 : tenths - 0.5;
+    if (!(roundedValue >= -double(kQueueMaxMoveTenths) && roundedValue <= double(kQueueMaxMoveTenths))) {
+        return failAt(error, step.line, "move_angle_out_of_range");
+    }
+    const int64_t rounded = static_cast<int64_t>(roundedValue);
     if (rounded == 0) return failAt(error, step.line, "move_angle_rounds_to_zero");
     step.distanceTenths = static_cast<int32_t>(rounded);
 
@@ -299,7 +284,8 @@ bool parseMoveStep(const Tokens& tokens, const DebugLimits& limits,
         return failAt(error, step.line, "invalid_number");
     }
     if (index < tokens.count) ++index;
-    if (!(rpm >= 0.1) || rpm * 10.0 > double(limits.maxSpeedTenths)) {
+    // Documented X firmware speed field: 0000-7E30, i.e. 0-3000.0 RPM.
+    if (!(rpm >= 0.1) || rpm * 10.0 > double(kQueueMaxSpeedTenths)) {
         return failAt(error, step.line, "move_speed_out_of_range");
     }
     step.speedTenths = static_cast<uint16_t>(rpm * 10.0 + 0.5);
@@ -328,55 +314,49 @@ bool parseMoveStep(const Tokens& tokens, const DebugLimits& limits,
 
     // Ranges are enforced on the parsed value BEFORE any narrowing cast: a
     // current of 66336 must be rejected, never wrapped into a plausible 800.
-    if (accel < 1 || accel > long(limits.maxAccelRpmS)) {
+    // The bounds are the documented wire ranges: acceleration 0..65535 RPM/s
+    // (0 is legal on the wire) and current 0..5000 mA (no arbitrary floor).
+    if (accel < 0 || accel > long(kQueueMaxAccelRpmS)) {
         return failAt(error, step.line, "move_accel_out_of_range");
     }
-    if (decel < 1 || decel > long(limits.maxAccelRpmS)) {
+    if (decel < 0 || decel > long(kQueueMaxAccelRpmS)) {
         return failAt(error, step.line, "move_decel_out_of_range");
     }
-    if (current < 100 || current > long(limits.maxCurrentMa)) {
+    if (current < 0 || current > long(kQueueMaxCurrentMa)) {
         return failAt(error, step.line, "move_current_out_of_range");
     }
 
-    // The controller's own planner is the single source of truth for the move
-    // limits, so the queue validates with exactly the same policy.
-    MoveRequest request;
-    request.id = step.id;
-    request.angleDeg = float(step.distanceTenths) / 10.0f;
-    request.speedRpm = float(step.speedTenths) / 10.0f;
-    request.accelRpmS = float(accel);
-    request.decelRpmS = float(decel);
-    request.currentMa = static_cast<uint16_t>(current);
-    MovePlan plan;
-    const char* planError = nullptr;
-    if (!buildMovePlan(request, plan, &planError, limits)) {
-        return failAt(error, step.line, planError ? planError : "move_invalid");
-    }
     step.accelRpmS = static_cast<uint16_t>(accel);
     step.decelRpmS = static_cast<uint16_t>(decel);
     step.currentMa = static_cast<uint16_t>(current);
     return true;
 }
 
-bool parseTorqueStep(const Tokens& tokens, const DebugLimits& limits, QueueStep& step, QueueError& error) {
-    // torque ID SIGNED_MA DURATION_MS [MAX_RPM [RAMP_MA_S]]: the duration is
-    // mandatory, so four tokens are the minimum.
-    if (tokens.count < 4 || tokens.count > 6) return failAt(error, step.line, "argument_count");
+bool parseTorqueStep(const Tokens& tokens, QueueStep& step, QueueError& error) {
+    // torque ID SIGNED_MA [DURATION_MS [MAX_RPM [RAMP_MA_S]]]
+    //   * without a duration: send the frame and continue (no timer, no stop)
+    //   * with a duration: legacy timed form - send, wait, then send FE and
+    //     continue immediately (no feedback wait)
+    if (tokens.count < 3 || tokens.count > 6) return failAt(error, step.line, "argument_count");
     if (!parseId(tokens, 1, step.id, error, step.line)) return false;
     long currentMa = 0, durationMs = 0, ramp = kDefaultTorqueRamp;
     double maxRpm = kDefaultTorqueMaxRpm;
     if (!parseSignedInteger(tokens.text[2], tokens.length[2], currentMa)) {
         return failAt(error, step.line, "invalid_integer");
     }
-    // The C5 current field has no 100 mA floor (unlike C6): 1..maxCurrentMa.
-    if (currentMa == 0) return failAt(error, step.line, "timed_value_zero");
-    if (currentMa > long(limits.maxCurrentMa) || currentMa < -long(limits.maxCurrentMa)) {
+    // Documented C5 current field: 0000-1388, i.e. 0-5000 mA, and 0 is a legal
+    // value on the wire (it is not a "zero torque" special case here).
+    if (currentMa > long(kQueueMaxCurrentMa) || currentMa < -long(kQueueMaxCurrentMa)) {
         return failAt(error, step.line, "timed_current_out_of_range");
     }
-    if (!parseUnsignedInteger(tokens.text[3], tokens.length[3], durationMs)) {
-        return failAt(error, step.line, "invalid_integer");
+    bool timed = false;
+    if (tokens.count > 3) {
+        timed = true;
+        if (!parseUnsignedInteger(tokens.text[3], tokens.length[3], durationMs)) {
+            return failAt(error, step.line, "invalid_integer");
+        }
+        if (!validateDuration(durationMs, error, step.line)) return false;
     }
-    if (!validateDuration(durationMs, limits, error, step.line)) return false;
     if (tokens.count > 4) {
         // The C5 limit is a speed in RPM like every other speed field, so it
         // keeps the 0.1 RPM resolution.
@@ -392,46 +372,46 @@ bool parseTorqueStep(const Tokens& tokens, const DebugLimits& limits, QueueStep&
         }
         if (ramp > 65535) return failAt(error, step.line, "timed_ramp_out_of_range");
     }
-    // The DEFAULT speed is validated exactly like an explicit one, before any
-    // frame is sent: a policy below 30 RPM rejects the step instead of running
-    // it faster than the policy allows.
-    if (!(maxRpm >= 0.1) || maxRpm * 10.0 > double(limits.maxSpeedTenths)) {
+    // The C5 speed field is 0000-7E30, i.e. 0-3000.0 RPM; 0 means "no limit" and
+    // is accepted as written.
+    if (maxRpm < 0.0 || maxRpm * 10.0 > double(kQueueMaxSpeedTenths)) {
         return failAt(error, step.line, "timed_speed_out_of_range");
     }
     const double maxSpeedTenths = maxRpm * 10.0 + 0.5;
-    if (static_cast<long>(maxSpeedTenths) == 0) {
-        return failAt(error, step.line, "timed_speed_out_of_range");
-    }
     step.torqueMa = static_cast<int32_t>(currentMa);
-    step.durationMs = static_cast<uint32_t>(durationMs);
+    step.durationMs = timed ? static_cast<uint32_t>(durationMs) : 0;
     step.maxSpeedTenths = static_cast<uint16_t>(maxSpeedTenths);
     step.rampMaPerSec = static_cast<uint16_t>(ramp);
     return true;
 }
 
-bool parseVelocityStep(const Tokens& tokens, const DebugLimits& limits, QueueStep& step, QueueError& error) {
-    // velocity ID SIGNED_RPM DURATION_MS [ACCEL [CURRENT]]: duration mandatory.
-    if (tokens.count < 4 || tokens.count > 6) return failAt(error, step.line, "argument_count");
+bool parseVelocityStep(const Tokens& tokens, QueueStep& step, QueueError& error) {
+    // velocity ID SIGNED_RPM [DURATION_MS [ACCEL [CURRENT]]]
+    //   * without a duration: send the frame and continue (no timer, no stop)
+    //   * with a duration: legacy timed form - send, wait, then send FE
+    if (tokens.count < 3 || tokens.count > 6) return failAt(error, step.line, "argument_count");
     if (!parseId(tokens, 1, step.id, error, step.line)) return false;
     double rpm = 0.0;
     if (!parseSignedDecimal(tokens.text[2], tokens.length[2], rpm)) {
         return failAt(error, step.line, "invalid_number");
     }
-    // Zero is not a timed action (use stop), and a magnitude below 0.1 RPM would
-    // round to zero on the wire.
     const double magnitude = rpm < 0.0 ? -rpm : rpm;
     if (magnitude < 0.1) return failAt(error, step.line, "timed_value_zero");
     const double signedTenths = rpm * 10.0;
     const int32_t tenths = static_cast<int32_t>(signedTenths >= 0 ? signedTenths + 0.5 : signedTenths - 0.5);
     if (tenths == 0) return failAt(error, step.line, "timed_value_zero");
-    if (tenths > int32_t(limits.maxSpeedTenths) || tenths < -int32_t(limits.maxSpeedTenths)) {
+    if (tenths > int32_t(kQueueMaxSpeedTenths) || tenths < -int32_t(kQueueMaxSpeedTenths)) {
         return failAt(error, step.line, "timed_speed_out_of_range");
     }
     long durationMs = 0;
-    if (!parseUnsignedInteger(tokens.text[3], tokens.length[3], durationMs)) {
-        return failAt(error, step.line, "invalid_integer");
+    bool timed = false;
+    if (tokens.count > 3) {
+        timed = true;
+        if (!parseUnsignedInteger(tokens.text[3], tokens.length[3], durationMs)) {
+            return failAt(error, step.line, "invalid_integer");
+        }
+        if (!validateDuration(durationMs, error, step.line)) return false;
     }
-    if (!validateDuration(durationMs, limits, error, step.line)) return false;
     long accel = kDefaultVelocityAccel, current = kDefaultVelocityCurrent;
     if (tokens.count > 4) {
         if (!parseUnsignedInteger(tokens.text[4], tokens.length[4], accel)) {
@@ -443,22 +423,23 @@ bool parseVelocityStep(const Tokens& tokens, const DebugLimits& limits, QueueSte
             return failAt(error, step.line, "invalid_integer");
         }
     }
-    // Default acceleration and current limit are validated like explicit values
-    // (the C6 frame carries both), before anything is transmitted.
-    if (accel < 1 || accel > long(limits.maxAccelRpmS)) {
+    // Documented C6 fields: acceleration 0000-FFFF RPM/s and current
+    // 0000-1388 mA. Both defaults are checked like explicit values because the
+    // frame carries them either way.
+    if (accel < 0 || accel > long(kQueueMaxAccelRpmS)) {
         return failAt(error, step.line, "timed_accel_out_of_range");
     }
-    if (current < 100 || current > long(limits.maxCurrentMa)) {
+    if (current < 0 || current > long(kQueueMaxCurrentMa)) {
         return failAt(error, step.line, "timed_current_out_of_range");
     }
     step.velocityTenths = tenths;
-    step.durationMs = static_cast<uint32_t>(durationMs);
+    step.durationMs = timed ? static_cast<uint32_t>(durationMs) : 0;
     step.timedAccel = static_cast<uint16_t>(accel);
     step.timedCurrentMa = static_cast<uint16_t>(current);
     return true;
 }
 
-bool parseStep(const Tokens& tokens, const DebugLimits& limits,
+bool parseStep(const Tokens& tokens,
                const QueueRotationSource& rotation, QueueStep& step, QueueError& error) {
     const QueueAction action = actionFromToken(tokens.text[0], tokens.length[0]);
     if (action == QueueAction::None) return failAt(error, step.line, "unknown_action");
@@ -483,11 +464,11 @@ bool parseStep(const Tokens& tokens, const DebugLimits& limits,
             return true;
         }
         case QueueAction::Move:
-            return parseMoveStep(tokens, limits, rotation, step, error);
+            return parseMoveStep(tokens, rotation, step, error);
         case QueueAction::Torque:
-            return parseTorqueStep(tokens, limits, step, error);
+            return parseTorqueStep(tokens, step, error);
         case QueueAction::Velocity:
-            return parseVelocityStep(tokens, limits, step, error);
+            return parseVelocityStep(tokens, step, error);
         case QueueAction::Wait: {
             if (tokens.count != 2) return failAt(error, step.line, "argument_count");
             long waitMs = 0;
@@ -559,7 +540,7 @@ bool parseStep(const Tokens& tokens, const DebugLimits& limits,
 
 }  // namespace
 
-bool parseQueueProgram(const char* text, size_t length, const DebugLimits& limits,
+bool parseQueueProgram(const char* text, size_t length,
                        const QueueRotationSource& rotation, QueueProgram& program,
                        QueueError& error) {
     // Cheap reset: assigning a QueueProgram temporary would put the whole ~6 KB
@@ -598,7 +579,19 @@ bool parseQueueProgram(const char* text, size_t length, const DebugLimits& limit
         QueueStep& step = program.steps[program.count];
         step = QueueStep();
         step.line = line;
-        if (!parseStep(tokens, limits, rotation, step, error)) {
+        for (uint8_t i = 1; i < tokens.count; ++i) {
+            if (!tokenEquals(tokens.text[i], tokens.length[i], "await")) continue;
+            const QueueAction action = actionFromToken(tokens.text[0], tokens.length[0]);
+            if (i != tokens.count - 1 ||
+                (action != QueueAction::Move && action != QueueAction::Home)) {
+                program.count = 0;
+                program.hasRaw = false;
+                return failAt(error, line, "invalid_await");
+            }
+            step.awaitCompletion = true;
+            --tokens.count;
+        }
+        if (!parseStep(tokens, rotation, step, error)) {
             program.count = 0;
             program.hasRaw = false;
             return false;
@@ -622,12 +615,6 @@ const QueueStep* CommandQueue::currentStep() const {
     return &program_.steps[stepIndex_];
 }
 
-bool CommandQueue::stationary(const MotorControl::Snapshot& s) const {
-    if (!s.positionValid || !s.velocityValid) return false;
-    const int32_t speed = s.velocity < 0 ? -s.velocity : s.velocity;
-    return speed <= kQueueStopTenths;
-}
-
 void CommandQueue::setMessage(const char* text) {
     if (text == nullptr) text = "";
     size_t i = 0;
@@ -639,7 +626,10 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
                            const QueueRotationSource& rotation, uint32_t now) {
     if (state_ == QueueState::Running) return Result{409, "queue_busy"};
     if (repeat < 1 || repeat > long(kQueueMaxRepeat)) return Result{400, "repeat_out_of_range"};
-    if (motor_.operationBusy()) return Result{409, "motion_active"};
+    // Nothing else may refuse a start: a fault, a pending stop, a busy manual
+    // operation or unloaded board limits are not this sender's business. Only a
+    // bus that cannot transmit at all is reported, because then nothing could be
+    // sent and pretending otherwise would be a lie.
     if (!motor_.ready()) return Result{503, "can_unavailable"};
 
     // The parsed plan is ~6 KB: it lives in one fixed scratch buffer instead of
@@ -647,23 +637,26 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     // Nothing is allocated and the running plan is untouched by a refusal.
     static QueueProgram scratch;
     QueueError error;
-    if (!parseQueueProgram(text, length, motor_.debugLimits(), rotation, scratch, error)) {
+    if (!parseQueueProgram(text, length, rotation, scratch, error)) {
         // The previous run's state is left alone: this start was simply refused.
-        // The HTTP 400 body carries the reason and the source line.
+        // Nothing was sent and nothing was cleared.
         errorLine_ = error.line;
         setMessage(error.message);
         return Result{400, error.message};
     }
 
-    // The plan is a fixed-size copy and stays immutable until the run ends.
+    // The plan is a fixed-size copy and stays immutable until the run ends. Only
+    // now - after a fully successful parse - take the board over from a stale
+    // software supervisor: this clears MotorControl's volatile tracking and
+    // sends nothing on CAN.
     program_ = scratch;
+    motor_.clearControlState();
     repeat_ = static_cast<uint32_t>(repeat);
     runId_++;
     state_ = QueueState::Running;
     phase_ = kPhaseIdle;
     phaseAt_ = now;
     deadlineAt_ = 0;
-    evidenceAt_ = 0;
     stepIndex_ = 0;
     iteration_ = 0;
     lastRawAt_ = 0;
@@ -673,6 +666,7 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
 }
 
 Result CommandQueue::cancel(const char* reason) {
+    motor_.queueObserveId_ = 0;
     const bool wasRunning = state_ == QueueState::Running;
     if (wasRunning) {
         state_ = QueueState::Cancelled;
@@ -691,7 +685,23 @@ bool CommandQueue::stopEverything() {
     return motor_.broadcastAbortAll();
 }
 
+Result CommandQueue::clearControlState() {
+    const Result stopped = cancel("control_state_cleared");
+    state_ = QueueState::Idle;
+    phase_ = kPhaseIdle;
+    program_.count = 0;
+    program_.hasRaw = false;
+    stepIndex_ = iteration_ = 0;
+    repeat_ = 1;
+    errorLine_ = 0;
+    phaseAt_ = deadlineAt_ = lastRawAt_ = 0;
+    setMessage("control_state_cleared");
+    motor_.clearControlState();
+    return stopped;
+}
+
 void CommandQueue::finish(QueueState state, const char* message) {
+    motor_.queueObserveId_ = 0;
     state_ = state;
     setMessage(message);
     phase_ = kPhaseIdle;
@@ -700,131 +710,182 @@ void CommandQueue::finish(QueueState state, const char* message) {
 void CommandQueue::fail(uint32_t now, const char* reason, uint16_t line) {
     if (state_ != QueueState::Running) return;  // the first error is kept
     if (errorLine_ == 0) errorLine_ = line;
+    // A send failure ends the run where it happened and reports the reason and
+    // the source line. Nothing else is transmitted: no automatic stop broadcast
+    // and no retry, because the operator asked for a plain sender.
     finish(QueueState::Failed, reason != nullptr ? reason : "failed");
     (void)now;
-    stopEverything();
 }
 
 void CommandQueue::advance(uint32_t now) {
+    motor_.queueObserveId_ = 0;
     ++stepIndex_;
     phase_ = kPhaseIdle;
     phaseAt_ = now;
-    evidenceAt_ = 0;
 }
 
-void CommandQueue::dispatchRaw(uint32_t now, const QueueStep& step) {
-    bool sent = false;
-    if (step.action == QueueAction::Hex) {
-        sent = motor_.rawLogical(step.raw, step.rawLength);
-        if (sent) motor_.noteRawTransmission(step.id);
-    } else {
-        sent = motor_.rawCanFrame(step.canId, step.extended, step.canData, step.canLength);
-        // An arbitrary CAN identifier has unknown effects, so every software
-        // confirmation is dropped rather than attributed to one node.
-        if (sent) motor_.noteRawTransmission(0);
+// One FE frame for one address, used by the legacy timed forms and by nothing
+// else here: the queue never stops the motor on its own initiative.
+bool CommandQueue::sendStopFrame(uint8_t id) {
+    const uint8_t frame[5] = {id, 0xFE, 0x98, 0, 0x6B};
+    return motor_.queueSendLogical(frame, sizeof(frame));
+}
+
+// Encodes and sends one step. Everything goes through the queue-only transport,
+// which checks the buffer/ID/DLC bounds and CAN readiness and nothing else: no
+// supervised controller call is ever made from here, so no hidden enable, job,
+// fault or config transaction can come back to life.
+void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
+    if (step.awaitCompletion) {
+        motor_.queueObserveId_ = step.id;
+        auto& node = motor_.nodes_[step.id];
+        node.queueAckFunction = node.queueAckStatus = 0;
+        node.queueExpectedFunction = step.action == QueueAction::Home ? 0x9A : 0xCD;
+        node.queueAckPending = false;
+        node.queueHomeRunning = node.queueHomeComplete = node.queueHomeFailed = false;
+        node.queueHomeProofMs = 0;
+        node.targetValid = node.homeFlagsValid = false;
+        accepted_ = homeSeenRunning_ = homeComplete_ = false;
+        doneSamples_ = queryIndex_ = 0;
+        observedAckAt_ = donePosAt_ = doneVelAt_ = now;
+        homeProofAt_ = 0;
+        queryAt_ = phaseAt_ = now;
     }
-    lastRawAt_ = now;
+    const bool sent = encodeAndSend(step);
     if (!sent) {
-        fail(now, "raw_tx_failed", step.line);
+        // A real transmission failure ends the run here, with the source line. No
+        // extra CAN frame is broadcast and the step is not retried.
+        fail(now, "tx_failed", step.line);
         return;
     }
-    // A raw frame invalidated the software feedback state, so the next
-    // structured step must acquire a fresh pair even for the same address.
-    // (Every supervised motion step acquires one anyway; this keeps the intent
-    // explicit for the target selection below.)
-    // Reported as sent only: no acknowledgement, no movement, no stop.
+    if (step.action == QueueAction::Wait) {
+        phase_ = kPhaseWait;
+        deadlineAt_ = now + step.waitMs;
+        return;
+    }
+    if (step.awaitCompletion) {
+        phase_ = kPhaseMotion;
+        setMessage(step.action == QueueAction::Move ? "waiting_position" : "waiting_home");
+        return;
+    }
+    if (step.durationMs != 0 &&
+        (step.action == QueueAction::Torque || step.action == QueueAction::Velocity)) {
+        // Legacy timed form: the user's own duration, then one FE, then the next
+        // step. No feedback is awaited: this is timing, not supervision.
+        phase_ = kPhaseTimed;
+        deadlineAt_ = now + step.durationMs;
+        return;
+    }
+    if (step.action == QueueAction::Hex || step.action == QueueAction::Can) lastRawAt_ = now;
     advance(now);
 }
 
-void CommandQueue::dispatch(uint32_t now, const QueueStep& step) {
+bool CommandQueue::encodeAndSend(const QueueStep& step) {
+    uint8_t frame[20] = {};
+    uint8_t length = 0;
     switch (step.action) {
         case QueueAction::Enable:
         case QueueAction::Disable: {
-            const Result result = motor_.enable(step.id, step.action == QueueAction::Enable);
-            if (result.code >= 300) { fail(now, result.message, step.line); return; }
-            phase_ = kPhaseEnable;
-            phaseAt_ = now;
-            return;
+            // [addr][F3][AB][state][sync=0][6B]
+            frame[length++] = step.id;
+            frame[length++] = 0xF3;
+            frame[length++] = 0xAB;
+            frame[length++] = step.action == QueueAction::Enable ? 1 : 0;
+            frame[length++] = 0;
+            frame[length++] = 0x6B;
+            return motor_.queueSendLogical(frame, length);
         }
         case QueueAction::Move: {
-            MoveRequest request;
-            request.id = step.id;
-            request.angleDeg = float(step.distanceTenths) / 10.0f;
-            request.speedRpm = float(step.speedTenths) / 10.0f;
-            request.accelRpmS = float(step.accelRpmS);
-            request.decelRpmS = float(step.decelRpmS);
-            request.currentMa = step.currentMa;
-            const Result result = motor_.move(request);
-            if (result.code >= 300) { fail(now, result.message, step.line); return; }
-            phase_ = kPhaseMove;
-            phaseAt_ = now;
-            return;
+            // [addr][CD][dir][accel u16][decel u16][speed u16][angle u32]
+            // [mode=2 relative to current][sync=0][current u16][6B]
+            const int32_t distance = step.distanceTenths;
+            const uint32_t magnitude = distance < 0
+                ? static_cast<uint32_t>(-static_cast<int64_t>(distance))
+                : static_cast<uint32_t>(distance);
+            frame[length++] = step.id;
+            frame[length++] = 0xCD;
+            frame[length++] = distance < 0 ? 1 : 0;
+            frame[length++] = static_cast<uint8_t>((step.accelRpmS >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(step.accelRpmS & 0xFF);
+            frame[length++] = static_cast<uint8_t>((step.decelRpmS >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(step.decelRpmS & 0xFF);
+            frame[length++] = static_cast<uint8_t>((step.speedTenths >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(step.speedTenths & 0xFF);
+            frame[length++] = static_cast<uint8_t>((magnitude >> 24) & 0xFF);
+            frame[length++] = static_cast<uint8_t>((magnitude >> 16) & 0xFF);
+            frame[length++] = static_cast<uint8_t>((magnitude >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(magnitude & 0xFF);
+            frame[length++] = 2;  // relative to the current position
+            frame[length++] = 0;
+            frame[length++] = static_cast<uint8_t>((step.currentMa >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(step.currentMa & 0xFF);
+            frame[length++] = 0x6B;
+            return motor_.queueSendLogical(frame, length);
         }
         case QueueAction::Home: {
-            const Result result = motor_.home(step.id, step.mode);
-            if (result.code >= 300) { fail(now, result.message, step.line); return; }
-            phase_ = kPhaseHome;
-            phaseAt_ = now;
-            return;
-        }
-        case QueueAction::Torque:
-        case QueueAction::Velocity: {
-            uint8_t frame[11] = {};
-            uint8_t length = 0;
-            if (step.action == QueueAction::Torque) {
-                const int32_t magnitude = step.torqueMa < 0 ? -step.torqueMa : step.torqueMa;
-                frame[length++] = step.id;
-                frame[length++] = 0xC5;
-                frame[length++] = step.torqueMa < 0 ? 1 : 0;
-                frame[length++] = static_cast<uint8_t>((step.rampMaPerSec >> 8) & 0xFF);
-                frame[length++] = static_cast<uint8_t>(step.rampMaPerSec & 0xFF);
-                frame[length++] = static_cast<uint8_t>((magnitude >> 8) & 0xFF);
-                frame[length++] = static_cast<uint8_t>(magnitude & 0xFF);
-                frame[length++] = 0;  // immediate execution
-                frame[length++] = static_cast<uint8_t>((step.maxSpeedTenths >> 8) & 0xFF);
-                frame[length++] = static_cast<uint8_t>(step.maxSpeedTenths & 0xFF);
-            } else {
-                const int32_t magnitude = step.velocityTenths < 0 ? -step.velocityTenths : step.velocityTenths;
-                frame[length++] = step.id;
-                frame[length++] = 0xC6;
-                frame[length++] = step.velocityTenths < 0 ? 1 : 0;
-                frame[length++] = static_cast<uint8_t>((step.timedAccel >> 8) & 0xFF);
-                frame[length++] = static_cast<uint8_t>(step.timedAccel & 0xFF);
-                frame[length++] = static_cast<uint8_t>((magnitude >> 8) & 0xFF);
-                frame[length++] = static_cast<uint8_t>(magnitude & 0xFF);
-                frame[length++] = 0;  // immediate execution
-                frame[length++] = static_cast<uint8_t>((step.timedCurrentMa >> 8) & 0xFF);
-                frame[length++] = static_cast<uint8_t>(step.timedCurrentMa & 0xFF);
-            }
+            // [addr][9A][mode][sync=0][6B]
+            frame[length++] = step.id;
+            frame[length++] = 0x9A;
+            frame[length++] = step.mode;
+            frame[length++] = 0;
             frame[length++] = 0x6B;
-            const Result result = motor_.command(frame, length);
-            if (result.code >= 300) { fail(now, result.message, step.line); return; }
-            phase_ = kPhaseTimed;
-            phaseAt_ = now;
-            deadlineAt_ = now + step.durationMs;
-            return;
+            return motor_.queueSendLogical(frame, length);
         }
-        case QueueAction::Stop: {
-            const Result result = motor_.stop(step.id);
-            if (result.code >= 300) { fail(now, result.message, step.line); return; }
-            phase_ = kPhaseStop;
-            phaseAt_ = now;
-            return;
+        case QueueAction::Torque: {
+            // [addr][C5][dir][slope u16][current u16][sync=0][maxSpeed u16][6B]
+            const int32_t current = step.torqueMa;
+            const uint32_t magnitude = current < 0
+                ? static_cast<uint32_t>(-static_cast<int64_t>(current))
+                : static_cast<uint32_t>(current);
+            frame[length++] = step.id;
+            frame[length++] = 0xC5;
+            frame[length++] = current < 0 ? 1 : 0;
+            frame[length++] = static_cast<uint8_t>((step.rampMaPerSec >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(step.rampMaPerSec & 0xFF);
+            frame[length++] = static_cast<uint8_t>((magnitude >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(magnitude & 0xFF);
+            frame[length++] = 0;
+            frame[length++] = static_cast<uint8_t>((step.maxSpeedTenths >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(step.maxSpeedTenths & 0xFF);
+            frame[length++] = 0x6B;
+            return motor_.queueSendLogical(frame, length);
         }
-        case QueueAction::Wait: {
-            phase_ = kPhaseWait;
-            phaseAt_ = now;
-            deadlineAt_ = now + step.waitMs;
-            return;
+        case QueueAction::Velocity: {
+            // [addr][C6][dir][accel u16][speed u16][sync=0][current u16][6B]
+            const int32_t velocity = step.velocityTenths;
+            const uint32_t magnitude = velocity < 0
+                ? static_cast<uint32_t>(-static_cast<int64_t>(velocity))
+                : static_cast<uint32_t>(velocity);
+            frame[length++] = step.id;
+            frame[length++] = 0xC6;
+            frame[length++] = velocity < 0 ? 1 : 0;
+            frame[length++] = static_cast<uint8_t>((step.timedAccel >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(step.timedAccel & 0xFF);
+            frame[length++] = static_cast<uint8_t>((magnitude >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(magnitude & 0xFF);
+            frame[length++] = 0;
+            frame[length++] = static_cast<uint8_t>((step.timedCurrentMa >> 8) & 0xFF);
+            frame[length++] = static_cast<uint8_t>(step.timedCurrentMa & 0xFF);
+            frame[length++] = 0x6B;
+            return motor_.queueSendLogical(frame, length);
         }
+        case QueueAction::Stop:
+            return sendStopFrame(step.id);
         case QueueAction::Hex:
+            return motor_.queueSendLogical(step.raw, step.rawLength);
         case QueueAction::Can:
+            return motor_.queueSendFrame(step.canId, step.extended, step.canData, step.canLength);
+        case QueueAction::Wait:
+            return true;   // a timer needs no frame
         case QueueAction::None:
             break;
     }
-    fail(now, "internal_action", step.line);
+    return false;
 }
 
+// Starts the next step. The plan is sent in order, one step per poll, with the
+// documented minimum gap between raw frames (the motor needs a moment between
+// packets). Only explicitly awaited move/home steps inspect driver evidence.
 void CommandQueue::beginStep(uint32_t now) {
     if (stepIndex_ >= program_.count) {
         // One iteration finished. The next one starts on the next poll, so an
@@ -841,177 +902,120 @@ void CommandQueue::beginStep(uint32_t now) {
     }
 
     const QueueStep& step = program_.steps[stepIndex_];
-
-    if (step.action == QueueAction::Hex || step.action == QueueAction::Can) {
-        if (uint32_t(now - lastRawAt_) < kRawSpacingMs) return;  // keep raw frames apart
-        if (motor_.operationBusy()) { fail(now, "busy", step.line); return; }
-        dispatchRaw(now, step);
-        return;
+    if ((step.action == QueueAction::Hex || step.action == QueueAction::Can) &&
+        uint32_t(now - lastRawAt_) < kRawSpacingMs) {
+        return;  // keep raw frames apart
     }
-
-    if (step.action == QueueAction::Wait) {
-        dispatch(now, step);
-        return;
-    }
-
-    // Every supervised motion step acquires fresh stationary feedback of its own
-    // target before it is dispatched, not only when the target changed: a
-    // completed home invalidates the position, and a raw frame invalidates the
-    // whole software state, so the next step must never reuse the old pair.
-    if (requiresStationaryBeforeDispatch(step.action)) {
-        motor_.watch(step.id);
-        phase_ = kPhaseWatch;
-        phaseAt_ = now;
-        return;
-    }
-
-    // stop/disable/enable are dispatched promptly: a stop that waited for a
-    // quiet node would not be a stop. The controller watches the node itself.
-    dispatch(now, step);
-}
-
-void CommandQueue::watchTarget(uint32_t now) {
-    const QueueStep* step = currentStep();
-    if (step == nullptr) { fail(now, "internal_step", 0); return; }
-    motor_.watch(step->id);
-    const MotorControl::Snapshot snapshot = motor_.snapshot(step->id);
-    if (snapshot.positionValid && snapshot.velocityValid && stationary(snapshot)) {
-        dispatch(now, *step);
-        return;
-    }
-    if (uint32_t(now - phaseAt_) >= kEvidenceWaitMs) {
-        fail(now, "target_feedback_timeout", step->line);
-    }
-}
-
-void CommandQueue::waitEnable(uint32_t now) {
-    const QueueStep* step = currentStep();
-    if (step == nullptr) { fail(now, "internal_step", 0); return; }
-    const bool wanted = step->action == QueueAction::Enable;
-    const MotorControl::Snapshot snapshot = motor_.snapshot(step->id);
-    const uint32_t elapsed = uint32_t(now - phaseAt_);
-    if (snapshot.enableTimedOut) { fail(now, "enable_ack_timeout", step->line); return; }
-
-    // The evidence must be NEWER than the request: a position/velocity pair that
-    // predates the F3 frame proves nothing about the state it asked for.
-    const bool freshSinceRequest =
-        snapshot.positionValid && snapshot.velocityValid &&
-        snapshot.positionAge < elapsed && snapshot.velocityAge < elapsed;
-    // A disable additionally has to see its own stop confirmation, and no
-    // request may still be in flight.
-    const bool settled = !snapshot.enablePending && (wanted || !snapshot.stopPending);
-    if (snapshot.enableAck && snapshot.enabled == wanted && settled &&
-        freshSinceRequest && stationary(snapshot)) {
-        advance(now);
-        return;
-    }
-    if (elapsed >= kEnableWaitMs) {
-        fail(now, wanted ? "enable_not_stationary" : "disable_not_stationary", step->line);
-    }
-}
-
-void CommandQueue::waitMove(uint32_t now) {
-    const QueueStep* step = currentStep();
-    if (step == nullptr) { fail(now, "internal_step", 0); return; }
-    switch (motor_.moveOutcome()) {
-        case MotorControl::MoveOutcome::Done: advance(now); return;
-        case MotorControl::MoveOutcome::Running: break;
-        case MotorControl::MoveOutcome::Failed: fail(now, "move_failed", step->line); return;
-        case MotorControl::MoveOutcome::Cancelled: fail(now, "move_cancelled", step->line); return;
-        case MotorControl::MoveOutcome::None: fail(now, "move_not_started", step->line); return;
-    }
-}
-
-void CommandQueue::waitHome(uint32_t now) {
-    const QueueStep* step = currentStep();
-    if (step == nullptr) { fail(now, "internal_step", 0); return; }
-    switch (motor_.homeOutcome()) {
-        case MotorControl::HomeOutcome::Done: advance(now); return;
-        case MotorControl::HomeOutcome::Running: break;
-        case MotorControl::HomeOutcome::NoMotion: {
-            // Manual 12/22: the trigger was answered with "already at the origin
-            // or the limit is already triggered, the motor did not move". That is
-            // reported distinctly and the queue only continues once a fresh
-            // stationary pair that arrived AFTER that answer confirms the node is
-            // not moving. It never claims a homing run happened, and the wait is
-            // bounded so a silent node cannot keep the run alive forever.
-            if (evidenceAt_ == 0) evidenceAt_ = now;
-            const uint32_t elapsed = uint32_t(now - evidenceAt_);
-            const MotorControl::Snapshot snapshot = motor_.snapshot(step->id);
-            if (stationary(snapshot) &&
-                snapshot.positionAge < elapsed && snapshot.velocityAge < elapsed) {
-                evidenceAt_ = 0;
-                setMessage("home_no_motion");
-                advance(now);
-                return;
-            }
-            if (elapsed >= kEvidenceWaitMs) {
-                evidenceAt_ = 0;
-                fail(now, "home_no_motion_timeout", step->line);
-            }
-            return;
-        }
-        case MotorControl::HomeOutcome::Failed: fail(now, "home_failed", step->line); return;
-        case MotorControl::HomeOutcome::Cancelled: fail(now, "home_cancelled", step->line); return;
-        case MotorControl::HomeOutcome::None: fail(now, "home_not_started", step->line); return;
-    }
-}
-
-void CommandQueue::waitTimed(uint32_t now) {
-    const QueueStep* step = currentStep();
-    if (step == nullptr) { fail(now, "internal_step", 0); return; }
-    if (int32_t(now - deadlineAt_) < 0) return;  // still inside the timed window
-    const Result result = motor_.stop(step->id);
-    if (result.code >= 300) { fail(now, result.message, step->line); return; }
-    phase_ = kPhaseStop;
-    phaseAt_ = now;
-}
-
-void CommandQueue::waitStop(uint32_t now) {
-    const QueueStep* step = currentStep();
-    if (step == nullptr) { fail(now, "internal_step", 0); return; }
-    const MotorControl::Snapshot snapshot = motor_.snapshot(step->id);
-    if (!snapshot.stopPending && stationary(snapshot)) { advance(now); return; }
-    if (uint32_t(now - phaseAt_) >= kStopWaitMs) {
-        fail(now, "stop_unconfirmed", step->line);
-    }
-}
-
-void CommandQueue::waitTimer(uint32_t now) {
-    if (int32_t(now - deadlineAt_) < 0) return;
-    advance(now);
+    dispatchStep(now, step);
 }
 
 void CommandQueue::poll(uint32_t now) {
     if (state_ != QueueState::Running) return;
 
-    // A lost bus or a latched fault ends the run: nothing continues blind and no
-    // step is ever advanced on a timeout. The controller's own fault tag is
-    // reported, so the run says WHY it stopped (ack_rejected, move_timeout, ...)
-    // instead of a generic label.
-    if (!motor_.ready()) { fail(now, "can_unavailable", currentStep() ? currentStep()->line : 0); return; }
-    if (motor_.hasFault()) { fail(now, motor_.faultTag(), currentStep() ? currentStep()->line : 0); return; }
-
-    // Keep the controller aimed at this step's node in every phase. A status
-    // read or an unrelated read command for another address must not steal the
-    // feedback target the running step depends on.
-    const QueueStep* step = currentStep();
-    if (step != nullptr && step->action != QueueAction::Hex &&
-        step->action != QueueAction::Can && step->action != QueueAction::Wait) {
-        motor_.watch(step->id);
-    }
-
+    // No board state is consulted here: no fault, no pending stop, no feedback
+    // freshness and no controller verdict. The sender's only hard requirement is
+    // that the bus can transmit at all - otherwise nothing could be sent and the
+    // run must say so instead of pretending.
     switch (phase_) {
-        case kPhaseIdle: beginStep(now); return;
-        case kPhaseWatch: watchTarget(now); return;
-        case kPhaseEnable: waitEnable(now); return;
-        case kPhaseMove: waitMove(now); return;
-        case kPhaseHome: waitHome(now); return;
-        case kPhaseTimed: waitTimed(now); return;
-        case kPhaseStop: waitStop(now); return;
-        case kPhaseWait: waitTimer(now); return;
+        case kPhaseMotion:
+            observeMotion(now);
+            return;
+        case kPhaseIdle:
+            beginStep(now);
+            return;
+        case kPhaseWait:
+            if (int32_t(now - deadlineAt_) < 0) return;
+            advance(now);
+            return;
+        case kPhaseTimed: {
+            if (int32_t(now - deadlineAt_) < 0) return;
+            // Legacy timed form: the user asked for this duration, so one FE
+            // frame goes out now and the next step follows immediately. It is not
+            // a stop confirmation and nothing waits for one.
+            const QueueStep* step = currentStep();
+            const uint8_t id = step != nullptr ? step->id : 0;
+            if (!sendStopFrame(id)) { fail(now, "tx_failed", step != nullptr ? step->line : 0); return; }
+            advance(now);
+            return;
+        }
     }
     fail(now, "internal_phase", 0);
+}
+
+// Observe completion without invoking the manual controller's fault/stop policy.
+// Missing feedback keeps this line waiting and can recover; rejection releases
+// the queue with a reason. Neither path sends stop/disable or latches a fault.
+void CommandQueue::observeMotion(uint32_t now) {
+    const QueueStep* step = currentStep();
+    if (!step) return;
+    auto& n = motor_.nodes_[step->id];
+    const bool home = step->action == QueueAction::Home;
+    const uint8_t opcode = home ? 0x9A : 0xCD;
+    const auto newer = [](uint32_t a, uint32_t b) { return int32_t(a-b) > 0; };
+    if (n.queueAckFunction == opcode && n.queueAckPending) {
+        n.queueAckPending = false;
+        observedAckAt_ = n.queueAckMs;
+        const uint8_t code = n.queueAckStatus;
+        if (code == 0xE2 || code == 0xEE) {
+            fail(now, code == 0xE2 ? "driver_rejected" : "driver_command_error", step->line);
+            return;
+        }
+        if (code == 2 || code == 0x9F || (home && (code == 0x12 || code == 0x22))) {
+            if (!accepted_) { accepted_ = true; phaseAt_ = n.queueAckMs; }
+            if (home && code != 2 && !homeComplete_) {
+                homeComplete_ = true;
+                homeProofAt_ = n.queueAckMs;
+            }
+        }
+    }
+    if (home) {
+        // RX accumulates transitions in arrival order, before another frame can
+        // overwrite the public latest-value cache (including same-tick frames).
+        if (n.queueHomeFailed) { fail(now, "home_failed", step->line); return; }
+        homeSeenRunning_ = n.queueHomeRunning;
+        homeComplete_ = n.queueHomeComplete;
+        homeProofAt_ = n.queueHomeProofMs;
+    }
+    // Anchor to the completion transition, NOT each subsequent idle response.
+    // Otherwise the 3B/36/35 query cycle resets the stationary pair count forever.
+    const uint32_t proofAt = home && homeComplete_ ? homeProofAt_ : phaseAt_;
+    const bool fresh = n.positionValid && n.velocityValid &&
+        newer(n.positionMs, proofAt) && newer(n.velocityMs, proofAt) &&
+        now-n.positionMs < 1000 && now-n.velocityMs < 1000;
+    bool reached = home ? accepted_ && homeComplete_ :
+        accepted_ && n.targetValid && newer(n.targetMs, phaseAt_) &&
+        now-n.targetMs < 1000 &&
+        int64_t(n.positionTenths)-n.targetTenths <= 1 &&
+        int64_t(n.positionTenths)-n.targetTenths >= -1;
+    if (!fresh || !reached) doneSamples_ = 0;
+    if (fresh && newer(n.positionMs, donePosAt_) && newer(n.velocityMs, doneVelAt_)) {
+        donePosAt_ = n.positionMs; doneVelAt_ = n.velocityMs;
+        if (reached && n.velocityTenths >= -5 && n.velocityTenths <= 5) ++doneSamples_;
+        else doneSamples_ = 0;
+        if (doneSamples_ >= 2) { advance(now); setMessage("running"); return; }
+    }
+    setMessage(now-phaseAt_ > 2000 && !fresh ? "waiting_feedback" :
+        (home ? "waiting_home" : "waiting_position"));
+    if (home) {
+        setMessage(!accepted_ ? "home_wait_ack" :
+            !homeComplete_ ? (homeSeenRunning_ ? "home_wait_end" : "home_wait_start_or_done") :
+            !fresh ? "home_wait_fresh_feedback" :
+            (n.velocityTenths < -5 || n.velocityTenths > 5) ? "home_wait_stationary" :
+            "home_confirming_stationary");
+    }
+    if (!motor_.autoQueriesEnabled()) {
+        setMessage("automatic_queries_paused");
+        return;
+    }
+    if (now-queryAt_ >= 50) {
+        const uint8_t query[] = {step->id, uint8_t(queryIndex_ == 0 ? (home ? 0x3B : 0x33) :
+            (queryIndex_ == 1 ? 0x36 : 0x35)), 0x6B};
+        if (!motor_.queueSendLogical(query, sizeof(query))) {
+            fail(now, "tx_failed", step->line);
+            return;
+        }
+        queryAt_ = now; queryIndex_ = (queryIndex_+1)%3;
+    }
 }
 
 namespace {
