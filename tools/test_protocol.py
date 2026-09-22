@@ -19,3 +19,12 @@ with tempfile.TemporaryDirectory(prefix='babytech-protocol-') as output:
         '-o', str(binary),
     ], check=True)
     subprocess.run([str(binary)], check=True)
+    v2_binary = Path(output) / ('protocol-v2-test.exe' if os.name == 'nt' else 'protocol-v2-test')
+    sources = ['BoardProtocol.cpp', 'BoardProtocolV2.cpp', 'BoardEndpoint.cpp', 'BoardClient.cpp']
+    subprocess.run([
+        compiler, '-std=c++11', '-Wall', '-Wextra', '-Werror',
+        '-I', str(root / 'shared/BoardProtocol/src'),
+        *[str(root / 'shared/BoardProtocol/src' / name) for name in sources],
+        str(root / 'shared/BoardProtocol/test/test_v2.cpp'), '-o', str(v2_binary),
+    ], check=True)
+    subprocess.run([str(v2_binary)], check=True)

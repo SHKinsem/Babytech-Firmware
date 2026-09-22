@@ -10,11 +10,13 @@ main{max-width:640px;margin:8vh auto;padding:24px}h1{font-size:30px;margin-botto
 dl{display:grid;grid-template-columns:1fr 1fr;gap:16px}dd{margin:0;text-align:right}
 button{background:#246951;color:white;border:0;border-radius:8px;padding:12px 20px;font:inherit;cursor:pointer}
 button:disabled{opacity:.6}small,.note{color:#536c61}#connection{font-weight:600}
+label{display:block;margin:10px 0}input{float:right;width:130px;padding:6px;font:inherit;max-width:45%}
+.actions{display:flex;gap:8px;flex-wrap:wrap}form button{margin:12px 6px 0 0}.stop{background:#a82d30}
 </style>
 <main>
 <small>BABYTECH / FIRMWARE</small>
 <h1>双板通信调试</h1>
-<p class="note">确认大脑与小脑之间的串口连接。</p>
+<p class="note">通过上板调试下板的单电机相对运动阶段。</p>
 <section class="card">
 <p id="connection" role="status">正在连接大脑…</p>
 <dl><dt>小脑连接</dt><dd id="motion">等待反馈</dd>
@@ -23,7 +25,24 @@ button:disabled{opacity:.6}small,.note{color:#536c61}#connection{font-weight:600
 <button id="query" type="button">查询小脑状态</button>
 <p id="result" role="status"></p>
 </section>
-<p class="note">当前验证板间通信；电机控制、传感器和屏幕界面尚未接入。</p>
+<section class="card">
+<h2>单电机阶段</h2>
+<p class="note">先应用参数，等待电机反馈，再显式使能并运行。修改仅保存在下板 RAM；不自动使能或运行。</p>
+<form id="parameters">
+<label>电机 ID <input name="motor" type="number" min="1" max="255" required></label>
+<label>相对角度（0.1°）<input name="angleTenths" type="number" min="-36000" max="36000" required></label>
+<label>转速（0.1 rpm）<input name="speedTenths" type="number" min="1" max="1200" required></label>
+<label>加速度（rpm/s）<input name="accel" type="number" min="1" max="240" required></label>
+<label>减速度（rpm/s）<input name="decel" type="number" min="1" max="240" required></label>
+<label>限流（mA）<input name="current" type="number" min="100" max="5000" required></label>
+<button id="apply" type="submit" disabled>应用参数</button>
+<button id="reload" type="button" disabled>重新读取表单</button>
+</form>
+<p id="stage-state" role="status">等待下板状态…</p>
+<div class="actions"><button id="enable" disabled>使能</button><button id="run" disabled>运行阶段</button><button id="disable" disabled>失能</button><button id="stop" class="stop">停止全部</button></div>
+<p id="command-result" role="status">尚未发送动作</p>
+</section>
+<p class="note">当前阶段只控制单电机相对运动，开盖、混合等机构动作尚未接入。上板离线不代表电机已停止。</p>
 </main>
 <script>
 const byId = id => document.getElementById(id);
@@ -31,6 +50,51 @@ let refreshing = false;
 let expectedAfter = null;
 let queryAt = 0;
 let responseCount = 0;
+let latest = null, formBoot = null, formRevision = 0, sending = false, applyPending = null;
+const form = byId('parameters');
+const commands = {none:'尚未发送动作',waiting:'已发送，等待下板回复',accepted:'下板已接受，等待执行结果',ok:'参数已应用',done:'下板已确认完成',rejected:'下板拒绝请求',failed:'执行失败',cancelled:'执行已取消',unknown:'结果未知，正在查询下板',unknown_after_restart:'下板已重启，上次结果未知'};
+const reasons = ['无','忙碌','参数不合法','状态不允许（可能尚未使能）','尚未准备好','故障锁定','不支持','参数版本已变化','超时','反馈过期','请求冲突','结果已过期','下板已重启','停止未确认','内部错误'];
+function loadForm() {
+  if (!latest || !latest.connected || !latest.parameterRevision || latest.parameterRevision !== latest.revision) return;
+  for (const [key,value] of Object.entries(latest.params)) form.elements.namedItem(key).value=value;
+  formBoot=latest.boot; formRevision=latest.parameterRevision;
+}
+function updateControls(s) {
+  const ready=s.connected && s.parameterRevision>0 && s.parameterRevision===s.revision;
+  if (ready && (formBoot===null || formBoot!==s.boot || (applyPending!==null && s.parameterRevision===applyPending+1 && s.command==='ok'))) {
+    loadForm(); applyPending=null;
+  }
+  const matches=ready && formBoot===s.boot && formRevision===s.revision;
+  const editable=matches && !s.busy && !sending;
+  byId('apply').disabled=!editable;
+  byId('reload').disabled=!ready || sending;
+  const applied=Object.entries(s.params).every(([key,value])=>Number(form.elements.namedItem(key).value)===value);
+  for (const key of ['enable','run','disable']) byId(key).disabled=!editable || !applied;
+  byId('stage-state').textContent=s.connected ? `下板：${s.motionState} · 参数版本 ${s.revision} · 电机反馈${(s.motorFlags & 3)===3?'有效':'未就绪'}` : '下板离线，反馈未知';
+  byId('command-result').textContent=(commands[s.command]||'未知结果')+(s.reason?'：'+(reasons[s.reason]||s.reason):'');
+}
+async function post(path,values) {
+  if (sending && path!=='/api/stop') return;
+  sending=true;
+  if (latest) updateControls(latest);
+  try {
+    const reply=await fetch(path,{method:'POST',body:new URLSearchParams(values)});
+    const data=await reply.json();
+    if (!reply.ok) throw new Error(data.error||'请求被拒绝');
+    byId('command-result').textContent='请求已发送，等待下板确认';
+  } catch(error) { byId('command-result').textContent='请求未确认：'+error.message; }
+  finally { sending=false; }
+}
+form.onsubmit=event=>{
+  event.preventDefault(); applyPending=formRevision;
+  post('/api/params',{...Object.fromEntries(new FormData(form)),boot:formBoot,revision:formRevision});
+};
+form.oninput=()=>{if(latest)updateControls(latest);};
+byId('reload').onclick=()=>{loadForm();if(latest)updateControls(latest);};
+for (const action of ['enable','run','disable']) byId(action).onclick=()=>post('/api/exec',{
+  action,boot:formBoot,revision:formRevision,motor:latest.params.motor
+});
+byId('stop').onclick=()=>post('/api/stop',{});
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
@@ -39,6 +103,7 @@ async function refresh() {
     if (!reply.ok) throw new Error('status unavailable');
     const s = await reply.json();
     responseCount = s.responses;
+    latest=s; updateControls(s);
     byId('connection').textContent = '大脑已连接';
     byId('motion').textContent = s.connected ? '在线' : '未连接';
     byId('uptime').textContent = s.connected ? (s.motionUptimeMs / 1000).toFixed(1) + ' 秒' : '—';
@@ -52,6 +117,8 @@ async function refresh() {
     }
   } catch {
     byId('connection').textContent = '大脑连接断开，请检查 Wi-Fi。';
+    for (const key of ['apply','reload','enable','run','disable']) byId(key).disabled=true;
+    byId('stage-state').textContent='状态未知，请检查连接。';
     byId('motion').textContent = '未知';
     byId('uptime').textContent = '—';
     if (expectedAfter !== null) { expectedAfter = null; byId('result').textContent = '查询中断。'; }

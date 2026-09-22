@@ -49,6 +49,8 @@ export function ManualPanel({
   frames,
   annotations,
   gateReason,
+  limits = MANUAL_LIMITS,
+  limitsConfirmed = false,
   onSend,
   onStop,
   onCopy,
@@ -76,8 +78,8 @@ export function ManualPanel({
             unit="°"
             value={values.angle}
             error={errors.angle}
-            help="正数幅值，内部按 0.1° 取整后作为 CD 指令的行程字；转向由「方向」决定。"
-            range={`${MANUAL_LIMITS.minAbsAngleDeg}..${MANUAL_LIMITS.maxAbsAngleDeg}°`}
+            help={`正数幅值，内部按 0.1° 取整后作为 CD 指令的行程字；转向由「方向」决定。${device ? '上限来自板端已确认的「调试限制」。' : ''}`}
+            range={`${limits.minAbsAngleDeg}..${limits.maxAbsAngleDeg}°`}
             onChange={(value) => onChange('angle', value)}
           />
 
@@ -115,8 +117,8 @@ export function ManualPanel({
             unit="RPM"
             value={values.speed}
             error={errors.speed}
-            help="按 0.1 RPM 下发（MotionCore kTenthsPerRpm）。"
-            range={`${MANUAL_LIMITS.minSpeedRpm}..${MANUAL_LIMITS.maxSpeedRpm} RPM`}
+            help="按 0.1 RPM 下发（MotionCore kTenthsPerRpm）；上限来自板端已确认的「调试限制」。"
+            range={`${limits.minSpeedRpm}..${limits.maxSpeedRpm} RPM`}
             onChange={(value) => onChange('speed', value)}
           />
           <MoveField
@@ -125,8 +127,8 @@ export function ManualPanel({
             unit="RPM/s"
             value={values.accel}
             error={errors.accel}
-            help="整数 RPM/s；位置指令的加减速在线上不乘 10。"
-            range={`${MANUAL_LIMITS.minAccelRpmS}..${MANUAL_LIMITS.maxAccelRpmS} RPM/s`}
+            help="整数 RPM/s；位置指令的加减速在线上不乘 10，上限来自板端已确认的「调试限制」。"
+            range={`${limits.minAccelRpmS}..${limits.maxAccelRpmS} RPM/s`}
             onChange={(value) => onChange('accel', value)}
           />
           <MoveField
@@ -135,8 +137,8 @@ export function ManualPanel({
             unit="RPM/s"
             value={values.decel}
             error={errors.decel}
-            help="整数 RPM/s。"
-            range={`${MANUAL_LIMITS.minAccelRpmS}..${MANUAL_LIMITS.maxAccelRpmS} RPM/s`}
+            help="整数 RPM/s；与加速度使用同一上限。"
+            range={`${limits.minAccelRpmS}..${limits.maxAccelRpmS} RPM/s`}
             onChange={(value) => onChange('decel', value)}
           />
           <MoveField
@@ -146,7 +148,7 @@ export function ManualPanel({
             value={values.current}
             error={errors.current}
             help="力矩由电流决定，界面不使用 Nm。"
-            range={`${MANUAL_LIMITS.minCurrentMa}..${MANUAL_LIMITS.maxCurrentMa} mA`}
+            range={`${limits.minCurrentMa}..${limits.maxCurrentMa} mA`}
             onChange={(value) => onChange('current', value)}
           />
 
@@ -168,6 +170,9 @@ export function ManualPanel({
                 <span className="prediction__item">
                   方向 <strong>{Number(values.dir) === 1 ? '反向' : '正向'}</strong>
                 </span>
+                <span className="prediction__item">
+                  时长上限 <strong>{Math.round(limits.maxExpectedDurationMs / 1000)} s</strong>
+                </span>
               </div>
             </div>
           </div>
@@ -178,6 +183,15 @@ export function ManualPanel({
               运动需要电机处于使能状态；当前 {motor.enabled ? '已使能' : '未使能'}（地址 0x{hexByte(address)}）。
             </span>
           </p>
+          {device && limitsConfirmed ? (
+            <p className="info-line">
+              <GlyphInfo />
+              <span>
+                板端已确认限制：速度 ≤ {limits.maxSpeedRpm} RPM · 加减速 ≤ {limits.maxAccelRpmS} RPM/s ·
+                电流 ≤ {limits.maxCurrentMa} mA · 行程 ≤ {limits.maxAbsAngleDeg}° · 时长 ≤ {Math.round(limits.maxExpectedDurationMs / 1000)} s（可在「调试限制」中修改）
+              </span>
+            </p>
+          ) : null}
         </div>
 
         <div className="actions">
@@ -233,7 +247,9 @@ export function ManualPanel({
         </div>
 
         <p className="panel__foot">
-          角度、速度与电流的取值区间沿用 MotionCore.h 的请求校验范围；越界直接报错，不做静默截断。
+          {device
+            ? '角度、速度、加减速与电流按板端已确认的「调试限制」校验（最小值为固件约束，上限为板端策略）；越界直接报错，不做静默截断。'
+            : '角度、速度与电流的取值区间沿用 MotionCore.h 的请求校验范围；越界直接报错，不做静默截断。'}
         </p>
       </section>
     </div>

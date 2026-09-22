@@ -21,7 +21,7 @@
 
 namespace fakecan {
 
-enum class TxKind { ReadSysParam, Enable, Stop, Move };
+enum class TxKind { ReadSysParam, Enable, Stop, Move, Direct };
 
 // Semantic view of one transmitted command, in emission order.
 struct TxRecord {
@@ -29,14 +29,19 @@ struct TxRecord {
     uint8_t addr = 0;
     X42sSysParam param = X42sSysParam::Cpos;  // ReadSysParam
     bool enableState = false;                 // Enable
-    bool sync = false;                        // Enable / Stop
-    uint8_t dir = 0;                          // Move
-    uint16_t vel = 0;                         // Move
+    bool sync = false;                        // Enable / Stop / Move / Direct
+    uint8_t dir = 0;                          // Move / Direct
+    uint16_t vel = 0;                         // Move / Direct
     uint16_t accel = 0;                       // Move
     uint16_t decel = 0;                       // Move
-    uint32_t magnitude = 0;                   // Move
-    uint8_t motionMode = 0;                   // Move
-    uint16_t currentMa = 0;                   // Move
+    uint32_t magnitude = 0;                   // Move / Direct
+    uint8_t motionMode = 0;                   // Move / Direct
+    uint16_t currentMa = 0;                   // Move / Direct (CB only)
+    // Direct only: the complete logical command as it goes on the wire
+    // ([addr][FB|CB][dir][speed][angle][mode][sync]([current])[6B]), so a test
+    // can assert the exact bytes of one FB/CB frame.
+    std::vector<uint8_t> bytes;
+    bool withCurrentLimit = false;  // Direct: CB (true) or FB (false)
 };
 
 extern std::vector<CanRawFrame> capturedTX;  // every transmitted frame, raw
@@ -61,6 +66,13 @@ void injectRx(const CanRawFrame& frame);
 // bits 8..15, packet index 0), matching x42sCanIsSinglePacketDataFrame().
 CanRawFrame makeFrame(uint8_t addr, const uint8_t* data, uint8_t length);
 CanRawFrame makePosition(uint8_t addr, int32_t tenthsDeg);
+// 0x33: the driver's target position (manual V1.0.5 p70), same layout as 0x36.
+// This is the value mode-0 commands resolve against and the completion proof.
+CanRawFrame makeTarget(uint8_t addr, int32_t tenthsDeg);
+// 0x34: the real-time setpoint (manual V1.0.5 p71), which may be an
+// intermediate trajectory value. Provided so tests can prove it is never
+// accepted in place of a 0x33 target sample.
+CanRawFrame makeSetpoint(uint8_t addr, int32_t tenthsDeg);
 CanRawFrame makeVelocity(uint8_t addr, int32_t tenthsRpm);
 CanRawFrame makeCurrent(uint8_t addr, uint16_t milliamps);
 CanRawFrame makeAck(uint8_t addr, uint8_t function, uint8_t status);

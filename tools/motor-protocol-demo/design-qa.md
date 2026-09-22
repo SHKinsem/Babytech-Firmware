@@ -51,3 +51,46 @@ Desktop-only acceptance (per latest user direction): 1513×1039 and 1280×800. N
 Twelve browser acceptance groups cover protocol requests, enable gating, command/address validation, stop while another request is pending, stale display clearing, Wi-Fi scan/connect/forget, no startup POST and no external assets. Firmware builds independently with the generated HTML embedded. Physical CAN/radio verification was not performed; the user explicitly requested no flashing.
 
 Device desktop design result: passed. Hardware acceptance: not performed.
+
+## Scale drift diagnostics QA — 2026-09-22
+
+- Source visual truth: `C:\Users\xusen\.codex\generated_images\01a0c405-c0b3-7552-b9ce-54f03c98643a\exec-839fb725-b7a3-43ad-bf06-b9a4dd9df9ce.png` (the third displayed ideation result selected by the user).
+- Implementation screenshot: `qa/device-scale-1280.png`.
+- Browser: Codex in-app browser against the final embedded device build with local fixture responses for `/api/status`, `/api/trace`, and `/api/scale`.
+- Viewport and density: implementation 1280 × 800 CSS px at density 1, captured as 1280 × 800 pixels. Source raster is 1672 × 941 pixels; it was reviewed at original density and visually normalized by matching the full desktop frame and section proportions rather than stretching either image.
+- State: connected HX711 composite channel, calibrated, stable, live sampling, calibration editor closed.
+- Full-view comparison evidence: the source and `qa/device-scale-1280.png` were opened together in one comparison input at original resolution. The header, active tab, three-column proportions, drift chart hierarchy, diagnostic rows, action placement, and bottom event table match the selected direction.
+- Focused comparison: no extra crop was required because the original-resolution full views kept chart axes, diagnostic labels, actions, and event columns readable. Accessibility-tree inspection separately confirmed labels, headings, controls, statuses, and table semantics.
+
+### Comparison history
+
+1. First implementation capture used the motor tab after a stale accessibility index. This was a P1 evidence mismatch, not an application defect. The page was reloaded, the current tab index was resolved again, and the selected scale state was recaptured.
+2. The initial scale state said “等待板端称重数据” after the first successful sample. This P2 copy/state mismatch was fixed so the first successful poll changes it to “实时采集中”. The embedded page was rebuilt and recaptured.
+3. Final comparison found no actionable P0/P1/P2 differences. Remaining data-value differences are expected live telemetry; layout, typography, colors, copy hierarchy, and interaction anatomy match the source.
+
+### Required fidelity surfaces
+
+- Fonts and typography: uses the existing system Chinese UI stack and monospaced numeric stack. Section headings, KPIs, axis labels, diagnostic values, and table copy preserve the source hierarchy without clipping at 1280 × 800.
+- Spacing and layout rhythm: preserves the existing 64 px toolbar, 48 px tabs, three-column work area, thin separators, and fixed lower event table. Main controls stay visible at the accepted laptop viewport with no document-level horizontal overflow.
+- Colors and tokens: reuses the product's navy text, indigo actions, pale blue-gray side surface, green success, amber drift, red fault, and cool-gray separators. No gradients or decorative elevation were introduced.
+- Image quality and assets: the selected screen has no photo or illustration assets. Icons reuse the installed Phosphor package. The live data chart is rendered sharply at device pixel ratio and resizes with its panel.
+- Copy and content: identifies HX711 channel 1 as two paralleled full bridges and explicitly states that individual-sensor drift cannot be separated. All displayed diagnostics map to the scale API or browser-derived recent-sample calculations.
+
+### Interaction and runtime validation
+
+- Opened the final embedded build in the in-app browser and tested the scale tab at 1280 × 800.
+- Verified live `/api/scale` polling, unique-sample history, 60-second drift chart, noise span, sample-rate estimate, stability duration, filters, search, pause, and clear-record controls.
+- Verified `POST /api/scale/tare`, visible in-progress and completed states, and operation records.
+- Verified the calibration editor, 500 g submission to `/api/scale/calibrate`, updated `countsPerGram`, success copy, and calibration event row.
+- Browser console: no warnings or errors.
+- `npm test`: 21/21 protocol and planner tests passed.
+- `npm run build:device`: passed; generated one 311,679-byte embedded HTML file with no external runtime assets.
+- WSL motion validation: protocol suite 133 checks passed, motor/UART suite 679 checks passed, PlatformIO motion build passed. Final usage: 72,368 bytes RAM (22.1%) and 1,098,297 bytes flash (16.8%).
+- Physical HX711 sampling and hardware calibration were not performed in this local visual QA.
+
+### Follow-up polish
+
+- P3: the source mock shows a fully populated 60-second line immediately; the real page intentionally grows the line from the right as actual samples arrive after opening the tab.
+- P3: telemetry values and stable/drift color vary with live data, so screenshots will not preserve the mock's exact numbers.
+
+final result: passed

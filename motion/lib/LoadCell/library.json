@@ -1,0 +1,7 @@
+{
+  "name": "BabytechLoadCell",
+  "version": "1.0.0",
+  "description": "HX711 sampling, calibration, filtering and diagnostics for the motion board",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

@@ -157,7 +157,7 @@ void testRangeAndNonFiniteRejection() {
     expectRejected(makeRequest(1, INFINITY, 60.0f, 60.0f, 60.0f, 800), "angle_not_finite");
     expectRejected(makeRequest(1, -INFINITY, 60.0f, 60.0f, 60.0f, 800), "angle_not_finite");
 
-    expectRejected(makeRequest(1, 90.0f, 0.04f, 60.0f, 60.0f, 800), "speed_rounds_to_zero");
+    expectRejected(makeRequest(1, 90.0f, 0.04f, 60.0f, 60.0f, 800), "speed_out_of_range");
     expectRejected(makeRequest(1, 90.0f, 120.1f, 60.0f, 60.0f, 800), "speed_out_of_range");
     expectRejected(makeRequest(1, 90.0f, NAN, 60.0f, 60.0f, 800), "speed_not_finite");
     expectRejected(makeRequest(1, 90.0f, INFINITY, 60.0f, 60.0f, 800), "speed_not_finite");

@@ -505,6 +505,10 @@ export function isMotionItem(itemId) {
 //
 // Mirrors motion::buildMovePlan() from references/MotionCore.h: nothing is
 // clipped silently, every rejected value gets a reason.
+//
+// The accepted ranges come from the caller. The offline demo passes the static
+// catalog ranges (MANUAL_LIMITS); the device page passes the confirmed board
+// limits, so the planner and the board-side gate agree on one policy.
 // ---------------------------------------------------------------------------
 
 export const MANUAL_DEFAULTS = {
@@ -543,7 +547,7 @@ function requireInteger(value, label, min, max, errors, key) {
   return value;
 }
 
-export function planManualMove(input) {
+export function planManualMove(input, limits = MANUAL_LIMITS) {
   const errors = {};
 
   const angle = parseNumberField(input.angle, '相对角度', errors, 'angle');
@@ -558,8 +562,8 @@ export function planManualMove(input) {
   let magnitudeTenths = null;
   if (angle !== null) {
     // Finite raw range first, then round, like motion::buildMovePlan().
-    if (angle < MANUAL_LIMITS.minAbsAngleDeg || angle > MANUAL_LIMITS.maxAbsAngleDeg) {
-      errors.angle = `相对角度需在 ${MANUAL_LIMITS.minAbsAngleDeg}..${MANUAL_LIMITS.maxAbsAngleDeg}° 之间（正数幅值，方向由方向字段决定）`;
+    if (angle < limits.minAbsAngleDeg || angle > limits.maxAbsAngleDeg) {
+      errors.angle = `相对角度需在 ${limits.minAbsAngleDeg}..${limits.maxAbsAngleDeg}° 之间（正数幅值，方向由方向字段决定）`;
     } else {
       magnitudeTenths = Math.round(angle * TENTHS_PER_DEGREE);
       if (magnitudeTenths === 0) errors.angle = '相对角度四舍五入后为 0，请填写不小于 0.1° 的值';
@@ -568,8 +572,8 @@ export function planManualMove(input) {
 
   let speedTenths = null;
   if (speed !== null) {
-    if (speed < MANUAL_LIMITS.minSpeedRpm || speed > MANUAL_LIMITS.maxSpeedRpm) {
-      errors.speed = `速度需在 ${MANUAL_LIMITS.minSpeedRpm}..${MANUAL_LIMITS.maxSpeedRpm} RPM 之间`;
+    if (speed < limits.minSpeedRpm || speed > limits.maxSpeedRpm) {
+      errors.speed = `速度需在 ${limits.minSpeedRpm}..${limits.maxSpeedRpm} RPM 之间`;
     } else {
       speedTenths = Math.round(speed * TENTHS_PER_RPM);
       if (speedTenths === 0) errors.speed = '速度四舍五入后为 0，请填写不小于 0.1 RPM 的值';
@@ -577,13 +581,13 @@ export function planManualMove(input) {
   }
 
   const accel = requireInteger(
-    accelRaw, '加速度', MANUAL_LIMITS.minAccelRpmS, MANUAL_LIMITS.maxAccelRpmS, errors, 'accel',
+    accelRaw, '加速度', limits.minAccelRpmS, limits.maxAccelRpmS, errors, 'accel',
   );
   const decel = requireInteger(
-    decelRaw, '减速度', MANUAL_LIMITS.minAccelRpmS, MANUAL_LIMITS.maxAccelRpmS, errors, 'decel',
+    decelRaw, '减速度', limits.minAccelRpmS, limits.maxAccelRpmS, errors, 'decel',
   );
   const current = requireInteger(
-    currentRaw, '电流上限', MANUAL_LIMITS.minCurrentMa, MANUAL_LIMITS.maxCurrentMa, errors, 'current',
+    currentRaw, '电流上限', limits.minCurrentMa, limits.maxCurrentMa, errors, 'current',
   );
 
   if (Object.keys(errors).length > 0) {
@@ -591,10 +595,11 @@ export function planManualMove(input) {
   }
 
   const durationMs = expectedDurationMs(magnitudeTenths, speedTenths, accel, decel);
-  if (durationMs === 0 || durationMs > MANUAL_LIMITS.maxExpectedDurationMs) {
+  if (durationMs === 0 || durationMs > limits.maxExpectedDurationMs) {
+    const capSeconds = Math.round(limits.maxExpectedDurationMs / 1000);
     return {
       ok: false,
-      errors: { speed: '按当前速度与加减速估算的时长超出 60 秒上限，请提高速度或减小行程' },
+      errors: { speed: `按当前速度与加减速估算的时长超出 ${capSeconds} 秒上限，请提高速度或减小行程` },
       plan: null,
       targetTenths: null,
       deltaTenths: 0,

@@ -10,6 +10,9 @@ enum class X42sSysParam : uint8_t {
     Vbus = 3,
     Cpha = 5,
     Encl = 7,
+    // Tpos (0x33, manual V1.0.5 p70) is the driver's target position: the target
+    // the last position command asked for. The read-only 0x34 of p71 is the
+    // real-time setpoint instead and is deliberately not exposed here.
     Tpos = 8,
     Vel = 9,
     Cpos = 10,
@@ -90,6 +93,22 @@ public:
     void originModifyParams(uint8_t addr, bool save, uint8_t mode, uint8_t dir, uint16_t vel, uint32_t timeoutMs, uint16_t stallVel, uint16_t stallMa, uint16_t stallMs, bool powerOnTrigger);
     void originTriggerReturn(uint8_t addr, uint8_t mode, bool sync);
     void originInterrupt(uint8_t addr);
+
+    // Raw transports used by the board queue (see queue-contract.md).
+    //
+    // Both are exact: no whitelist, no parameter policy, no ACK or completion
+    // tracking and no implicit stop. The caller owns the consequences.
+    //
+    // sendRawLogical: address + function + body + checksum, fragmented exactly
+    // like sendCommand (every packet repeats the function code) but it STOPS at
+    // the first failed packet instead of continuing a partial multi-packet
+    // command. id 0 is the documented broadcast; length must be 3..30.
+    bool sendRawLogical(const uint8_t* bytes, uint8_t length);
+    // sendRawFrame: one actual CAN data frame. The identifier, the format
+    // (11-bit / 29-bit) and the bytes go out verbatim: no 0x6B is appended and
+    // nothing is rewritten. Validated: ext id <= 0x1FFFFFFF, std id <= 0x7FF,
+    // length <= 8. One bounded transmission attempt, no retry.
+    bool sendRawFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length);
 
 private:
     bool sendCommand(

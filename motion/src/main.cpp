@@ -1,18 +1,26 @@
 // ESP32-S3 motion board MVP.
 //
 // Responsibilities of this file:
-//   * brain link (legacy BoardProtocol GetStatus/Status frames) over UART1,
+//   * brain link (BoardProtocol v2 READ/WRITE/EXEC/STOP frames) over UART1,
 //   * CAN bring-up + motor command HTTP API (delegated to motion::MotorControl),
 //   * WiFi soft-AP + single embedded debug page (motion/data/index.html).
 //
 // It sends no enable or movement command on boot. Every motion command has to
-// come from an explicit HTTP request; the driver may already be enabled.
+// come from an explicit HTTP or UART request; the driver may already be enabled.
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
 
-#include <BoardProtocol.h>
+#include <BoardProtocolV2.h>
+#include <Hx711Scale.h>
+#include "QueueBoardMotion.h"
+#include "CommandQueue.h"
+#include "ProtocolGate.h"
+#include <esp_efuse.h>
+#include <esp_efuse_table.h>
+#include <esp_system.h>
 #include <MotorControl.h>
 #include "WiFiSetup.h"
 
@@ -28,12 +36,166 @@ extern const uint8_t indexHtmlEnd[] asm("_binary_data_index_html_end");
 namespace {
 
 HardwareSerial brain(1);
-babytech::Parser parser;
+babytech::v2::Parser parser;
 motion::MotorControl motor;
+motion::Hx711Scale powderScale;
+motion::CommandQueue queue(motor);
+QueueBoardMotion boardMotion(motor, queue);
+babytech::v2::Endpoint endpoint(boardMotion);
 WebServer server(kHttpPort);
-bool motionBusy() { return motor.hasActiveMotion(); }
+// The queue is a board operation like any other: while it runs, Wi-Fi scanning
+// and the scale/config endpoints stay blocked.
+bool motionBusy() { return endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
 WiFiSetup wifiSetup(server, motionBusy);
 uint32_t lastBrainByteAt = 0;
+int scaleDoutPin = kScaleDoutPin;
+int scaleSckPin = kScaleSckPin;
+
+// ---------------------------------------------------------------------------
+// Per-motor rotation distance (mm per revolution), stored in NVS.
+//
+// The queue resolves every mm step from this table at validation time and never
+// falls back to a default: an id without a stored distance rejects the program.
+// ---------------------------------------------------------------------------
+constexpr char kMotorDistanceNamespace[] = "motor-distance";
+double rotationMmValue[256] = {};
+bool rotationMmValid[256] = {};
+
+bool rotationMmAllowed(double value) {
+    return value >= motion::kQueueMinRotationMm && value <= motion::kQueueMaxRotationMm;
+}
+
+void rotationKey(uint8_t id, char* out, size_t capacity) {
+    snprintf(out, capacity, "d%u", static_cast<unsigned int>(id));
+}
+
+bool saveRotationMm(uint8_t id, double value) {
+    Preferences prefs;
+    if (!prefs.begin(kMotorDistanceNamespace, false)) return false;
+    char key[8];
+    rotationKey(id, key, sizeof(key));
+    const bool saved = prefs.putBytes(key, &value, sizeof(value)) == sizeof(value);
+    prefs.end();
+    return saved;
+}
+
+bool clearRotationMm(uint8_t id) {
+    Preferences prefs;
+    if (!prefs.begin(kMotorDistanceNamespace, false)) return false;
+    char key[8];
+    rotationKey(id, key, sizeof(key));
+    // A key that was never stored is already "cleared"; only an existing key
+    // that refuses to go away is a failure.
+    if (prefs.isKey(key) && !prefs.remove(key)) {
+        prefs.end();
+        return false;
+    }
+    prefs.end();
+    return true;
+}
+
+void loadRotationDistances() {
+    Preferences prefs;
+    if (!prefs.begin(kMotorDistanceNamespace, true)) return;
+    for (uint16_t id = 1; id < 256; ++id) {
+        char key[8];
+        rotationKey(static_cast<uint8_t>(id), key, sizeof(key));
+        // Check the key first: reading 255 missing keys would only fill the log
+        // with not-found errors.
+        if (!prefs.isKey(key)) continue;
+        if (prefs.getBytesLength(key) != sizeof(double)) continue;
+        double value = 0.0;
+        if (prefs.getBytes(key, &value, sizeof(value)) == sizeof(value) &&
+            rotationMmAllowed(value)) {
+            rotationMmValue[id] = value;
+            rotationMmValid[id] = true;
+        }
+    }
+    prefs.end();
+}
+
+// Adapts the stored table to the queue's rotation source.
+class BoardRotationSource : public motion::QueueRotationSource {
+public:
+    bool rotationMm(uint8_t id, double& out) const override {
+        if (!rotationMmValid[id]) return false;
+        out = rotationMmValue[id];
+        return true;
+    }
+};
+BoardRotationSource boardRotation;
+
+constexpr char kScaleIoNamespace[] = "scale-io";
+constexpr char kScaleIoPinsKey[] = "pins";
+
+bool scaleGpio45Allowed() {
+    // GPIO45's strap selects VDD_SPI unless both eFuses force it to 3.3 V.
+    // Reading these bits is harmless; this firmware never writes eFuses.
+    static const bool allowed = esp_efuse_read_field_bit(ESP_EFUSE_VDD_SPI_FORCE) &&
+                                esp_efuse_read_field_bit(ESP_EFUSE_VDD_SPI_TIEH);
+    return allowed;
+}
+
+bool scalePinAllowed(int pin) {
+    // GPIO 22..37 are not exposed on this N16R8 board. CAN, UART, native USB
+    // and strapping pins stay reserved so a web setting cannot break recovery.
+    if (!((pin >= 1 && pin <= 21) || (pin >= 38 && pin <= 48))) return false;
+    if (pin == 45) return scaleGpio45Allowed();
+    return pin != kCanTxPin && pin != kCanRxPin &&
+           pin != kLinkTxPin && pin != kLinkRxPin &&
+           pin != 3 && pin != 19 && pin != 20 && pin != 46;
+}
+
+bool scalePinsAllowed(int doutPin, int sckPin) {
+    return doutPin != sckPin && scalePinAllowed(doutPin) && scalePinAllowed(sckPin);
+}
+
+uint32_t encodeScalePins(int doutPin, int sckPin) {
+    return static_cast<uint32_t>(doutPin) |
+           (static_cast<uint32_t>(sckPin) << 8) |
+           (static_cast<uint32_t>(doutPin ^ 0xFF) << 16) |
+           (static_cast<uint32_t>(sckPin ^ 0xFF) << 24);
+}
+
+void loadScalePins() {
+    Preferences preferences;
+    if (!preferences.begin(kScaleIoNamespace, true)) return;
+    const uint32_t packed = preferences.getUInt(kScaleIoPinsKey, 0);
+    preferences.end();
+    const int doutPin = packed & 0xFF;
+    const int sckPin = (packed >> 8) & 0xFF;
+    const bool checksumValid = ((packed >> 16) & 0xFF) == (doutPin ^ 0xFF) &&
+                               ((packed >> 24) & 0xFF) == (sckPin ^ 0xFF);
+    if (checksumValid && scalePinsAllowed(doutPin, sckPin)) {
+        scaleDoutPin = doutPin;
+        scaleSckPin = sckPin;
+    }
+}
+
+bool saveScalePins(int doutPin, int sckPin) {
+    Preferences preferences;
+    if (!preferences.begin(kScaleIoNamespace, false)) return false;
+    const bool saved = preferences.putUInt(
+        kScaleIoPinsKey, encodeScalePins(doutPin, sckPin)) == sizeof(uint32_t);
+    preferences.end();
+    return saved;
+}
+
+motion::Hx711ScaleConfig makeScaleConfig() {
+    motion::Hx711ScaleConfig config;
+    config.doutPin = scaleDoutPin;
+    config.sckPin = scaleSckPin;
+    config.startupDiscardSamples = 4;
+    config.processing.tareOffsetRaw = 0;
+    config.processing.countsPerGram = 0.0f;
+    config.processing.filterDivisor = 4;
+    config.processing.stableSampleCount = 8;
+    config.processing.stableToleranceG = 1.0f;
+    config.processing.sampleTimeoutMs = 1500;
+    config.processing.rawMin = -8300000;
+    config.processing.rawMax = 8300000;
+    return config;
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -180,40 +342,27 @@ bool argDecimal(const char* name, double& out) {
 }
 
 // ---------------------------------------------------------------------------
-// Brain link: GetStatus query -> Status frame
-//
-// Only a GetStatus frame with an empty payload is answered. Payload layout is
-// six bytes as understood by BoardProtocol::readStatus: uptime little endian,
-// one motion state byte, one flags byte (bit0 motors, bit1 sensors).
+// Brain link: v2 shared endpoint, bounded receive and event servicing.
 // ---------------------------------------------------------------------------
-
+void sendFrame(const babytech::v2::Frame& frame) {
+    uint8_t bytes[babytech::v2::kMaxFrameSize];
+    const size_t n=babytech::v2::encode(frame,bytes,sizeof(bytes));
+    if (n) brain.write(bytes,n);
+}
 void serviceBrainLink() {
-    if (millis() - lastBrainByteAt > babytech::kByteTimeoutMs) parser.reset();
-
-    for (size_t count = 0; count < kLinkBytesPerPass && brain.available() > 0; ++count) {
-        lastBrainByteAt = millis();
-        babytech::Frame request;
-        if (!parser.push(static_cast<uint8_t>(brain.read()), request)) continue;
-        if (request.type != babytech::Type::GetStatus || request.length != 0) continue;
-
-        const uint32_t uptimeMs = millis();
-        uint8_t payload[6];
-        payload[0] = static_cast<uint8_t>(uptimeMs & 0xFFu);
-        payload[1] = static_cast<uint8_t>((uptimeMs >> 8) & 0xFFu);
-        payload[2] = static_cast<uint8_t>((uptimeMs >> 16) & 0xFFu);
-        payload[3] = static_cast<uint8_t>((uptimeMs >> 24) & 0xFFu);
-        payload[4] = static_cast<uint8_t>(babytech::MotionState::NotConfigured);
-        uint8_t flags = 0;
-        if (motor.anyMotorOnline()) flags |= 0x01u;  // motors available
-        // bit1 (sensors available) stays clear: no sensor drivers integrated.
-        payload[5] = flags;
-
-        uint8_t response[babytech::kMaxFrameSize];
-        const size_t length = babytech::encode(babytech::Type::Status, request.sequence,
-                                               payload, sizeof(payload), response,
-                                               sizeof(response));
-        if (length) brain.write(response, length);
+    using namespace babytech::v2;
+    if (millis()-lastBrainByteAt>kByteTimeoutMs) parser.reset();
+    boardMotion.setRadioBusy(wifiSetup.busy() || queue.active());
+    for (size_t count=0;count<kLinkBytesPerPass && brain.available()>0;++count) {
+        lastBrainByteAt=millis(); Frame request,response;
+        if (parser.push(uint8_t(brain.read()),request)) {
+            // Endpoint validates and deduplicates before QueueBoardMotion::stop
+            // cancels any queue. Reads cannot acquire mechanical ownership.
+            if (endpoint.handle(request,millis(),response)) sendFrame(response);
+        }
     }
+    Frame event;
+    for (uint8_t i=0;i<2 && endpoint.tick(millis(),event);++i) sendFrame(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -237,10 +386,115 @@ void handleStatus() {
         return;
     }
     const uint8_t target = static_cast<uint8_t>(id);
-    motor.watch(target);
+    // Reading a status must not steal the polling target from a running queue.
+    if (!endpoint.busy() && !queue.active()) motor.watch(target);
     // statusJson is already a complete JSON object; the body is forwarded
     // unmodified. It carries no uptime field.
     sendJson(200, motor.statusJson(target));
+}
+
+String scaleStatusJson() {
+    const uint32_t nowMs = millis();
+    const motion::LoadCellSnapshot& snapshot = powderScale.snapshot();
+    const bool fresh = snapshot.hasSample &&
+        snapshot.status != motion::LoadCellStatus::Stale &&
+        snapshot.status != motion::LoadCellStatus::Fault;
+    String body;
+    body.reserve(460);
+    body += F("{\"ok\":true,\"initialized\":");
+    body += powderScale.initialized() ? F("true") : F("false");
+    body += F(",\"doutPin\":"); body += scaleDoutPin;
+    body += F(",\"sckPin\":"); body += scaleSckPin;
+    body += F(",\"gpio45Allowed\":"); body += scaleGpio45Allowed() ? F("true") : F("false");
+    body += F(",\"available\":"); body += fresh ? F("true") : F("false");
+    body += F(",\"status\":\""); body += motion::loadCellStatusName(snapshot.status);
+    body += F("\",\"calibrated\":"); body += snapshot.calibrated ? F("true") : F("false");
+    body += F(",\"stable\":"); body += snapshot.stable ? F("true") : F("false");
+    body += F(",\"rawCounts\":");
+    body += snapshot.hasSample ? String(snapshot.raw) : String(F("null"));
+    body += F(",\"netCounts\":");
+    body += snapshot.hasSample ? String(snapshot.netRaw) : String(F("null"));
+    body += F(",\"rawWeightG\":");
+    body += snapshot.calibrated && fresh
+        ? String(snapshot.rawWeightG, 3) : String(F("null"));
+    body += F(",\"weightG\":");
+    body += snapshot.calibrated && fresh
+        ? String(snapshot.filteredWeightG, 3) : String(F("null"));
+    body += F(",\"sampleAgeMs\":");
+    body += snapshot.hasSample ? String(nowMs - snapshot.sampledAtMs) : String(F("null"));
+    body += F(",\"sampleCount\":"); body += snapshot.sampleCount;
+    body += F(",\"tareInProgress\":");
+    body += powderScale.tareInProgress() ? F("true") : F("false");
+    body += F(",\"tareCompleted\":");
+    body += powderScale.tareCompleted() ? F("true") : F("false");
+    body += F(",\"calibrationPersisted\":");
+    body += powderScale.calibrationPersisted() ? F("true") : F("false");
+    body += F(",\"tareRaw\":"); body += powderScale.tareOffsetRaw();
+    body += F(",\"countsPerGram\":");
+    body += snapshot.calibrated ? String(powderScale.countsPerGram(), 6) : String(F("null"));
+    body += '}';
+    return body;
+}
+
+void handleScaleTare() {
+    if (motionBusy()) { sendError(409, F("motion_active")); return; }
+    if (!powderScale.initialized()) { sendError(503, F("scale_unavailable")); return; }
+    if (!powderScale.startTare()) { sendError(409, F("tare_already_active")); return; }
+    sendJson(202, F("{\"ok\":true,\"message\":\"tare_started\"}"));
+}
+
+void handleScaleCalibrate() {
+    if (motionBusy()) { sendError(409, F("motion_active")); return; }
+    double knownWeightG = 0.0;
+    if (!argDecimal("knownWeightG", knownWeightG) ||
+        knownWeightG < 1.0 || knownWeightG > 5000.0) {
+        sendError(400, F("knownWeightG must be within 1..5000"));
+        return;
+    }
+    const motion::LoadCellSnapshot& snapshot = powderScale.snapshot();
+    if (!powderScale.tareCompleted()) { sendError(409, F("tare_required")); return; }
+    if (!snapshot.hasSample || snapshot.status == motion::LoadCellStatus::Stale ||
+        snapshot.status == motion::LoadCellStatus::Fault ||
+        static_cast<uint32_t>(millis() - snapshot.sampledAtMs) > powderScale.sampleTimeoutMs()) {
+        sendError(409, F("fresh_scale_sample_required"));
+        return;
+    }
+    if (!powderScale.calibrate(static_cast<float>(knownWeightG), millis())) {
+        sendError(422, F("calibration_failed"));
+        return;
+    }
+    sendJson(200, scaleStatusJson());
+}
+
+void handleScaleConfig() {
+    if (motionBusy()) { sendError(409, F("motion_active")); return; }
+    long doutPin = -1;
+    long sckPin = -1;
+    if (!argInteger("doutPin", doutPin) || !argInteger("sckPin", sckPin)) {
+        sendError(400, F("doutPin and sckPin must be integers"));
+        return;
+    }
+    if (!scalePinsAllowed(static_cast<int>(doutPin), static_cast<int>(sckPin))) {
+        sendError(400, F("scale_pin_invalid_or_reserved"));
+        return;
+    }
+    if (doutPin == scaleDoutPin && sckPin == scaleSckPin) {
+        sendJson(200, scaleStatusJson());
+        return;
+    }
+    if (!saveScalePins(static_cast<int>(doutPin), static_cast<int>(sckPin))) {
+        sendError(500, F("scale_pin_save_failed"));
+        return;
+    }
+    powderScale.end();
+    scaleDoutPin = static_cast<int>(doutPin);
+    scaleSckPin = static_cast<int>(sckPin);
+    if (!powderScale.begin(makeScaleConfig(), millis())) {
+        sendError(500, F("scale_reconfigure_failed"));
+        return;
+    }
+    Serial.printf("[scale] IO changed to DOUT%d/SCK%d from web\n", scaleDoutPin, scaleSckPin);
+    sendJson(200, scaleStatusJson());
 }
 
 void handleEnable() {
@@ -258,12 +512,25 @@ void handleEnable() {
         sendError(400, F("enabled must be 0 or 1"));
         return;
     }
-    if (enabledRaw == "1" && wifiSetup.busy()) { sendError(409, F("wifi_busy")); return; }
+    const bool enabling = enabledRaw == "1";
+    if (enabling) {
+        // Enabling while the queue runs would hand the same node to two owners.
+        if (queue.active()) { sendError(409, F("queue_busy")); return; }
+        if (endpoint.busy()) { sendError(409, F("uart_operation_active")); return; }
+        if (wifiSetup.busy()) { sendError(409, F("wifi_busy")); return; }
+    } else if (queue.active()) {
+        // Disabling is an authorised stop: it takes the node back from the queue
+        // before the controller action and stays available while the UART or
+        // Wi-Fi owns the bus.
+        queue.cancel("stopped");
+    }
     const uint8_t target = static_cast<uint8_t>(id);
-    sendResult("enable", id, motor.enable(target, enabledRaw == "1"));
+    sendResult("enable", id, motor.enable(target, enabling));
 }
 
 void handleMove() {
+    if (queue.active()) { sendError(409, F("queue_busy")); return; }
+    if (endpoint.busy()) { sendError(409, F("uart_operation_active")); return; }
     if (wifiSetup.busy()) {
         sendError(409, F("wifi_busy"));
         return;
@@ -283,8 +550,9 @@ void handleMove() {
         sendError(400, F("angle must not be 0"));
         return;
     }
-    if (angle < -3600.0 || angle > 3600.0) {
-        sendError(400, F("angle must be within -3600..3600"));
+    const auto& limits = motor.debugLimits();
+    if (fabs(angle) < 0.1 || fabs(angle) > limits.maxAngleTenths / 10.0) {
+        sendError(400, F("angle_out_of_range"));
         return;
     }
 
@@ -293,24 +561,24 @@ void handleMove() {
         sendError(400, F("speed must be a number"));
         return;
     }
-    if (speed < 0.1 || speed > 120.0) {
-        sendError(400, F("speed must be within 0.1..120 rpm"));
+    if (speed < 0.1 || speed > limits.maxSpeedTenths / 10.0) {
+        sendError(400, F("speed_out_of_range"));
         return;
     }
 
     long accel = 0;
-    if (!argInteger("accel", accel) || accel < 1 || accel > 240) {
-        sendError(400, F("accel must be an integer 1..240"));
+    if (!argInteger("accel", accel) || accel < 1 || static_cast<uint32_t>(accel) > limits.maxAccelRpmS) {
+        sendError(400, F("accel_out_of_range"));
         return;
     }
     long decel = 0;
-    if (!argInteger("decel", decel) || decel < 1 || decel > 240) {
-        sendError(400, F("decel must be an integer 1..240"));
+    if (!argInteger("decel", decel) || decel < 1 || static_cast<uint32_t>(decel) > limits.maxAccelRpmS) {
+        sendError(400, F("decel_out_of_range"));
         return;
     }
     long currentMa = 0;
-    if (!argInteger("current", currentMa) || currentMa < 100 || currentMa > 5000) {
-        sendError(400, F("current must be an integer 100..5000"));
+    if (!argInteger("current", currentMa) || currentMa < 100 || static_cast<uint32_t>(currentMa) > limits.maxCurrentMa) {
+        sendError(400, F("current_out_of_range"));
         return;
     }
 
@@ -332,12 +600,16 @@ void handleStop() {
         sendError(400, F("id must be an integer 1..255"));
         return;
     }
+    // An authorised stop cancels a running queue first and always stays
+    // available, even when the queue software already failed.
+    if (queue.active()) queue.cancel("stopped");
     const uint8_t target = static_cast<uint8_t>(id);
     sendResult("stop", id, motor.stop(target));
 }
 
 void handleStopAll() {
-    sendResult("stop-all", -1, motor.stopAll());
+    const auto result = queue.cancel("stopped");
+    sendResult("stop-all", -1, result.code < 300 ? motion::Result{202,"queued"} : result);
 }
 
 void handleCommand() {
@@ -354,6 +626,27 @@ void handleCommand() {
         if (!(i % 2)) bytes[i/2] = static_cast<uint8_t>(digit << 4);
         else bytes[i/2] |= static_cast<uint8_t>(digit);
     }
+    const auto kind=motion::validateCommand(bytes,hex.length()/2,motor.debugLimits());
+    // Stop, interrupt and disable are authorised cancellations: they take the
+    // node back from the queue before they are dispatched. The validated kind
+    // decides, never the raw byte alone, so a malformed frame can never cancel a
+    // running program.
+    const bool stopLike = kind==motion::CommandKind::Stop || kind==motion::CommandKind::Interrupt ||
+        (kind==motion::CommandKind::Enable && bytes[3]==0);
+    if (queue.active()) {
+        // Reads stay available while a queue runs: only mutations need the
+        // single-owner rule.
+        if (kind == motion::CommandKind::Read) {
+            // fall through to the dispatch below
+        } else if (stopLike) {
+            queue.cancel("stopped");
+        } else {
+            sendError(409, F("queue_busy")); return;
+        }
+    }
+    if (endpoint.busy() && kind!=motion::CommandKind::Stop && kind!=motion::CommandKind::Interrupt) {
+        sendError(409,F("uart_operation_active")); return;
+    }
     // Stops and disable remain accessible while the radio is occupied.
     if (wifiSetup.busy() && bytes[1] != 0xFE && bytes[1] != 0x9C &&
         !(bytes[1] == 0xF3 && hex.length() == 12 && bytes[3] == 0)) {
@@ -362,16 +655,167 @@ void handleCommand() {
     sendResult("command", bytes[0], motor.command(bytes, hex.length()/2));
 }
 
+String limitsJson() {
+    const auto& v = motor.debugLimits();
+    String json = "{\"maxSpeedRpm\":";
+    json += String(v.maxSpeedTenths / 10.0, 1);
+    json += ",\"maxAccelRpmS\":"; json += v.maxAccelRpmS;
+    json += ",\"maxCurrentMa\":"; json += v.maxCurrentMa;
+    json += ",\"maxAngleDeg\":"; json += String(v.maxAngleTenths / 10.0, 1);
+    json += ",\"maxMoveSeconds\":"; json += v.maxMoveDurationMs / 1000;
+    json += ",\"experimentSeconds\":"; json += v.experimentDurationMs / 1000;
+    json += "}";
+    return json;
+}
+
+void loadDebugLimits() {
+    Preferences prefs;
+    if (!prefs.begin("debug-limits", true)) return;
+    motion::DebugLimits saved;
+    const bool loaded = prefs.getBytesLength("config") == sizeof(saved) &&
+        prefs.getBytes("config", &saved, sizeof(saved)) == sizeof(saved);
+    prefs.end();
+    if (loaded && motion::validDebugLimits(saved)) motor.setDebugLimits(saved);
+}
+
+void handleLimits() {
+    if (endpoint.busy() || motor.operationBusy() || queue.active()) {
+        sendError(409, F("limits_busy")); return;
+    }
+    double speed = 0, angle = 0;
+    long accel = 0, current = 0, moveSeconds = 0, experimentSeconds = 0;
+    if (!argDecimal("maxSpeedRpm", speed) || speed < 0.1 || speed > 3000 ||
+        fabs(speed * 10 - round(speed * 10)) > 0.000001 ||
+        !argDecimal("maxAngleDeg", angle) || angle < 0.1 || angle > 360000 ||
+        fabs(angle * 10 - round(angle * 10)) > 0.000001 ||
+        !argInteger("maxAccelRpmS", accel) || accel < 1 || accel > 65535 ||
+        !argInteger("maxCurrentMa", current) || current < 100 || current > 5000 ||
+        !argInteger("maxMoveSeconds", moveSeconds) || moveSeconds < 1 || moveSeconds > 3600 ||
+        !argInteger("experimentSeconds", experimentSeconds) || experimentSeconds < 0 || experimentSeconds > 3600) {
+        sendError(400, F("limits_invalid")); return;
+    }
+    motion::DebugLimits next;
+    next.maxSpeedTenths = static_cast<uint32_t>(lround(speed * 10));
+    next.maxAngleTenths = static_cast<uint32_t>(lround(angle * 10));
+    next.maxAccelRpmS = accel; next.maxCurrentMa = current;
+    next.maxMoveDurationMs = static_cast<uint32_t>(moveSeconds) * 1000;
+    next.experimentDurationMs = static_cast<uint32_t>(experimentSeconds) * 1000;
+    if (!motion::validDebugLimits(next)) { sendError(400, F("limits_invalid")); return; }
+    Preferences prefs;
+    if (!prefs.begin("debug-limits", false)) { sendError(500, F("limits_save_failed")); return; }
+    const bool saved = prefs.putBytes("config", &next, sizeof(next)) == sizeof(next);
+    prefs.end();
+    if (!saved) { sendError(500, F("limits_save_failed")); return; }
+    // HTTP and motor.poll run in one loop, so no operation can start between
+    // the busy check and the atomic NVS update. Never emit a motor frame here.
+    motor.setDebugLimits(next);
+    sendJson(200, limitsJson());
+}
+
 void handleNotFound() {
     const String uri = server.uri();
     const bool knownPath = uri == "/" || uri == "/api/status" || uri == "/api/enable" ||
-                           uri == "/api/command" || uri == "/api/trace" || uri == "/api/can-debug" || uri == "/api/move" || uri == "/api/stop" || uri == "/api/stop-all";
+                           uri == "/api/command" || uri == "/api/trace" || uri == "/api/can-debug" ||
+                           uri == "/api/move" || uri == "/api/stop" || uri == "/api/stop-all" ||
+                           uri == "/api/scale" || uri == "/api/scale/tare" ||
+                           uri == "/api/scale/calibrate" || uri == "/api/scale/config" || uri == "/api/limits" ||
+                           uri == "/api/queue" || uri == "/api/queue/start" || uri == "/api/queue/cancel" ||
+                           uri == "/api/motor-distance";
     if (knownPath) {
         server.sendHeader("Allow", "GET, POST");
         sendError(405, F("method not allowed"));
         return;
     }
     sendError(404, F("not found"));
+}
+
+// ---------------------------------------------------------------------------
+// Board queue + per-ID rotation distance
+// ---------------------------------------------------------------------------
+
+String motorDistanceJson(uint8_t id) {
+    String body = F("{\"id\":");
+    body += static_cast<unsigned int>(id);
+    body += F(",\"rotationDistance\":");
+    // Six decimals: the smallest accepted distance (0.000001 mm/rev) still
+    // prints as a non-zero number, so an allowed value never reads back as 0.
+    if (rotationMmValid[id]) body += String(rotationMmValue[id], 6);
+    else body += F("null");
+    body += '}';
+    return body;
+}
+
+void handleMotorDistance() {
+    long id = 0;
+    if (!argInteger("id", id) || id < 1 || id > 255) {
+        sendError(400, F("id must be an integer 1..255"));
+        return;
+    }
+    const uint8_t target = static_cast<uint8_t>(id);
+    if (server.method() == HTTP_GET) {
+        sendJson(200, motorDistanceJson(target));
+        return;
+    }
+    // A running queue has already resolved its mm steps: the distances are
+    // immutable for that run, so the write is refused instead of taking effect
+    // half way through.
+    if (queue.active() || endpoint.busy() || motor.operationBusy()) {
+        sendError(409, F("distance_busy"));
+        return;
+    }
+    double value = 0.0;
+    if (!argDecimal("rotationDistance", value) || value < 0.0 || value > 1000000.0) {
+        sendError(400, F("rotationDistance_out_of_range"));
+        return;
+    }
+    if (value == 0.0) {
+        if (!clearRotationMm(target)) { sendError(500, F("distance_save_failed")); return; }
+        rotationMmValue[target] = 0.0;
+        rotationMmValid[target] = false;
+        sendJson(200, motorDistanceJson(target));
+        return;
+    }
+    if (!rotationMmAllowed(value)) { sendError(400, F("rotationDistance_out_of_range")); return; }
+    if (!saveRotationMm(target, value)) { sendError(500, F("distance_save_failed")); return; }
+    // Only a successful NVS write updates RAM.
+    rotationMmValue[target] = value;
+    rotationMmValid[target] = true;
+    sendJson(200, motorDistanceJson(target));
+}
+
+void sendQueueResult(const motion::Result& result, bool started) {
+    if (result.code < 300) {
+        sendJson(started ? 202 : 200, queue.statusJson());
+        return;
+    }
+    String body = F("{\"ok\":false,\"error\":\"");
+    body += result.message;
+    body += F("\",\"line\":");
+    body += static_cast<unsigned int>(queue.lastErrorLine());
+    body += '}';
+    sendJson(result.code, body);
+}
+
+void handleQueueStart() {
+    if (endpoint.busy() || wifiSetup.busy() || motor.operationBusy() || queue.active()) {
+        sendError(409, F("queue_busy"));
+        return;
+    }
+    if (!server.hasArg("program")) { sendError(400, F("program_required")); return; }
+    long repeat = 1;
+    if (!argInteger("repeat", repeat) || repeat < 1 ||
+        repeat > static_cast<long>(motion::kQueueMaxRepeat)) {
+        sendError(400, F("repeat_out_of_range"));
+        return;
+    }
+    const String program = server.arg("program");
+    sendQueueResult(queue.start(program.c_str(), program.length(), repeat, boardRotation, millis()), true);
+}
+
+void handleQueueCancel() {
+    // Cancelling also stops everything, and it stays available even when the
+    // queue itself already failed: an authorised stop must keep working.
+    sendQueueResult(queue.cancel("cancelled"), false);
 }
 
 
@@ -382,8 +826,19 @@ void setup() {
     Serial.println();
     Serial.println("[boot] Babytech Motion: AP + HTTP debug bridge. No motion on boot.");
 
+    uint64_t boot=(uint64_t(esp_random())<<32)|esp_random();
+    endpoint.begin(boot);
     brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
     Serial.println("[uart] brain link ready on TX43/RX44 @115200");
+
+    loadScalePins();
+    if (!powderScale.begin(makeScaleConfig(), millis())) {
+        Serial.println("[scale] HX711 initialization failed; scale API stays diagnostic-only");
+    } else {
+        Serial.printf("[scale] HX711 ready on DOUT%d/SCK%d; calibration=%s\n",
+                      scaleDoutPin, scaleSckPin,
+                      powderScale.calibrationPersisted() ? "stored" : "required");
+    }
 
     if (!motor.begin(kCanTxPin, kCanRxPin, kCanBitrate)) {
         Serial.println("[can] init failed; HTTP stays up, motor commands will be rejected");
@@ -391,27 +846,48 @@ void setup() {
         Serial.printf("[can] ready on TX%d/RX%d @%ld\n", kCanTxPin, kCanRxPin, kCanBitrate);
     }
 
+    loadDebugLimits();
+    loadRotationDistances();
     wifiSetup.begin();
 
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
+    server.on("/api/limits", HTTP_GET, []() { sendJson(200, limitsJson()); });
+    server.on("/api/limits", HTTP_POST, handleLimits);
     server.on("/api/can-debug", HTTP_GET, []() { sendJson(200, motor.canDebugJson()); });
     server.on("/api/trace", HTTP_GET, []() { sendJson(200, motor.traceJson()); });
+    server.on("/api/scale", HTTP_GET, []() { sendJson(200, scaleStatusJson()); });
+    server.on("/api/scale/config", HTTP_POST, handleScaleConfig);
+    server.on("/api/scale/tare", HTTP_POST, handleScaleTare);
+    server.on("/api/scale/calibrate", HTTP_POST, handleScaleCalibrate);
     server.on("/api/command", HTTP_POST, handleCommand);
     server.on("/api/enable", HTTP_POST, handleEnable);
     server.on("/api/move", HTTP_POST, handleMove);
     server.on("/api/stop", HTTP_POST, handleStop);
     server.on("/api/stop-all", HTTP_POST, handleStopAll);
+    // Board queue: GET never executes anything, start validates the whole
+    // program before the first CAN frame, cancel also stops everything.
+    server.on("/api/queue", HTTP_GET, []() { sendJson(200, queue.statusJson()); });
+    server.on("/api/queue/start", HTTP_POST, handleQueueStart);
+    server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
+    server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);
+    server.on("/api/motor-distance", HTTP_POST, handleMotorDistance);
     server.onNotFound(handleNotFound);
     server.begin();
     Serial.println("[http] listening on port 80; no enable or movement command sent on boot");
 }
 
 void loop() {
+    powderScale.poll(millis());
     motor.poll();
+    // The queue drives one supervised action per poll and never blocks.
+    queue.poll(millis());
+    serviceBrainLink();
     server.handleClient();
     wifiSetup.poll();
+    powderScale.poll(millis());
     motor.poll();
+    queue.poll(millis());
     serviceBrainLink();
     delay(1);
 }

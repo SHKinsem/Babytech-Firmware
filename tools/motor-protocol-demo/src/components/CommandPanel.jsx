@@ -3,8 +3,11 @@ import { FrameList } from './FrameList.jsx';
 import { GlyphInfo, HelpTip } from './glyphs.jsx';
 
 function Segmented({ label, options, value, onChange, name }) {
+  // Groups with many options (homing 0..5, motion mode 0..2) get a modifier so
+  // the device stylesheet can wrap them instead of overflowing the column.
+  const many = options.length > 3;
   return (
-    <div className="segmented" role="radiogroup" aria-label={label}>
+    <div className={`segmented${many ? ' segmented--many' : ''}`} role="radiogroup" aria-label={label}>
       {options.map((option) => {
         // Variant options carry string keys while protocol fields carry numbers.
         const selected = typeof option.value === 'number'

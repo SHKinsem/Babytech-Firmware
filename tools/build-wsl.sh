@@ -50,6 +50,7 @@ rsync -rc --delete --exclude='.git/' --exclude='.pio/' --exclude='out/' \
 cd "$build_root"
 python3 tools/test_protocol.py
 python3 tools/test_motion.py
+python3 tools/test_raw_can.py
 if [[ "$target" == test ]]; then exit 0; fi
 if [[ "$target" == all ]]; then projects=(motion brain); else projects=("$target"); fi
 

@@ -1459,6 +1459,18 @@ textarea {
   color: #cbd2da;
 }
 
+.glyph--dot-warn {
+  color: #f59e0b;
+}
+
+.glyph--dot-danger {
+  color: var(--red);
+}
+
+.glyph--dot-muted {
+  color: #cbd2da;
+}
+
 .glyph--chevron-icon {
   color: var(--muted);
 }

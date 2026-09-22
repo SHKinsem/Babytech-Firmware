@@ -14,12 +14,12 @@
 
 当前提供两条调试路径：brain 的 UART 状态页，以及 motion 独立热点的 CAN 电机调试页。
 
-- `brain/`：`Babytech-Debug` 热点与中文状态页，每 500 ms 查询下板。
-- `motion/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。一次跟踪一个运动。
-- `shared/BoardProtocol/`：板间 UART 状态协议。motor 可用标志来自真实反馈；机械状态仍为 `not_configured`，传感器未接入。
+- `brain/`：`Babytech-Debug` 热点与中文状态页，使用 v2 四指令查询状态、修改 RAM 参数、显式使能、执行单电机阶段和停止。
+- `motion/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。下板默认从 GPIO1/2 采样 HX711，网页可修改并持久化 DOUT/SCK，同时提供称重状态、去皮和标定 API。
+- `shared/BoardProtocol/`：板间 UART v2 四指令协议、客户端与执行入口。完成状态来自真实电机反馈；机构尚未接入，称重数据暂未加入板间载荷。
 - `tools/test_protocol.py`、`tools/test_motion.py`：主机协议、参数与反馈解析检查。
 
-调试热点暂放下板，便于独立台架调试；未来网络和显示由 brain 承担。当前未接入传感器、LCD/触摸、云端、机构动作或多电机联动。上电不发送使能或运动指令。
+调试热点暂放下板，便于独立台架调试；未来网络和显示由 brain 承担。当前只接入 HX711 称重，尚未接入其他传感器、LCD/触摸、云端、机构动作或多电机联动。上电不发送使能或运动指令。
 
 详细操作和接口见 [下板网页调试](docs/motion-debug.md)。
 
@@ -103,9 +103,10 @@ pio run -d brain -t upload --upload-port COM_BRAIN
 ## 接下来只做这些
 
 1. 对当前 CAN 网页调试完成实机验收，再接入机构动作 Runtime。
-2. 通过 UART 接通「改一个 RAM 参数 → 执行一个阶段 → 返回结果」。
-3. 迁入已验证的屏幕/触摸驱动，在大脑上显示同一份小脑状态。
-4. 根据真实调试反馈补齐开盖、关盖、混合与参数保存。
+2. 实机验收已实现的 UART「改 RAM 参数 → 单电机阶段 → 返回结果 → 停止」闭环，见 [v2 指令表](docs/protocol-v2.md)。
+3. 将下板称重状态加入板间协议；下板调试页已接入称重、漂移诊断、去皮和标定。
+4. 迁入已验证的屏幕/触摸驱动，在大脑上显示同一份小脑状态。
+5. 根据真实调试反馈补齐开盖、关盖、混合与参数保存。
 
 App、Cloud、多家庭权限、复杂恢复和全量测试平台不进入本阶段。
 未来大脑负责页面和网络，小脑独占机械状态机与驱动；网络回调不直接操作电机。
@@ -114,15 +115,16 @@ App、Cloud、多家庭权限、复杂恢复和全量测试平台不进入本阶
 
 - 原项目：`hellowenshenghui/Babytech_Formula_Device`，参考本地 `V1-device` 的 `2ffcde2`。
 - 网页交互参考：`SHKinsem/Project-Tenny`。
-- CAN 传输库从旧工程 BabytechActuatorHal 按需迁入 `motion/lib/XMotor`；新工程不依赖旧仓库路径，旧仓库未修改。
-- 新 UART 协议使用独立 magic/version，不能与旧 DisplayController/Product 协议混用。
+- CAN 传输库和 HX711 称重核心分别从旧工程 BabytechActuatorHal、BabytechSensorHal 按需迁入 `motion/lib/`；新工程不依赖旧仓库路径，旧仓库未修改。
+- 新 UART v2 四指令协议要求上下板一起更新；不能与旧 v1 或 DisplayController/Product 协议混用。
 
-详见 [板间协议](docs/protocol.md)。
+详见 [当前板间协议 v2](docs/protocol-v2.md)；[v1 文档](docs/protocol.md) 仅供历史参考。
 
 ## 验证记录（2026-09-21）
 
-- motion：WSL 编译通过，Flash 810533 bytes，RAM 62240 bytes。
-- `pio run -d brain`：通过，Flash 721649 bytes，RAM 44844 bytes。
-- C++ 主机测试：请求/响应、分段收帧、CRC 错误、版本/长度拒绝及解析恢复通过。
-- MotionCore：133 项检查通过；电机状态机：13 个模拟 CAN 场景、576 项断言通过；网页：10 项 Playwright 模拟接口行为/布局检查通过。
+- UART v2 最小闭环：READ / WRITE / EXEC / STOP 已接通上下板，包括单电机阶段 RAM 参数、显式使能/失能、执行结果与优先停止。
+- 21:20（香港时间）WSL 双板编译通过：motion Flash 1075561 bytes、RAM 72368 bytes；brain Flash 735717 bytes、RAM 45392 bytes。motion 构建已包含 HX711、NVS 标定和称重 API；产物位于 `out/wsl/motion/` 与 `out/wsl/brain/`，两板须一起更新到 v2。
+- 协议测试：v1 回归及 v2 分段/粘包、CRC、批量写原子性、重复请求去重、丢回复结果补查、断线停止、重启恢复和查询限速通过。
+- MotionCore 133 项检查、称重处理器 3 组场景、电机控制器 679 项检查，以及 UART 执行入口与真实控制器的模拟 CAN 联调通过；使能/失能缺 ACK、停止未确认不会报告成功。
+- 上板嵌入页面 Playwright 测试通过，覆盖无自动动作、参数版本、未应用编辑、异步结果、停止、离线及重启。下板工作台的既有验证记录见其交付文档。
 - 未进行硬件烧录、实际 UART 接线验收或浏览器实机测试。

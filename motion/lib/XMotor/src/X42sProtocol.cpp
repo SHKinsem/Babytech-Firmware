@@ -497,3 +497,71 @@ void X42sProtocol::originInterrupt(uint8_t addr) {
     uint8_t cmd[] = {addr, 0x9C, 0x48, 0x6B};
     sendCommand(cmd, sizeof(cmd));
 }
+
+// Raw logical command: same packet layout as sendCommand, but a failed packet
+// ends the command instead of continuing with a partial one.
+bool X42sProtocol::sendRawLogical(const uint8_t* bytes, uint8_t length) {
+    if (!initialized_ || !bytes || length < 3 || length > 30) {
+        transmissionError_ = true;
+        return false;
+    }
+    const uint8_t payloadLen = static_cast<uint8_t>(length - 2);
+    uint8_t offset = 0, packet = 0;
+    while (offset < payloadLen) {
+        twai_message_t frame{};
+        frame.extd = 1;
+        frame.ss = 1;  // single shot: no automatic retransmission
+        frame.identifier = x42sCanFrameId(bytes[0], packet);
+        frame.data[0] = bytes[1];
+        const uint8_t remain = static_cast<uint8_t>(payloadLen - offset);
+        const uint8_t take = remain < 7 ? remain : 7;
+        uint8_t i = 0;
+        for (; i < take; ++i, ++offset) frame.data[i + 1] = bytes[offset + 2];
+        frame.data_length_code = i + 1;
+        const esp_err_t err = twai_transmit(&frame, pdMS_TO_TICKS(50));
+        if (err != ESP_OK) {
+            transmissionError_ = true;
+            return false;  // never send the later parts of a partial command
+        }
+        if (traceSink_) {
+            CanRawFrame observed;
+            observed.identifier = frame.identifier;
+            observed.extended = true;
+            observed.length = frame.data_length_code;
+            memcpy(observed.data, frame.data, observed.length);
+            traceSink_(traceContext_, observed, true);
+        }
+        ++packet;
+        // Same bounded inter-packet gap sendCommand uses: the motor needs a
+        // moment between the packets of one multi-packet command.
+        delay(2);
+    }
+    return true;
+}
+
+bool X42sProtocol::sendRawFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length) {
+    if (!initialized_ || length > 8 || (length > 0 && data == nullptr) ||
+        (extended ? id > 0x1FFFFFFFu : id > 0x7FFu)) {
+        transmissionError_ = true;
+        return false;
+    }
+    twai_message_t frame{};
+    frame.extd = extended ? 1 : 0;
+    frame.ss = 1;  // single shot: no automatic retransmission
+    frame.identifier = id;
+    frame.data_length_code = length;
+    for (uint8_t i = 0; i < length; ++i) frame.data[i] = data[i];
+    if (twai_transmit(&frame, pdMS_TO_TICKS(50)) != ESP_OK) {
+        transmissionError_ = true;
+        return false;
+    }
+    if (traceSink_) {
+        CanRawFrame observed;
+        observed.identifier = id;
+        observed.extended = extended;
+        observed.length = length;
+        memcpy(observed.data, frame.data, length);
+        traceSink_(traceContext_, observed, true);
+    }
+    return true;
+}

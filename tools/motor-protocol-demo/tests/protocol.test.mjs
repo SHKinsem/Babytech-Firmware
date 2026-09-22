@@ -155,13 +155,13 @@ test('catalog covers every public motor command from X42sProtocol.h', () => {
     assert.ok(ids.has(id), `catalog contains ${id}`);
   }
 
-  // All fourteen readSysParams options are exposed with their firmware code.
+  // Fourteen driver reads plus seven read-only V1.0.5 diagnostics.
   const readItems = COMMAND_ITEMS.filter((item) => item.groupId === 'read');
-  assert.equal(readItems.length, 14);
+  assert.equal(readItems.length, 21);
   const codes = readItems.map((item) => item.variants[0].opcode.toString(16));
   assert.deepEqual(
-    codes,
-    ['1f', '20', '21', '24', '27', '31', '33', '35', '36', '37', '3a', '3b', '42', '43'],
+    codes.sort(),
+    ['1a', '1f', '20', '21', '24', '26', '27', '31', '32', '33', '34', '35', '36', '37', '39', '3a', '3b', '3c', '3d', '42', '43'],
   );
   const conf = encode('readConf');
   assert.deepEqual(conf.bytes, [0x01, 0x42, 0x6c, 0x6b]);

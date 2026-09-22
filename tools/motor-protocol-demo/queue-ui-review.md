@@ -1,0 +1,12 @@
+# Focused UI integration fixes (same session)
+
+Initial independent npm test48pass, builddevicepass, qa-queue pass, qa-device13pass (Codex updated old fixture GETqueue separately). Do not edit qa-device/qa-limits/qa-manual-v105; Codex owns those. Backend developing in parallel. Your ownership same as queue-ui-brief.
+
+1. Actual homing status controller schema now {homeOutcome:none|running|done|no_motion|cancelled|failed,homeId,homeMode,homeOrg:null|number,homeActive,homeRunning,homeFailed}. homeStatusText must only show outcome when homeId===status.id; usehomeOrg, mapno_motion distinctly. Current testinvented already_at_origin/homeFlags mismatch. Add realfixture tests. Add9A to needsEnable array inDeviceApp; includehoming inmanualbusy gate.
+2. saveDistance async races: current implementation unconditionally setDistanceDraft capturedid afterPOST; if user switchesID/edits whilepending oldresponse overwrites newer draft. Lockboth profile inputs while savepending, synchronousrefdoubleclickguard, or generation guard preserving newer edits. Prefergenerationguard + inputdisabledwhilepending simplest. staleGETmustnot overwritepostedsave. Add Playwright delayedsaveID/edit test. Confirmresponse fields bounds not just positive.
+3. programEnables returns allhistoricalenables: enable1;disable1; thenbuilderaddmove1 skipsneeded enable. Track terminal enabledstate sequentially, raw clearsknownenable set; stop preservesit. Addtests.
+4. SAMPLE_PROGRAM too long(15actions) for user's 'fewcommands mostpower'. Make6action sample `enable1,move1 90,enable2,home2,enable3,torque3 8001500` with concisecomments; no gratuitousstop/disablelines (timedtorquealready stops, normalstopretainenable desired). Explainoptionaldisable inhelp. Fix text '浏览器断开既不会让执行继续，也不会让它停止' -> '浏览器断开后，板端仍继续执行已提交的队列'. RawPOST successmustnotclaim every stepwaitsfeedback.
+5. queueConflictReason currentlyallowF3enable too. Change to inspectpayload or pass enabled flag soonlyF3disableallowedwhilequeueactive. Backendrejectsmanualenable. Reads,FE,9C stayallowed. Preserve existingfunctiontests adapted toreal contract.
+6. Reviewpoll stale response race: POSTrunningmay be overwritten by olderGETidle, or cancelledolderrun. Gatepollbyrequestmutationepoch orrunId monotonic; ignorepollstartedbeforestart/cancelresponse. Noautomaticresubmit. Missingqueuestatus shouldn'tunlock previouslyrunningqueue. Testsdelayedprestartpoll shouldnotclearbusy.
+
+Implement boundedfixesandtests. No shell commands needed; Codex runs.

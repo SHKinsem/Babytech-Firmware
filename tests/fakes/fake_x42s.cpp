@@ -72,6 +72,22 @@ CanRawFrame makePosition(uint8_t addr, int32_t tenths) {
     return makeFrame(addr, data, sizeof(data));
 }
 
+CanRawFrame makeTarget(uint8_t addr, int32_t tenths) {
+    // Same layout as 0x36, different function code: the driver's target position
+    // (manual V1.0.5 p70) is not the actual position.
+    CanRawFrame frame = makePosition(addr, tenths);
+    frame.data[0] = 0x33;
+    return frame;
+}
+
+CanRawFrame makeSetpoint(uint8_t addr, int32_t tenths) {
+    // p71's real-time set target position: a different read that the controller
+    // must never use as a baseline or as a completion proof.
+    CanRawFrame frame = makePosition(addr, tenths);
+    frame.data[0] = 0x34;
+    return frame;
+}
+
 CanRawFrame makeVelocity(uint8_t addr, int32_t tenths) {
     const uint32_t magnitude =
         tenths < 0 ? static_cast<uint32_t>(-static_cast<int64_t>(tenths))
@@ -274,6 +290,72 @@ void X42sProtocol::positionControlWithCurrentLimit(
 }
 
 
+namespace {
+
+// Builds the logical FB / CB frame exactly as X42sProtocol does, records it
+// semantically AND puts its real CAN packets on the fake bus. `failNextMoveTx`
+// simulates a partial transmission (the command may have reached the motor), so
+// the module has to stop it instead of assuming nothing ran.
+void emitDirect(
+    X42sProtocol* self, bool& transmissionError, uint8_t addr, bool withCurrent,
+    uint8_t dir, uint16_t vel, uint32_t angle, uint8_t motionMode, bool sync,
+    uint16_t maxCurrentMa) {
+    uint8_t cmd[14];
+    uint8_t n = 0;
+    cmd[n++] = addr;
+    cmd[n++] = withCurrent ? 0xCB : 0xFB;
+    cmd[n++] = dir;
+    cmd[n++] = static_cast<uint8_t>((vel >> 8) & 0xFF);
+    cmd[n++] = static_cast<uint8_t>(vel & 0xFF);
+    cmd[n++] = static_cast<uint8_t>((angle >> 24) & 0xFF);
+    cmd[n++] = static_cast<uint8_t>((angle >> 16) & 0xFF);
+    cmd[n++] = static_cast<uint8_t>((angle >> 8) & 0xFF);
+    cmd[n++] = static_cast<uint8_t>(angle & 0xFF);
+    cmd[n++] = motionMode;
+    cmd[n++] = static_cast<uint8_t>(sync ? 1 : 0);
+    if (withCurrent) {
+        cmd[n++] = static_cast<uint8_t>((maxCurrentMa >> 8) & 0xFF);
+        cmd[n++] = static_cast<uint8_t>(maxCurrentMa & 0xFF);
+    }
+    cmd[n++] = 0x6B;
+
+    fakecan::TxRecord rec;
+    rec.kind = fakecan::TxKind::Direct;
+    rec.addr = addr;
+    rec.dir = dir;
+    rec.vel = vel;
+    rec.magnitude = angle;
+    rec.motionMode = motionMode;
+    rec.sync = sync;
+    rec.currentMa = withCurrent ? maxCurrentMa : 0;
+    rec.withCurrentLimit = withCurrent;
+    rec.bytes.assign(cmd, cmd + n);
+    fakecan::txLog.push_back(rec);
+
+    if (fakecan::failNextMoveTx) {
+        fakecan::failNextMoveTx = false;
+        transmissionError = true;
+        return;
+    }
+    self->sendValidatedCommand(cmd, n);
+}
+
+}  // namespace
+
+void X42sProtocol::passthroughPositionControl(
+    uint8_t addr, uint8_t dir, uint16_t vel, uint32_t clk, uint8_t motionMode,
+    bool sync) {
+    emitDirect(this, transmissionError_, addr, false, dir, vel, clk, motionMode,
+               sync, 0);
+}
+
+void X42sProtocol::passthroughPositionControlWithCurrentLimit(
+    uint8_t addr, uint8_t dir, uint16_t vel, uint32_t clk, uint8_t motionMode,
+    bool sync, uint16_t maxCurrentMa) {
+    emitDirect(this, transmissionError_, addr, true, dir, vel, clk, motionMode,
+               sync, maxCurrentMa);
+}
+
 bool X42sProtocol::sendCommand(const uint8_t* b, uint8_t n, bool recordError, bool singleShot) {
     (void)recordError; (void)singleShot;
     if (!initialized_ || !b || n < 3) return false;
@@ -285,5 +367,40 @@ bool X42sProtocol::sendCommand(const uint8_t* b, uint8_t n, bool recordError, bo
         fakecan::capturedTX.push_back(f);
         if (traceSink_) traceSink_(traceContext_, f, true);
     }
+    return true;
+}
+
+// Raw logical command for the board queue: same packet layout as sendCommand,
+// but the first failed packet ends the command instead of continuing a partial
+// one. Recorded in capturedTX only (no semantic txLog entry): a raw frame has no
+// command semantics to assert.
+bool X42sProtocol::sendRawLogical(const uint8_t* bytes, uint8_t length) {
+    if (!initialized_ || !bytes || length < 3 || length > 30) return false;
+    if (fakecan::failNextMoveTx) { fakecan::failNextMoveTx = false; return false; }
+    const uint8_t payloadLen = static_cast<uint8_t>(length - 2);
+    uint8_t offset = 0, packet = 0;
+    while (offset < payloadLen) {
+        CanRawFrame f; f.identifier = x42sCanFrameId(bytes[0], packet); f.extended = true;
+        f.data[0] = bytes[1]; f.length = 1;
+        const uint8_t remain = static_cast<uint8_t>(payloadLen - offset);
+        const uint8_t take = remain < 7 ? remain : 7;
+        for (uint8_t i = 0; i < take; ++i) f.data[f.length++] = bytes[offset + 2 + i];
+        offset = static_cast<uint8_t>(offset + take);
+        fakecan::capturedTX.push_back(f);
+        if (traceSink_) traceSink_(traceContext_, f, true);
+        ++packet;
+    }
+    return true;
+}
+
+// One exact CAN data frame, verbatim.
+bool X42sProtocol::sendRawFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length) {
+    if (!initialized_ || length > 8 || (length > 0 && data == nullptr) ||
+        (extended ? id > 0x1FFFFFFFu : id > 0x7FFu)) return false;
+    if (fakecan::failNextMoveTx) { fakecan::failNextMoveTx = false; return false; }
+    CanRawFrame f; f.identifier = id; f.extended = extended; f.remote = false; f.length = length;
+    for (uint8_t i = 0; i < length; ++i) f.data[i] = data[i];
+    fakecan::capturedTX.push_back(f);
+    if (traceSink_) traceSink_(traceContext_, f, true);
     return true;
 }

@@ -11,8 +11,8 @@
 * **尚无同步 / 联动 / 插补语义**，也没有相关接口，页面上也没有同步标签页。
 * 页面只原样呈现 `/api/status` 上报的数据，**不做任何推断**：不推断命令已被驱动
   确认，也不推断已启动、已完成或已物理停止。
-* 机械运行时在脑板链路上仍为 `not_configured`：本切片只上报电机可用性，不上报
-  传感器数据。
+* 机械运行时在脑板链路上仍为 `not_configured`：HX711 已由下板独立采样并开放 HTTP
+  API，但称重数据暂未加入脑板 UART 状态载荷。
 * 本文只描述接口契约与页面行为，不含构建、烧录或测试结论。
 
 本切片涉及的文件：
@@ -48,6 +48,12 @@
 | CAN TX | 4 | 接外部收发器 TXD/CTX 输入 |
 | CAN RX | 5 | 接外部收发器 RXD/CRX 输出 |
 | CAN 波特率 | 500 kbit/s | 沿用已验证的台架配置 |
+| HX711 DOUT | 1 | 3.3 V HX711 数据输出 |
+| HX711 SCK | 2 | 3.3 V HX711 时钟，空闲保持 LOW |
+
+HX711 引脚集中在 `motion/include/board_config.h`。新板型可以修改默认值，也可以在
+构建参数中指定 `BABYTECH_SCALE_DOUT_PIN` 与 `BABYTECH_SCALE_SCK_PIN`；编译期冲突
+检查会阻止它们与 CAN 或脑板 UART 引脚重叠。
 
 **ESP32-S3 片上没有 CAN 收发器。** 这些引脚只是 CAN 控制器，必须外接 3.3 V 逻辑
 收发器（SN65HVD230 / TJA1051T/3 一类）。仅 5 V 的收发器（如经典 TJA1050）需要在
@@ -122,6 +128,51 @@ curl -s "http://192.168.4.1/api/status?id=1"
 
 错误：`id` 缺失 / 为 `0` / 为 `256` / 非数字 → `400`，
 `{"ok":false,"message":"id must be an integer 1..255"}`。
+
+### HX711 称重 API
+
+称重功能完全运行在 motion 下板。内嵌网页的「称重传感器」页使用这些接口显示合成
+重量、最近 60 秒漂移、诊断信息，并执行去皮和砝码标定。
+
+`GET /api/scale` 返回最新称重快照：
+
+```bash
+curl -s http://192.168.4.1/api/scale
+```
+
+响应包含当前 `doutPin` / `sckPin`、`status`、`available`、`calibrated`、`stable`、`rawCounts`、`netCounts`、
+`rawWeightG`、`weightG`、`sampleAgeMs`、去皮状态和当前标定参数。没有有效值的数值字段
+为 `null`，页面不得据此制造占位读数。
+
+网页「称重传感器」页右侧的「诊断信息」中可点「配置 IO」修改引脚。对应接口为：
+
+```bash
+curl -s -X POST -d "doutPin=6&sckPin=7" \
+  http://192.168.4.1/api/scale/config
+```
+
+允许使用 GPIO 1、2、6..18、21、38..42、47、48，且 DOUT 与 SCK 不能相同。GPIO45
+仅在固件确认 `VDD_SPI_FORCE=1` 且 `VDD_SPI_TIEH=1`、即 Flash 供电已由 eFuse 固定为
+3.3 V 时开放。CAN、板间 UART、原生 USB、其余启动绑带以及外部 Flash/PSRAM 引脚均被保留。配置保存到 `scale-io`
+NVS 命名空间并立即重新初始化 HX711，重启后继续使用；默认值仍为 DOUT GPIO1、SCK GPIO2。
+
+空载且所有电机静止时发起去皮：
+
+```bash
+curl -s -X POST http://192.168.4.1/api/scale/tare
+```
+
+接口返回 `202 tare_started`，下板异步采集 16 个样本。轮询 `/api/scale`，等待
+`tareInProgress=false` 且 `tareCompleted=true` 后放置已知砝码，再标定：
+
+```bash
+curl -s -X POST -d "knownWeightG=500" \
+  http://192.168.4.1/api/scale/calibrate
+```
+
+`knownWeightG` 范围为 1..5000 g。去皮和标定均在机构运动期间返回 `409`；标定要求
+本次启动已完成去皮且读数新鲜。成功的 `tareRaw` 与 `countsPerGram` 保存到下板 NVS 的
+独立 `scale-cfg` 命名空间，重启后继续使用。实际出粉闭环尚未接入这组读数。
 
 ### `POST /api/enable`
 

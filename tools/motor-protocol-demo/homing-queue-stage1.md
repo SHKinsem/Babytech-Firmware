@@ -1,0 +1,14 @@
+# Stage 1: real homing and stop semantics
+
+Implement now through configured Claude Code/DeepSeek. Other tasks have edits; preserve them. Ownership ONLY motion/src/MotorControl.h, motion/src/MotorControl.cpp, motion/include/ProtocolGate.h, tests/test_motor_control.cpp. Read other files freely. Do not edit main.cpp, frontend, XMotor driver or other tests yet. Codex runs builds; file tools only.
+
+User wants existing preview-only homing connected and then a board-executed programmable queue supporting readable actions and raw CAN. This first checkpoint delivers controller foundation, not the queue.
+
+Read docs/ZDT_X42S/ZDT_X42S_Agent精简参考.md and linked full manual pp61–65, existing tests and controller. Implement:
+1. Normal stop()/stopAll() and trial timeout FE stop MUST retain already-confirmed enable state. Cancel pending enable so late ACK cannot re-enable. Explicit disable and fault still invalidate enable. Add regression tests.
+2. CommandKind::Home for immediate 9A [addr,9A,mode0..5,sync0,6B], controller homing job and poll3B feedback. Nonblocking, single supervised action ownership; consistent busy gating among move/experiment/home. Trigger requires confirmed enable/fresh feedback as other supervised motions. Home timeout use configured maxMoveDurationMs (no new hardcoded timeout). Expose home status/outcome in statusJson and public accessors for future queue (enum None/Running/Done/Cancelled/Failed, id getter as needed).
+3. Home completion: ACK02 accepted not completion. 3B00 alone never proves done. Require new post-start observed running bit2 then cleared bit2 + no failure, fresh stationary feedback; explicit documented 9A9F completion may prove completion with post-start stationary feedback. 12/22 are no-motion/already-at-origin outcomes distinct from done (inspect manual exact meaning). Failure bits3/4/5 and rejected ACK fail and abort. ACK timeout, overall deadline, stale feedback, bus off fail; cancellation, disable, stop,9C abort clear job and prevent late completion. Stop during home sends9C and FE. No automatic retry or enable. Use wrap-safe timestamps.
+4. Poll3B only while home active so existing feedback freshness cadence stays valid. Include active home address in query targets and nodeOfInterest, operationBusy/hasActiveMotion. Keep UART existing interfaces compatible.
+5. 4C config remove arbitrary1200RPM/60000ms gate in favor of documented protocol bounds and current configurable speed/current bounds where applicable; retain power-on gate for now and report it honestly.
+
+Tests meaningful for normal stop keep enabled, pending enable lateACK ignored, successful home transitions, idle00 not completion, failure/timeout/cancel, invalidmode/sync, conflict rejection. Do not weaken unrelated assertions. Return file list and exact added status/API contract. Do not claim tests executed.

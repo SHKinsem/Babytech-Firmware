@@ -16,6 +16,27 @@ constexpr int kCanTxPin = 4;
 constexpr int kCanRxPin = 5;
 constexpr long kCanBitrate = 500000;
 
+// Powder hopper load cell through a 3.3 V HX711 module.
+// Override these two build definitions for another board revision without
+// editing the HX711 driver, for example:
+//   -DBABYTECH_SCALE_DOUT_PIN=6 -DBABYTECH_SCALE_SCK_PIN=7
+#ifndef BABYTECH_SCALE_DOUT_PIN
+#define BABYTECH_SCALE_DOUT_PIN 1
+#endif
+#ifndef BABYTECH_SCALE_SCK_PIN
+#define BABYTECH_SCALE_SCK_PIN 2
+#endif
+constexpr int kScaleDoutPin = BABYTECH_SCALE_DOUT_PIN;
+constexpr int kScaleSckPin = BABYTECH_SCALE_SCK_PIN;
+
+static_assert(kScaleDoutPin != kScaleSckPin, "HX711 pins must be distinct");
+static_assert(kScaleDoutPin != kCanTxPin && kScaleDoutPin != kCanRxPin &&
+              kScaleDoutPin != kLinkTxPin && kScaleDoutPin != kLinkRxPin,
+              "HX711 DOUT conflicts with a board interface");
+static_assert(kScaleSckPin != kCanTxPin && kScaleSckPin != kCanRxPin &&
+              kScaleSckPin != kLinkTxPin && kScaleSckPin != kLinkRxPin,
+              "HX711 SCK conflicts with a board interface");
+
 // Soft access point used by the bench debug page.
 // The password must stay at 8 characters or more or the AP will not start.
 constexpr char kApSsid[] = "Babytech-Motion";
