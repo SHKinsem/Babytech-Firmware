@@ -120,6 +120,8 @@ App、Cloud、多家庭权限、复杂恢复和全量测试平台不进入本阶
 - CAN 传输库和 HX711 称重核心分别从旧工程 BabytechActuatorHal、BabytechSensorHal 按需迁入 `motion/lib/`；新工程不依赖旧仓库路径，旧仓库未修改。
 - 新 UART v2 四指令协议要求上下板一起更新；不能与旧 v1 或 DisplayController/Product 协议混用。
 
+Wi-Fi OTA 的设计与操作见 [实施计划](docs/wifi-ota-plan.md) 和 [使用说明](docs/wifi-ota-implementation.md)。
+
 详见 [当前板间协议 v2](docs/protocol-v2.md)；[v1 文档](docs/protocol.md) 仅供历史参考。
 
 ## 验证记录（2026-09-21）

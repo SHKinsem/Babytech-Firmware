@@ -23,9 +23,11 @@
 #include <esp_efuse_table.h>
 #include <esp_system.h>
 #include <MotorControl.h>
+#include <WifiOta.h>
 #include "WiFiSetup.h"
 
 #include "board_config.h"
+#include "ota_identity.h"
 #include "UartPeer.h"
 #if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
 #include "DemoMotorExecutor.h"
@@ -50,11 +52,21 @@ motion::CommandQueue queue(motor);
 QueueBoardMotion boardMotion(motor, queue);
 babytech::v2::Endpoint endpoint(boardMotion);
 WebServer server(kHttpPort);
+bool safeForOta();
+bool otaHealthy();
+babytech::WifiOta ota(server, BABYTECH_OTA_BOARD, BABYTECH_OTA_HARDWARE,
+                      BABYTECH_OTA_VERSION, BABYTECH_OTA_BUILD, BABYTECH_OTA_IMAGE_ID,
+                      safeForOta, otaHealthy);
 // The queue is a board operation like any other: while it runs, Wi-Fi scanning
 // and the scale/config endpoints stay blocked.
 bool demoBusy();
-bool motionBusy() { return demoBusy() || endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
+bool controlBusy() { return demoBusy() || endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
+bool motionBusy() { return controlBusy() || ota.maintenanceActive(); }
 WiFiSetup wifiSetup(server, motionBusy);
+bool canStarted = false;
+bool safeForOta() { return !controlBusy() && !motor.operationBusy() && !wifiSetup.busy(); }
+bool otaHealthy() { return canStarted && wifiSetup.apReady() &&
+                           WiFi.softAPIP() != IPAddress(0,0,0,0); }
 uint32_t lastBrainByteAt = 0;
 int scaleDoutPin = kScaleDoutPin;
 int scaleSckPin = kScaleSckPin;
@@ -559,7 +571,7 @@ void serviceBrainLink() {
 #if MOTION_UART_PEER == MOTION_UART_PEER_BRAIN
     using namespace babytech::v2;
     if (millis()-lastBrainByteAt>kByteTimeoutMs) parser.reset();
-    boardMotion.setRadioBusy(wifiSetup.busy() || queue.active());
+    boardMotion.setRadioBusy(wifiSetup.busy() || queue.active() || ota.maintenanceActive());
     for (size_t count=0;count<kLinkBytesPerPass && brain.available()>0;++count) {
         lastBrainByteAt=millis(); Frame request,response;
         if (parser.push(uint8_t(brain.read()),request)) {
@@ -571,6 +583,7 @@ void serviceBrainLink() {
     Frame event;
     for (uint8_t i=0;i<2 && endpoint.tick(millis(),event);++i) sendFrame(event);
 #else
+    if (ota.maintenanceActive()) { while (brain.available() > 0) brain.read(); return; }
     uint8_t bytes[babytech::display::kDisplayMaxFrameSize];
     for (size_t count = 0; count < kLinkBytesPerPass && brain.available() > 0; ++count) {
         const auto n = displayLink.receive(uint8_t(brain.read()), millis(), bytes, sizeof(bytes));
@@ -1215,6 +1228,12 @@ void handleQueueCancel() {
 }
 
 
+bool rejectDuringOta() {
+    if (!ota.maintenanceActive()) return false;
+    sendError(409, F("ota_active"));
+    return true;
+}
+
 }  // namespace
 
 void setup() {
@@ -1242,7 +1261,8 @@ void setup() {
                       powderScale.calibrationPersisted() ? "stored" : "required");
     }
 
-    if (!motor.begin(kCanTxPin, kCanRxPin, kCanBitrate)) {
+    canStarted = motor.begin(kCanTxPin, kCanRxPin, kCanBitrate);
+    if (!canStarted) {
         Serial.println("[can] init failed; HTTP stays up, motor commands will be rejected");
         debugLog.addf(millis(), "error", "can.init", "ready=0 tx=%d rx=%d", kCanTxPin, kCanRxPin);
     } else {
@@ -1259,14 +1279,16 @@ void setup() {
         Serial.printf("[demo] configuration rejected: %s\n", configError.c_str());
 #endif
     wifiSetup.begin();
+    ota.begin();
 
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/api/limits", HTTP_GET, []() { sendJson(200, limitsJson()); });
-    server.on("/api/limits", HTTP_POST, handleLimits);
+    server.on("/api/limits", HTTP_POST, []() { if (!rejectDuringOta()) handleLimits(); });
     server.on("/api/can-debug", HTTP_GET, []() { sendJson(200, motor.canDebugJson()); });
     server.on("/api/config-result", HTTP_GET, []() { sendJson(200, motor.configJson()); });
     server.on("/api/polling", HTTP_POST, []() {
+        if (rejectDuringOta()) return;
         if (demoBusy()) { sendError(409, F("demo_busy")); return; }
         long enabled = 0;
         if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
@@ -1289,30 +1311,30 @@ void setup() {
         sendJson(200, String(logJson, length));
     });
     server.on("/api/scale", HTTP_GET, []() { sendJson(200, scaleStatusJson()); });
-    server.on("/api/scale/config", HTTP_POST, handleScaleConfig);
-    server.on("/api/scale/tare", HTTP_POST, handleScaleTare);
-    server.on("/api/scale/calibrate", HTTP_POST, handleScaleCalibrate);
-    server.on("/api/command", HTTP_POST, handleCommand);
-    server.on("/api/enable", HTTP_POST, handleEnable);
-    server.on("/api/enable-all", HTTP_POST, handleEnableAll);
-    server.on("/api/move", HTTP_POST, handleMove);
+    server.on("/api/scale/config", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleConfig(); });
+    server.on("/api/scale/tare", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleTare(); });
+    server.on("/api/scale/calibrate", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleCalibrate(); });
+    server.on("/api/command", HTTP_POST, []() { if (!rejectDuringOta()) handleCommand(); });
+    server.on("/api/enable", HTTP_POST, []() { if (!rejectDuringOta()) handleEnable(); });
+    server.on("/api/enable-all", HTTP_POST, []() { if (!rejectDuringOta()) handleEnableAll(); });
+    server.on("/api/move", HTTP_POST, []() { if (!rejectDuringOta()) handleMove(); });
     server.on("/api/stop", HTTP_POST, handleStop);
     server.on("/api/stop-all", HTTP_POST, handleStopAll);
     // Operator reset of volatile control ownership: POST only, available while
     // the queue, UART or a supervised action is busy, and never a re-enable.
-    server.on("/api/control/reset", HTTP_POST, handleControlReset);
+    server.on("/api/control/reset", HTTP_POST, []() { if (!rejectDuringOta()) handleControlReset(); });
     // Board queue: GET never executes anything, start validates the whole
     // program before the first CAN frame, cancel also stops everything.
     server.on("/api/queue", HTTP_GET, []() { sendJson(200, queue.statusJson()); });
-    server.on("/api/queue/start", HTTP_POST, handleQueueStart);
+    server.on("/api/queue/start", HTTP_POST, []() { if (!rejectDuringOta()) handleQueueStart(); });
     server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
     server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);
-    server.on("/api/motor-distance", HTTP_POST, handleMotorDistance);
+    server.on("/api/motor-distance", HTTP_POST, []() { if (!rejectDuringOta()) handleMotorDistance(); });
 #if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
     server.on("/api/demo", HTTP_GET, []() { sendJson(200, demoStatusJson()); });
     server.on("/api/demo/config", HTTP_GET, []() { sendJson(200, demoConfigJson); });
-    server.on("/api/demo/config", HTTP_POST, handleDemoConfig);
-    server.on("/api/demo/action", HTTP_POST, handleDemoAction);
+    server.on("/api/demo/config", HTTP_POST, []() { if (!rejectDuringOta()) handleDemoConfig(); });
+    server.on("/api/demo/action", HTTP_POST, []() { if (!rejectDuringOta()) handleDemoAction(); });
 #else
     server.on("/api/demo", HTTP_GET, []() { sendJson(200, F("{\"available\":false}")); });
 #endif
@@ -1333,6 +1355,7 @@ void loop() {
     motor.poll();
     // The queue drives one supervised action per poll and never blocks.
     server.handleClient();
+    ota.poll();
     pollDemo();
     queue.poll(millis());
     serviceBrainLink();

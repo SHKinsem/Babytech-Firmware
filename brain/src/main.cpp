@@ -3,7 +3,9 @@
 #include <WebServer.h>
 #include <esp_system.h>
 #include <BoardClient.h>
+#include <WifiOta.h>
 #include "board_config.h"
+#include "ota_identity.h"
 
 extern const uint8_t indexStart[] asm("_binary_data_index_html_start");
 extern const uint8_t indexEnd[] asm("_binary_data_index_html_end");
@@ -14,6 +16,16 @@ WebServer server(80);
 Parser parser;
 babytech::v2::Client client;
 uint32_t lastByteAt=0;
+bool apStarted=false;
+bool safeForOta() {
+    return client.connected(millis()) && !client.controlBusy() &&
+        client.status().state == State::Idle &&
+        (client.motorFlags(millis()) & (8 | 16 | 32)) == 0;
+}
+bool otaHealthy() { return apStarted && WiFi.softAPIP() != IPAddress(0,0,0,0); }
+babytech::WifiOta ota(server,BABYTECH_OTA_BOARD,BABYTECH_OTA_HARDWARE,
+                      BABYTECH_OTA_VERSION,BABYTECH_OTA_BUILD,BABYTECH_OTA_IMAGE_ID,
+                      safeForOta,otaHealthy);
 
 String bootText() {
     char text[17]; snprintf(text,sizeof(text),"%016llx",(unsigned long long)client.boot()); return String(text);
@@ -94,6 +106,7 @@ void dispatch(Frame& f) {
     sendJson(202,body);
 }
 void writeParameters() {
+    if (ota.maintenanceActive()) { sendJson(409,"{\"error\":\"ota_active\"}"); return; }
     uint32_t revision; if (!expectedRevision(revision)) return;
     static const char* names[]={"motor","angleTenths","speedTenths","accel","decel","current"};
     static const int64_t minimum[]={1,-36000,1,1,1,100},maximum[]={255,36000,1200,240,240,5000};
@@ -112,6 +125,7 @@ void writeParameters() {
     f.length=w.size(); dispatch(f);
 }
 void execute() {
+    if (ota.maintenanceActive()) { sendJson(409,"{\"error\":\"ota_active\"}"); return; }
     uint32_t revision; if (!expectedRevision(revision)) return;
     const String action=server.arg("action");
     uint8_t cls=kStage; uint16_t instance=kMoveStage,op=kRun;
@@ -133,7 +147,8 @@ void setup() {
     client.begin((uint64_t(esp_random())<<32)|esp_random());
     motion.begin(kLinkBaud,SERIAL_8N1,kLinkRxPin,kLinkTxPin);
     WiFi.mode(WIFI_AP);
-    WiFi.softAP("Babytech-Debug","babytech-demo");
+    apStarted=WiFi.softAP("Babytech-Debug","babytech-demo");
+    ota.begin();
     server.on("/",HTTP_GET,[] {
         server.send_P(200,"text/html; charset=utf-8",reinterpret_cast<const char*>(indexStart),indexEnd-indexStart);
     });
@@ -146,5 +161,5 @@ void setup() {
     server.begin(); queryMotion(true);
 }
 void loop() {
-    pollMotion(); queryMotion(); server.handleClient(); delay(1);
+    pollMotion(); queryMotion(); server.handleClient(); ota.poll(); delay(1);
 }
