@@ -268,6 +268,26 @@ void testSnapshotEqualityIncludesDisplayFields() {
 }  // namespace
 
 int main() {
+  using namespace babytech::display;
+  DisplaySnapshot init;
+  init.stage = DisplayStage::NotReady;
+  assert(displayInitializeEnabled(init, true, false));
+  assert(!displayInitializeEnabled(init, false, false));
+  assert(!displayInitializeEnabled(init, true, true));
+  init.primaryCondition = DisplayCondition::ProtocolIncompatible;
+  assert(!displayInitializeEnabled(init, true, false));
+  init.primaryCondition = DisplayCondition::None;
+  for (auto stage : {DisplayStage::Ready, DisplayStage::Mixing, DisplayStage::Complete,
+                     DisplayStage::Offline, DisplayStage::Unknown, DisplayStage::Idle}) {
+    init.stage = stage;
+    assert(!displayInitializeEnabled(init, true, false));
+  }
+  init.stage = DisplayStage::Error;
+  assert(displayInitializeEnabled(init, true, false));
+  init.startEnabled = true;
+  assert(!displayInitializeEnabled(init, true, false));
+  assert(displayIntentFromKey("initialize") == DisplayIntent::Initialize);
+  assert(std::strcmp(displayIntentKey(DisplayIntent::Initialize), "initialize") == 0);
   testReadySnapshot();
   testPrimaryStatePrecedence();
   testUnsafePrimaryStatesDisableStart();

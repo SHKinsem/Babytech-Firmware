@@ -55,7 +55,7 @@ bool validError(uint8_t raw) {
 }
 
 bool validIntent(uint8_t raw) {
-  return raw <= static_cast<uint8_t>(DisplayIntent::StartFeeding);
+  return raw <= static_cast<uint8_t>(DisplayIntent::Initialize);
 }
 
 template <size_t Size>
@@ -243,7 +243,8 @@ bool decodeDisplaySnapshotPayload(const DisplayFrame& frame,
 
 size_t encodeDisplayIntentPayload(DisplayIntent intent, uint8_t* output,
                                   size_t outputCapacity) {
-  if (output == nullptr || outputCapacity < 1 || intent == DisplayIntent::None) {
+  if (output == nullptr || outputCapacity < 1 || intent == DisplayIntent::None ||
+      !validIntent(static_cast<uint8_t>(intent))) {
     return 0;
   }
   output[0] = static_cast<uint8_t>(intent);

@@ -65,6 +65,7 @@ enum class DisplayError : uint8_t {
 enum class DisplayIntent : uint8_t {
   None = 0,
   StartFeeding = 1,
+  Initialize = 2,  // additive v3 intent; implemented by the tool Motion demo
 };
 
 enum class DisplayBottleState : uint8_t {
@@ -127,5 +128,7 @@ DisplayError displayErrorFromKey(const char* key);
 
 const char* displayIntentKey(DisplayIntent value);
 DisplayIntent displayIntentFromKey(const char* key);
+bool displayInitializeEnabled(const DisplaySnapshot& snapshot,
+                              bool controllerConnected, bool intentPending);
 
 }  // namespace babytech::display

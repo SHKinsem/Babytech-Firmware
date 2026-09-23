@@ -88,6 +88,7 @@ constexpr KeyValue<DisplayError> kErrors[] = {
 constexpr KeyValue<DisplayIntent> kIntents[] = {
     {DisplayIntent::None, "none"},
     {DisplayIntent::StartFeeding, "start_feeding"},
+    {DisplayIntent::Initialize, "initialize"},
 };
 
 template <typename Enum, size_t Size>
@@ -209,6 +210,13 @@ const char* displayIntentKey(DisplayIntent value) {
 
 DisplayIntent displayIntentFromKey(const char* key) {
   return valueFor(key, kIntents, DisplayIntent::None);
+}
+
+bool displayInitializeEnabled(const DisplaySnapshot& snapshot,
+                              bool controllerConnected, bool intentPending) {
+  return controllerConnected && !intentPending && !snapshot.startEnabled &&
+      snapshot.primaryCondition == DisplayCondition::None &&
+      (snapshot.stage == DisplayStage::NotReady || snapshot.stage == DisplayStage::Error);
 }
 
 }  // namespace babytech::display

@@ -281,6 +281,20 @@ void testOutputCapacityAndNullInputsAreChecked() {
 }  // namespace
 
 int main() {
+  using namespace babytech::display;
+  uint8_t payload[1] = {};
+  assert(encodeDisplayIntentPayload(DisplayIntent::Initialize, payload, 1) == 1);
+  assert(payload[0] == 2);
+  DisplayFrame initFrame;
+  initFrame.protocolVersion = kDisplayProtocolVersion;
+  initFrame.type = DisplayMessageType::Intent;
+  initFrame.payloadLength = 1;
+  initFrame.payload[0] = payload[0];
+  DisplayIntent decoded = DisplayIntent::None;
+  assert(decodeDisplayIntentPayload(initFrame, decoded) && decoded == DisplayIntent::Initialize);
+  initFrame.payload[0] = 3;
+  assert(!decodeDisplayIntentPayload(initFrame, decoded));
+  assert(encodeDisplayIntentPayload(static_cast<DisplayIntent>(3), payload, 1) == 0);
   testSnapshotRoundTrip();
   testHeatingConditionRoundTrip();
   testPowderMotorFaultRoundTrip();

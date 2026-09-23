@@ -15,9 +15,13 @@ public:
         babytech::display::DisplayIntent intent;
         if (!babytech::display::decodeDisplayIntentPayload(frame, intent)) return 0;
         for (const auto& saved : history_) if (saved.valid && saved.sequence == frame.sequence)
-            return ack(frame.sequence, saved.accepted, output, capacity);
-        const bool accepted = flow_.start(now);
-        history_[cursor_] = {true, frame.sequence, accepted};
+            return ack(frame.sequence, saved.intent == intent && saved.accepted, output, capacity);
+        const bool accepted = intent == babytech::display::DisplayIntent::StartFeeding
+            ? flow_.start(now)
+            : intent == babytech::display::DisplayIntent::Initialize &&
+                (flow_.stage() == babytech::display::DisplayStage::NotReady ||
+                 flow_.stage() == babytech::display::DisplayStage::Error) && flow_.initialize(now);
+        history_[cursor_] = {true, frame.sequence, accepted, intent};
         cursor_ = (cursor_ + 1) % history_.size();
         return ack(frame.sequence, accepted, output, capacity);
     }
@@ -41,7 +45,12 @@ private:
         return babytech::display::encodeDisplayFrame(babytech::display::DisplayMessageType::Ack, seq,
             payload, n, output, capacity);
     }
-    struct Saved { bool valid = false; uint32_t sequence = 0; bool accepted = false; };
+    struct Saved {
+        bool valid = false;
+        uint32_t sequence = 0;
+        bool accepted = false;
+        babytech::display::DisplayIntent intent = babytech::display::DisplayIntent::None;
+    };
     std::array<Saved, 8> history_{};
     size_t cursor_ = 0;
     DemoFlowController& flow_;

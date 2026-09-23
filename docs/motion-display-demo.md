@@ -21,7 +21,7 @@ Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，�
 1. 连接 Motion 热点，进入网页“屏幕流程”。BRAIN 构建会明确显示功能不可用。
 2. 内置 `motion/data/demo_flow.json` 故意留空机械脚本，`configured=false`。填写轴清单、初始找零和五阶段脚本，或 Load 已保存的 JSON。加载与编辑只改变本机草稿。
 3. Apply 校验后整份替换 RAM 配置，不运动；失败保留旧配置。配置替换撤销旧软件参考。Export 导出编辑器中的配置，可保存到上述工程路径后重新编译烧录。没有文件系统上传、永久保存按钮或自动恢复中断流程。
-4. 确认机构可运动、电机反馈新鲜且静止，点击一次“复位 / 初始化”。初始化成功才显示 Ready；若缺反馈、驱动拒绝、配置不匹配，不能进入 Ready。
+4. 确认机构可运动、电机反馈新鲜且静止，点击网页“复位 / 初始化”，或配套新版显示板圆环右侧的 `Initialize`。两者共用 Motion 初始化入口；屏幕找零中仍显示 NotReady，不增加 initializing 状态。初始化成功才显示 Ready；若缺反馈、驱动拒绝、配置不匹配，不能进入 Ready。
 5. 先逐个调试业务阶段。单阶段结束停在 NotReady，不自动执行其他阶段；需回零时运行包含 `zero` 指令的混合阶段，再点复位重新检查。软件参考仍有效时复位不会重新碰撞找零。
 6. Ready 时用屏幕 Start 或网页“完整流程运行”：开盖 → 加水 → 加粉 → 关盖 → 混合（脚本内升降回软件零点）→ Complete 保持 3 秒 → Ready。没有额外回起始位置阶段；展示计时不发送运动指令。下次 Start 前操作者自行换瓶。
 7. 任何阶段可用顶部“全部停止”。取消剩余脚本并发送广播回零中断/停止；新鲜静止反馈才证明停止，超过 3 秒仍未确认则 Error。Error 由显式复位解除，参考失效时重新初始化，不续跑旧动作。
@@ -68,6 +68,8 @@ zero ID RPM ACCEL DECEL CURRENT
 五阶段超时映射对应的屏幕超时错误；CAN/驱动拒绝/缺反馈使用 CanFault，未分类失败和首次初始化超时使用 Unknown。非 Error 阶段 error=None；不会产生没有真实依据的缺水、温控或瓶位错误。
 
 ## HTTP API
+
+屏幕 UART 的 v3 Intent 新增单字节 `Initialize=2`，原 `StartFeeding=1` 和 State 格式不变。Initialize 仅在 NotReady / Error 转交初始化入口，Ready / 运行态拒绝。ACK 表示接受请求，不表示完成；相同序号重复请求不重复执行，同序号换意图拒绝。找零期间再次点击的新序号由 busy 检查拒绝。屏幕离线或待 ACK 时禁用按钮，不自动恢复初始化请求；旧 Motion 不识别新指令，会导致屏幕 ACK 超时，须配套更新显示板和 Motion。旧屏幕配新 Motion 仍可使用网页初始化。
 
 POST 沿用 `application/x-www-form-urlencoded`。请求被接受不表示机械完成；客户端不自动重发 POST。
 

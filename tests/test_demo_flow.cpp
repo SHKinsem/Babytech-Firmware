@@ -35,6 +35,38 @@ void ready(DemoFlowController& f, Fake& e, uint32_t now = 10) {
 }
 int main() {
     {
+        Fake e; DemoFlowController f(e); DisplayLinkCore link(f);
+        auto send = [&](DisplayIntent intent, uint32_t seq, uint32_t now) {
+            uint8_t payload[96], frame[108], reply[108];
+            const auto p = encodeDisplayIntentPayload(intent,payload,sizeof(payload));
+            const auto n = encodeDisplayFrame(DisplayMessageType::Intent,seq,payload,p,frame,sizeof(frame));
+            size_t count = 0;
+            for (size_t i=0;i<n;++i) count=link.receive(frame[i],now,reply,sizeof(reply));
+            assert(count > 0);
+            DisplayFrame decoded; DisplayFrameParser parser;
+            for (size_t i=0;i<count;++i) parser.push(reply[i],decoded);
+            DisplayAck ack; assert(decodeDisplayAckPayload(decoded,ack)); return ack.accepted;
+        };
+        assert(!send(DisplayIntent::Initialize,1,0)); // empty config never moves
+        assert(f.apply(config())); assert(e.starts == 0);
+        assert(send(DisplayIntent::Initialize,2,10));
+        assert(f.stage() == DisplayStage::NotReady && !f.startEnabled());
+        assert(send(DisplayIntent::Initialize,2,11)); // retransmission replays ACK
+        assert(!send(DisplayIntent::StartFeeding,2,11)); // same sequence, different intent
+        assert(!send(DisplayIntent::Initialize,3,11)); // second click while busy
+        assert(!send(DisplayIntent::StartFeeding,4,11));
+        f.tick(12); assert(e.starts == 1);
+        e.state = DemoExecution::Done; f.tick(13);
+        assert(f.startEnabled() && f.referenceValid());
+        assert(send(DisplayIntent::Initialize,2,14)); assert(e.starts == 1);
+        assert(!send(DisplayIntent::Initialize,5,14)); // Ready is not an initialize button state
+        assert(send(DisplayIntent::StartFeeding,6,15)); f.tick(15);
+        assert(!send(DisplayIntent::Initialize,7,16));
+        f.tick(5015); f.tick(5016); assert(f.stage() == DisplayStage::Error);
+        assert(send(DisplayIntent::Initialize,8,5017));
+        f.tick(5018); assert(f.startEnabled() && e.resets == 1 && e.starts == 2);
+    }
+    {
         Fake e; DemoFlowController f(e);
         assert(!f.start(0)); assert(!f.initialize(0)); assert(e.starts == 0);
         ready(f, e);
