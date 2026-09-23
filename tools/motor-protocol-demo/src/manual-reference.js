@@ -10,8 +10,8 @@
 // Decoding rules (deliberately strict — a wrong guess is worse than nothing):
 //   * RX frames only, extended identifiers only, remote frames ignored.
 //   * CAN id = (address << 8) | packetIndex: address lives in bits 8..15 and
-//     the packet index in bits 0..7 (manual p42). Packet 0 only; multi-frame
-//     replies are never reassembled, so a later packet returns null.
+//     the packet index in bits 0..7 (manual p42). decodeCanReply handles only
+//     packet 0; decodeBulkCanReply validates all five packets of 0x42/0x43.
 //   * the identifier must be a valid extended id (id <= 0xFFFF) with address
 //     1..255.
 //   * the data bytes must be bytes, have exactly the documented length, end
@@ -449,4 +449,70 @@ export function decodeCanReply(frame) {
   }
 
   return null;
+}
+
+// The 0x42/0x43 X-firmware replies contain 37 logical bytes including the
+// address. CAN carries seven payload bytes per frame and repeats the opcode in
+// every packet. Decode only a complete consecutive run; a partial trace must
+// never be presented as confirmed driver settings.
+export function decodeBulkCanReply(packets) {
+  if (!Array.isArray(packets) || packets.length !== 5) return null;
+  const first = packets[0];
+  if (!first || first.dir !== 'RX' || !first.extended || first.remote ||
+      !Number.isInteger(first.id) || first.id < 0x100 || first.id > 0xff00 ||
+      (first.id & 0xff) !== 0) return null;
+  const address = first.id >> 8;
+  const opcode = first.data?.[0];
+  if (opcode !== 0x42 && opcode !== 0x43) return null;
+  const payload = [];
+  for (let i = 0; i < packets.length; i++) {
+    const packet = packets[i];
+    const data = toByteArray(packet?.data);
+    if (packet?.dir !== 'RX' || packet.extended !== true || packet.remote ||
+        packet.id !== first.id + i || !data || data.length !== 8 || data[0] !== opcode)
+      return null;
+    payload.push(...data.slice(1));
+  }
+  if (payload.length !== 35 || payload[0] !== 0x25 || payload[1] !== (opcode === 0x42 ? 0x18 : 0x0c) ||
+      payload.at(-1) !== PROTOCOL_CHECKSUM) return null;
+  const signed = (sign, start, divisor) => {
+    if (!signIsValid(sign)) return null;
+    return (signedMagnitude(sign, u32(...payload.slice(start,start+4))) / divisor).toFixed(divisor === 100 ? 2 : 1);
+  };
+  let title, text;
+  if (opcode === 0x42) {
+    const response = ['不返回', 'Receive：只返回接收确认', 'Reached：只返回完成', 'Both：接收确认和完成', 'Other：位置完成、其余接收确认'][payload[23]];
+    title = '读取全部驱动配置（X 固件）';
+    text = lines(
+      `按键锁定 ${payload[2]} · 控制模式 ${payload[3] === 1 ? '闭环' : payload[3] === 0 ? '开环' : `原始值 ${payload[3]}`}`,
+      `脉冲端口复用代码 ${payload[4]} · 通讯端口复用代码 ${payload[5]} · En 引脚有效电平代码 ${payload[6]} · Dir 引脚有效电平代码 ${payload[7]}`,
+      `细分 ${payload[8]} · 细分插补 ${payload[9]} · 自动息屏 ${payload[10]} · 保留字节 0x${hexByte(payload[11])}`,
+      `开环模式工作电流 ${u16(payload[12],payload[13])} mA`,
+      `闭环模式最大电流 ${u16(payload[14],payload[15])} mA`,
+      `闭环模式最大速度 ${u16(payload[16],payload[17])} RPM · 电流环带宽 ${u16(payload[18],payload[19])} Hz`,
+      `串口波特率代码 ${payload[20]} · CAN 通讯速率代码 ${payload[21]} · 通讯校验代码 ${payload[22]}`,
+      `控制命令应答 ${response ?? `原始值 ${payload[23]}`} · 角度缩小 10 倍输入 ${payload[24]}`,
+      `堵转保护代码 ${payload[25]} · 检测转速 ${u16(payload[26],payload[27])} RPM · 检测电流 ${u16(payload[28],payload[29])} mA`,
+      `堵转检测时间 ${u16(payload[30],payload[31])} ms · 到位窗口 ${(u16(payload[32],payload[33])/10).toFixed(1)}°`,
+      '以上为完整五包读回；代码值未查表转换，可对照底部原始帧',
+      cite('p99-p103'),
+    );
+  } else {
+    const target = signed(payload[12],13,10);
+    const speed = signIsValid(payload[17]) ? (signedMagnitude(payload[17],u16(payload[18],payload[19]))/10).toFixed(1) : null;
+    const position = signed(payload[20],21,10);
+    const error = signed(payload[25],26,100);
+    const temperature = signIsValid(payload[30]) ? signedMagnitude(payload[30],payload[31],true) : null;
+    if ([target,speed,position,error,temperature].some(value => value === null)) return null;
+    title = '读取全部系统状态（X 固件）';
+    text = lines(
+      `总线电压 ${u16(payload[2],payload[3])} mV · 总线电流 ${u16(payload[4],payload[5])} mA · 相电流 ${u16(payload[6],payload[7])} mA`,
+      `编码器原始值 ${u16(payload[8],payload[9])} · 线性化编码器值 ${u16(payload[10],payload[11])}`,
+      `目标位置 ${target}° · 实时转速 ${speed} RPM · 实时位置 ${position}° · 位置误差 ${error}°`,
+      `驱动温度 ${temperature} ℃ · 回零标志 0x${hexByte(payload[32])} · 电机标志 0x${hexByte(payload[33])}`,
+      X_ONLY,
+      cite('p95-p97'),
+    );
+  }
+  return {title,text,opcode,address};
 }

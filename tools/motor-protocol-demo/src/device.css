@@ -20,6 +20,11 @@ body.device-body {min-width:0;}
 .device-app .panel--feedback .device-decoded__meta {color:#7b8494;font-size:12px;}
 .device-app .panel--feedback .device-decoded__title {color:var(--text-strong);font-weight:600;}
 .device-app .panel--feedback .device-decoded__text {white-space:pre-line;font-family:var(--mono);font-size:12px;line-height:1.6;background:#f8f9fc;border:1px solid #e1e5ed;border-radius:var(--radius);padding:10px 12px;margin:6px 0;}
+.device-app .command-result {flex-basis:100%;min-width:0;max-height:154px;overflow:auto;border:1px solid #cbd4f7;border-left:4px solid #3b4ce0;border-radius:8px;background:#f6f8ff;padding:8px 10px;font-size:12px;line-height:1.5;}
+.device-app .command-result__head {display:flex;justify-content:space-between;gap:12px;color:#25369e;}
+.device-app .command-result p {margin:3px 0;}
+.device-app .command-result pre {white-space:pre-wrap;margin:4px 0;font:inherit;}
+.device-app .command-result small {display:block;color:#687385;}
 .device-app .panel--feedback .device-compat>summary {cursor:pointer;color:var(--text-strong);font-weight:500;padding:2px 0;font-size:13px;}
 .device-app .panel--feedback .device-compat p {color:#687385;font-size:12px;line-height:1.7;margin:6px 0;}
 /* Decoded replies are appended to the trace note, which the existing
