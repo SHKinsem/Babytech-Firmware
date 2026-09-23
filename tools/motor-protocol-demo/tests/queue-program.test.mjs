@@ -26,14 +26,10 @@ import {
   readQueueStatus,
   supportReason,
   errorLabels,
-  syncIsolationReasonText,
 } from '../src/device-api.js';
 
-test('sync isolation refusal names the required order and exact board reason',()=>{
-  assert.match(errorLabels.sync_cache_isolation_unverified,/先在队列外使能电机/);
-  assert.match(errorLabels.sync_cache_isolation_unverified,/同一队列/);
-  assert.match(syncIsolationReasonText('enable_disable_command'),/使能或失能/);
-  assert.match(syncIsolationReasonText('boot_unconfirmed'),/启动后/);
+test('old firmware isolation refusal points to the new firmware',()=>{
+  assert.match(errorLabels.sync_cache_isolation_unverified,/更新控制板固件/);
 });
 
 const errorsOf = (text, options) => validateProgram(text, options).errors.map((entry) => entry.message);

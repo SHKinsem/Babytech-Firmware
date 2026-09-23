@@ -429,7 +429,7 @@ export const queueActionLabels = {enable:'使能',disable:'失能',move:'相对�
 export function queueMessageText(message) {
   const syncLabels={sync_settings_unconfigured:'尚未配置同步容差与反馈期限',sync_queries_paused:'自动查询暂停，无法监督同步组',
     sync_feedback_budget_insufficient:'当前查询预算无法在所选速度与容差下可靠判定：请降低速度、放宽容差或根据台架数据调整预算',
-    sync_cache_isolation_unverified:'同步组尚未发送：缓存隔离许可未确认或已失效。先在队列外使能电机，再到「查询预算与同步配置 → 启动许可」核实并记录确认；把 enable 写在同一队列也会在执行前被拒绝',sync_target_association_uncertain:'目标未发生可区分变化，无法可靠归属新缓存指令',
+    sync_cache_isolation_unverified:'旧版固件要求人工隔离确认；请更新控制板固件',sync_target_association_uncertain:'目标未发生可区分变化，无法可靠归属新缓存指令',
     sync_quantization_tolerance:'编码取整后的比例或时间误差超过容差',sync_quantization_unrepresentable:'至少一轴的速度或加减速低于协议可表示范围',
     sync_motion_complete:'同步成员全部到位，运动完成',sync_stop_requested:'已请求同步成员停止，等待静止证据',
     sync_prepare_timeout:'同步准备超时，已请求成员停止',sync_target_mismatch:'缓存目标读回不匹配，已请求成员停止',
@@ -524,20 +524,8 @@ export function queueConflictReason(bytes, { running = false, unknown = false } 
     : `队列提交结果未知：执行状态尚未确认，请先「取消队列」核对后再发送普通指令。${tail}`;
 }
 
-export const syncIsolationReasonLabels = {
-  boot_unconfirmed:'控制板启动后尚未确认',
-  operator_revoked:'人工撤销了确认',
-  enable_disable_command:'确认后发送了使能或失能命令',
-  control_command:'确认后发送了其他控制命令',
-  raw_command:'确认后发送了原始命令',
-  queue_raw_command:'确认后队列发送了原始帧',
-  sync_interrupted:'上次同步动作中断',
-  confirmed:'已确认',
-};
-export const syncIsolationReasonText = reason => syncIsolationReasonLabels[reason] || '原因未由当前固件提供';
-
 export const errorLabels = {
-  sync_cache_isolation_unverified:'同步组尚未发送：先在队列外使能电机，再到「查询预算与同步配置 → 启动许可」核实并记录隔离确认。使能与确认是两个独立步骤；同一队列里的 enable 还未执行就会被预检拒绝。',
+  sync_cache_isolation_unverified:'旧版固件要求人工隔离确认；请更新控制板固件。当前页面无需勾选人工许可。',
   driver_disabled:'驱动器反馈已失能，运动已终止',
   move_timeout:'在配置的单步时长内未确认到位，请查看失败时的目标与实际位置',
   config_pending:'回零参数正在等待应答或读回核对，请等待本次配置结束',

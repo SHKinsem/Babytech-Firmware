@@ -7,7 +7,7 @@ using namespace motion;
 struct Port : SyncPort {
     SyncFeedback feedback[256];std::vector<uint8_t> cached,stopped;
     int32_t pendingTarget[256]={};
-    bool isolation=true,failTrigger=false,deferTargetUntilTrigger=false;
+    bool failTrigger=false,deferTargetUntilTrigger=false;
     uint8_t failCache=0;unsigned triggers=0;uint32_t now=0;
     SyncFeedback syncFeedback(uint8_t id) const override {return feedback[id];}
     bool syncSendMove(const QueueStep& step) override {
@@ -24,9 +24,6 @@ struct Port : SyncPort {
     }
     bool syncStop(uint8_t id) override {stopped.push_back(id);return true;}
     void syncObserve(uint8_t,bool) override {}
-    bool syncIsolationReady() const override {return isolation;}
-    void syncInvalidateIsolation() override {isolation=false;}
-    void syncCompletedIsolation() override {isolation=true;}
     void fresh(uint32_t time,bool atTarget=false) {
         now=time;
         for(uint8_t id:{1,2}) {
@@ -65,13 +62,8 @@ int main() {
         r.port.fresh(10,true);r.tick(10);assert(r.runtime.phase()==SyncRuntime::Phase::Monitoring);
         r.tick(11);assert(!r.runtime.member(0).done); // repeated sample isn't a second pair
         r.port.fresh(20,true);r.tick(20);
-        assert(r.runtime.phase()==SyncRuntime::Phase::Complete && r.port.stopped.empty() && r.port.isolation);
+        assert(r.runtime.phase()==SyncRuntime::Phase::Complete && r.port.stopped.empty());
         r.tick(30);assert(r.port.triggers==1);
-    }
-    {
-        Rig r;r.port.isolation=false;
-        assert(!strcmp(r.runtime.start(r.axes,2,r.settings,0),"sync_cache_isolation_unverified"));
-        assert(r.port.cached.empty() && r.port.triggers==0);
     }
     {
         Rig r;r.axes[0].speedTenths=300;r.axes[1].speedTenths=300;
@@ -97,12 +89,12 @@ int main() {
     {
         Rig r;r.port.failCache=2;r.prepare();
         assert(r.port.triggers==0 && r.port.stopped==std::vector<uint8_t>({1,2}));
-        assert(!r.port.isolation && r.runtime.phase()==SyncRuntime::Phase::Stopping);
+        assert(r.runtime.phase()==SyncRuntime::Phase::Stopping);
         r.port.fresh(10);r.tick(10);r.port.fresh(20);r.tick(20);
         assert(r.runtime.phase()==SyncRuntime::Phase::Failed);
         assert(r.runtime.member(0).stopped && r.runtime.member(1).stopped);
         assert(r.port.stopped.size()==2);
-        assert(!strcmp(r.runtime.start(r.axes,2,r.settings,30),"sync_cache_isolation_unverified"));
+        assert(!r.runtime.start(r.axes,2,r.settings,30));
     }
     {
         Rig r;r.port.failTrigger=true;r.prepare();r.tick(10);r.tick(20);

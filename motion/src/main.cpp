@@ -78,7 +78,7 @@ const char* const kLoggedPostRoutes[] = {
     "/api/enable-all", "/api/command", "/api/move", "/api/enable", "/api/stop", "/api/stop-all",
     "/api/control/reset",
     "/api/queue/start", "/api/queue/cancel", "/api/limits", "/api/motor-distance", "/api/query-budget",
-    "/api/sync-settings", "/api/sync-isolation",
+    "/api/sync-settings",
     "/api/scale/tare", "/api/scale/calibrate", "/api/scale/config",
 };
 
@@ -976,7 +976,7 @@ void handleNotFound() {
                            uri == "/api/scale/calibrate" || uri == "/api/scale/config" || uri == "/api/limits" ||
                            uri == "/api/queue" || uri == "/api/queue/start" || uri == "/api/queue/cancel" ||
                            uri == "/api/motor-distance" || uri == "/api/query-budget" ||
-                           uri == "/api/sync-settings" || uri == "/api/sync-isolation";
+                           uri == "/api/sync-settings";
     if (knownPath) {
         server.sendHeader("Allow", "GET, POST");
         sendError(405, F("method not allowed"));
@@ -1048,11 +1048,6 @@ void sendQueueResult(const motion::Result& result, bool started) {
     body += result.message;
     body += F("\",\"line\":");
     body += static_cast<unsigned int>(queue.lastErrorLine());
-    if (String(result.message)=="sync_cache_isolation_unverified") {
-        body += F(",\"isolationReason\":\"");
-        body += motor.syncIsolationReason();
-        body += '"';
-    }
     body += '}';
     sendJson(result.code, body);
 }
@@ -1135,8 +1130,8 @@ void handleQueryBudget() {
     sendJson(200,motor.queryStatusJson());
 }
 
-// Persist numbers only. Isolation is a separate operator attestation for this
-// boot, never restored from NVS and never established by issuing blind stops.
+// Persist measured numerical limits; no operator attestation is needed to
+// submit a sync group.
 void loadSyncSettings() {
     uint32_t r[8]={};Preferences prefs;
     if(!prefs.begin("sync-settings",true)) return;
@@ -1168,20 +1163,6 @@ void handleSyncSettings() {
     const bool saved=prefs.putBytes("v1",r,sizeof(r))==sizeof(r);prefs.end();
     if(!saved) {sendError(500,F("sync_settings_save_failed"));return;}
     queue.setSyncSettings(s);sendJson(200,queue.syncSettingsJson());
-}
-
-void handleSyncIsolation() {
-    if(queue.active() || endpoint.busy() || motor.operationBusy()) {sendError(409,F("sync_busy"));return;}
-    // These assertions must come from a staged bench test of the actual drive
-    // firmware and all bus nodes. This endpoint itself verifies no hardware.
-    const bool revoke=server.arg("revoke")=="1";
-    if(!revoke && (server.arg("cacheSemanticsVerified")!="1" ||
-       server.arg("allNodesIsolated")!="1" || server.arg("pendingRepliesDrained")!="1")) {
-        sendError(400,F("sync_isolation_attestation_required"));return;
-    }
-    motor.confirmSyncIsolation(!revoke);
-    debugLog.addf(millis(),"warn","sync_isolation","operator_attestation=%s; not a hardware verification",revoke?"revoked":"asserted");
-    sendJson(200,queue.syncSettingsJson());
 }
 
 }  // namespace
@@ -1272,7 +1253,6 @@ void setup() {
     server.on("/api/query-budget", HTTP_POST, handleQueryBudget);
     server.on("/api/sync-settings", HTTP_GET, [](){sendJson(200,queue.syncSettingsJson());});
     server.on("/api/sync-settings", HTTP_POST, handleSyncSettings);
-    server.on("/api/sync-isolation", HTTP_POST, handleSyncIsolation);
     server.on("/api/queue/start", HTTP_POST, handleQueueStart);
     server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
     server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);

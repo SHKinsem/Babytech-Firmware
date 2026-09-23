@@ -727,7 +727,6 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
         if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
         const char* reason=sync_.validate(scratch.steps+i+1,step.groupSize,settings,nullptr,step.syncTriggerOnly);
         if(!reason && !motor_.autoQueriesEnabled()) reason="sync_queries_paused";
-        if(!reason && !motor_.syncIsolationReady()) reason="sync_cache_isolation_unverified";
         if(reason) {errorLine_=step.line;setMessage(reason);return Result{400,reason};}
     }
 
@@ -884,8 +883,7 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
     motor_.queueDiagnostics_.submit(runId_, iteration_+1, step.line, diagnosticId,
                                     function, now, sent,raw);
     if (step.action == QueueAction::Hex || step.action == QueueAction::Can)
-        {motor_.queueDiagnostics_.invalidate(0);motor_.syncCacheClear_=false;
-         motor_.syncIsolationReason_="queue_raw_command";}
+        motor_.queueDiagnostics_.invalidate(0);
     if (!sent) {
         // A real transmission failure ends the run here, with the source line. No
         // extra CAN frame is broadcast and the step is not retried.
@@ -1121,14 +1119,6 @@ bool CommandQueue::syncStop(uint8_t id) {
     return sent;
 }
 void CommandQueue::syncObserve(uint8_t id,bool value) {motor_.syncObserve_[id]=value;}
-bool CommandQueue::syncIsolationReady() const {return motor_.syncIsolationReady();}
-void CommandQueue::syncInvalidateIsolation() {
-    motor_.syncCacheClear_=false;motor_.syncIsolationReason_="sync_interrupted";
-}
-void CommandQueue::syncCompletedIsolation() {
-    motor_.syncCacheClear_=motor_.syncIsolationVerified_;
-    if(motor_.syncCacheClear_) motor_.syncIsolationReason_="confirmed";
-}
 void CommandQueue::pollSync(uint32_t now) {
     if(sync_.active() && (!motor_.autoQueriesEnabled() || !motor_.ready()))
         sync_.abort(!motor_.autoQueriesEnabled()?"sync_queries_paused":"can_unavailable",now);
@@ -1157,8 +1147,6 @@ String CommandQueue::syncSettingsJson() const {
     j+=",\"stopTimeoutMs\":";j+=static_cast<unsigned long>(s.stopTimeoutMs);
     j+=",\"responseBudgetMs\":";j+=static_cast<unsigned long>(s.responseBudgetMs);
     j+=",\"completionTenths\":";j+=s.completionTenths;
-    j+=",\"cacheIsolationReady\":";j+=motor_.syncIsolationReady()?"true":"false";
-    j+=",\"cacheIsolationReason\":\"";j+=motor_.syncIsolationReason();j+='"';
     j+="}";return j;
 }
 

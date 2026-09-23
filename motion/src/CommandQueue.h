@@ -105,9 +105,6 @@ private:
     bool syncTrigger() override;
     bool syncStop(uint8_t id) override;
     void syncObserve(uint8_t id,bool value) override;
-    bool syncIsolationReady() const override;
-    void syncInvalidateIsolation() override;
-    void syncCompletedIsolation() override;
     void pollSync(uint32_t now);
 
     MotorControl& motor_;

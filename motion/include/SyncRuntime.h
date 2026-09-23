@@ -29,9 +29,6 @@ public:
     virtual bool syncTrigger()=0;
     virtual bool syncStop(uint8_t id)=0;
     virtual void syncObserve(uint8_t id,bool value)=0;
-    virtual bool syncIsolationReady() const=0;
-    virtual void syncInvalidateIsolation()=0;
-    virtual void syncCompletedIsolation()=0;
 };
 class SyncRuntime {
 public:
@@ -94,7 +91,6 @@ public:
         if(active()) return "sync_busy";
         const char* error=validate(axes,count,settings,&plan_,triggerOnly);
         if(error) return error;
-        if(!port_.syncIsolationReady()) return "sync_cache_isolation_unverified";
         settings_=settings;triggerOnly_=triggerOnly;phase_=Phase::Checking;phaseAt_=now;startedAt_=0;cacheIndex_=0;
         error_=nullptr;errorLower_=errorUpper_=maxObservableError_=0;
         uncertain_=false;triggerAttempted_=false;
@@ -107,7 +103,7 @@ public:
     void abort(const char* error,uint32_t now) {
         if(phase_==Phase::Stopping || phase_==Phase::Failed) return;
         error_=error;phase_=Phase::Stopping;phaseAt_=now;
-        port_.syncInvalidateIsolation();scheduler_.release(CanQueryScheduler::Sync);
+        scheduler_.release(CanQueryScheduler::Sync);
         for(uint8_t i=0;i<plan_.count;++i) {
             auto& m=members_[i];m.stopSent=port_.syncStop(plan_.axes[i].id);
             m.stopSamples=0;m.stopped=false;m.positionCountedAt=m.velocityCountedAt=now;
@@ -147,7 +143,7 @@ public:
             }
             if(!ready) return;
             scheduler_.release(CanQueryScheduler::Sync);
-            port_.syncInvalidateIsolation();phase_=Phase::Caching;
+            phase_=Phase::Caching;
             lastCacheAt_=now-2;
         }
         if(phase_==Phase::Caching || phase_==Phase::Confirming) {
@@ -312,7 +308,7 @@ private:
             uncertainty[i]=plan_.encoded[i].speed*(now-f.positionAt+settings_.responseBudgetMs)/1000.0+
                 1/fabs(length);
         }
-        if(all) {phase_=Phase::Complete;port_.syncCompletedIsolation();release();return;}
+        if(all) {phase_=Phase::Complete;release();return;}
         if(comparable) {
             errorLower_=errorUpper_=0;
             for(uint8_t i=0;i<plan_.count;++i) for(uint8_t j=0;j<i;++j) {

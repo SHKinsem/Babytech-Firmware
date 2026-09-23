@@ -52,8 +52,6 @@ static void syncWire() {
     settings.feedbackTimeoutMs=5000;settings.prepareTimeoutMs=10000;settings.stopTimeoutMs=2000;
     settings.responseBudgetMs=20;settings.completionTenths=2;assert(queue.setSyncSettings(settings));
     const char* program="sync begin\nmove 6 360 deg 1 60 60 800\nmove 7 -180 deg 1 60 60 800\nsync end\nwait 0";
-    assert(queue.start(program,strlen(program),1,rotation,now).code==400);assert(tx.empty());
-    assert(motor.confirmSyncIsolation(true));
     assert(queue.start(program,strlen(program),1,rotation,now).code==202);
     size_t handled=0;unsigned triggers=0,movePackets=0;bool cached[256]={};uint32_t triggered=0;
     motion::ProgressProfile curve;assert(curve.build(1.0/60,1,1));
@@ -82,7 +80,6 @@ static void syncWire() {
     assert(queue.state()==motion::QueueState::Done && triggers==1 && movePackets==6);
     assert(contains(queue.statusJson(),"\"done\":true"));
     assert(contains(queue.statusJson(),"\"motionComplete\":true"));
-    assert(motor.syncIsolationReady());
     assert(motor.queries().statistics().queries<=now/100+1);
     puts("PASS real sync wire: budgeted fresh reads, target change corroboration, both cache ACKs, batched 02/9F, 6 CD packets, single FF, independent completion");
 }
@@ -94,7 +91,6 @@ static void allStopDuringSync() {
     settings.feedbackTimeoutMs=5000;settings.prepareTimeoutMs=10000;settings.stopTimeoutMs=2000;
     settings.responseBudgetMs=20;settings.completionTenths=2;
     assert(queue.setSyncSettings(settings));
-    assert(motor.confirmSyncIsolation(true));
     const char* program="sync begin\nmove 6 360 deg 1 60 60 800\nmove 7 -180 deg 1 60 60 800\nsync end";
     assert(queue.start(program,strlen(program),1,rotation,now).code==202);
     queue.poll(now);
