@@ -10,7 +10,7 @@
  motion：传感器与电机 MCU
 ```
 
-## 当前可运行的内容
+## 功能与范围
 
 当前提供两条调试路径：brain 的 UART 状态页，以及 motion 独立热点的 CAN 电机调试页。
 
@@ -23,7 +23,7 @@
 
 详细操作和接口见 [下板网页调试](docs/motion-debug.md)。
 
-新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
+编排队列支持逐行发送和显式等待，详见 [队列用法](docs/motor-queue.md)。多轴同步与螺旋联动尚未实现。
 
 ## 目录
 
@@ -31,7 +31,7 @@
 brain/       platformio.ini、src/、include/、lib/、test/、data/
 motion/      platformio.ini、src/、include/、lib/、data/
 shared/      两块板共同依赖的 BoardProtocol 库
-docs/        板间协议和范围
+docs/        使用说明、协议、实施计划与验证记录
 tools/       主机验证工具
 ```
 
@@ -53,9 +53,8 @@ Windows 保留源码，编译在 WSL 的 Linux 文件系统进行：
 
 ## 编译与验证
 
-工具链固定为 `espressif32@6.4.0`，对应当前电脑已安装的 Arduino-ESP32 2.0.11。
+工具链固定为 `espressif32@6.4.0`，使用 Arduino-ESP32 2.0.11。
 使用 PlatformIO 标准 `esp32-s3-devkitc-1` 板型，并覆盖为 16 MB Flash / 8 MB OPI PSRAM。
-这不是 ESP-IDF 工程；目前无需为了 FreeRTOS 改换框架。
 
 在仓库根目录执行：
 
@@ -100,17 +99,6 @@ pio run -d brain -t upload --upload-port COM_BRAIN
 
 上面是 brain 状态页。调试电机时改连 `Babytech-Motion`（同一开发密码），访问 `http://192.168.4.1/`，输入驱动器 CAN ID，读取反馈后显式使能并试动。HTTP 202 只代表板卡已提交指令，不代表电机已执行。
 
-## 接下来只做这些
-
-1. 对当前 CAN 网页调试完成实机验收，再接入机构动作 Runtime。
-2. 实机验收已实现的 UART「改 RAM 参数 → 单电机阶段 → 返回结果 → 停止」闭环，见 [v2 指令表](docs/protocol-v2.md)。
-3. 将下板称重状态加入板间协议；下板调试页已接入称重、漂移诊断、去皮和标定。
-4. 迁入已验证的屏幕/触摸驱动，在大脑上显示同一份小脑状态。
-5. 根据真实调试反馈补齐开盖、关盖、混合与参数保存。
-
-App、Cloud、多家庭权限、复杂恢复和全量测试平台不进入本阶段。
-未来大脑负责页面和网络，小脑独占机械状态机与驱动；网络回调不直接操作电机。
-
 ## 来源与迁移边界
 
 - 原项目：`hellowenshenghui/Babytech_Formula_Device`，参考本地 `V1-device` 的 `2ffcde2`。
@@ -120,11 +108,14 @@ App、Cloud、多家庭权限、复杂恢复和全量测试平台不进入本阶
 
 详见 [当前板间协议 v2](docs/protocol-v2.md)；[v1 文档](docs/protocol.md) 仅供历史参考。
 
-## 验证记录（2026-09-21）
+## 文档导航
 
-- UART v2 最小闭环：READ / WRITE / EXEC / STOP 已接通上下板，包括单电机阶段 RAM 参数、显式使能/失能、执行结果与优先停止。
-- 21:20（香港时间）WSL 双板编译通过：motion Flash 1075561 bytes、RAM 72368 bytes；brain Flash 735717 bytes、RAM 45392 bytes。motion 构建已包含 HX711、NVS 标定和称重 API；产物位于 `out/wsl/motion/` 与 `out/wsl/brain/`，两板须一起更新到 v2。
-- 协议测试：v1 回归及 v2 分段/粘包、CRC、批量写原子性、重复请求去重、丢回复结果补查、断线停止、重启恢复和查询限速通过。
-- MotionCore 133 项检查、称重处理器 3 组场景、电机控制器 679 项检查，以及 UART 执行入口与真实控制器的模拟 CAN 联调通过；使能/失能缺 ACK、停止未确认不会报告成功。
-- 上板嵌入页面 Playwright 测试通过，覆盖无自动动作、参数版本、未应用编辑、异步结果、停止、离线及重启。下板工作台的既有验证记录见其交付文档。
-- 未进行硬件烧录、实际 UART 接线验收或浏览器实机测试。
+| 文档 | 内容 |
+| --- | --- |
+| [下板网页调试](docs/motion-debug.md) | 基础 API、接线与问题排查 |
+| [电机编排队列](docs/motor-queue.md) | 已实现的指令、参数与执行语义 |
+| [板间协议 v2](docs/protocol-v2.md) | UART 指令与上下板接口 |
+| [工作台交付说明](docs/motion-workbench-release.md) | 网页构建、烧录与交付边界 |
+| [WSL 编译](docs/wsl-build.md) | 编译环境与构建步骤 |
+| [电机修复与同步计划](docs/motor-sync-plan.md) | 待实现方案与验收标准 |
+| [开发与验证记录](docs/development-notes.md) | 阶段安排及历史验证结果 |
