@@ -37,11 +37,12 @@ class SyncRuntime {
 public:
     enum class Phase : uint8_t {Idle,Checking,Caching,Confirming,Triggering,Monitoring,Complete,Stopping,Failed};
     struct Member {
-        int32_t start=0,previousTarget=0;
+        int32_t start=0,previousTarget=0,lastTargetReadback=0;
         int64_t target=0;
         uint32_t sentAt=0,ackBaseline=0,positionCountedAt=0,velocityCountedAt=0;
         uint8_t doneSamples=0,stopSamples=0;
-        bool sent=false,accepted=false,targetConfirmed=false,done=false,stopSent=false,stopped=false;
+        bool sent=false,accepted=false,targetObserved=false,targetDeferred=false,targetReadbackValid=false;
+        bool targetConfirmed=false,done=false,stopSent=false,stopped=false;
     };
     explicit SyncRuntime(SyncPort& port,CanQueryScheduler& scheduler):port_(port),scheduler_(scheduler) {}
     bool active() const {return phase_!=Phase::Idle && phase_!=Phase::Complete && phase_!=Phase::Failed;}
@@ -74,10 +75,9 @@ public:
         if(error) return error;
         const auto& budget=scheduler_.config();
         const uint32_t gap=uint32_t(fmax(budget.gapMs,ceil(1000.0/budget.queriesPerSecond)));
-        // Four fields per member, one shared serial service, plus the explicitly
-        // configured latency allowance. This is a conservative admission bound,
-        // not an assertion that this drive can sustain the configured rate.
-        sampleBudgetMs_=gap*count*4+settings.responseBudgetMs;
+        // Position, velocity, flags, home and (until verified) target share one
+        // service. Some X42S drives expose a cached target only after FF.
+        sampleBudgetMs_=gap*count*5+settings.responseBudgetMs;
         double quantization=0;
         for(uint8_t i=0;i<count;++i) quantization=fmax(quantization,(1.0+settings.completionTenths)/fabs(double(axes[i].distanceTenths)));
         const double uncertainty=2*checked.common.speed*sampleBudgetMs_/1000.0+2*quantization;
@@ -130,9 +130,14 @@ public:
                 members_[i].start=f.position;
                 members_[i].target=int64_t(f.position)+plan_.axes[i].distanceTenths;
                 members_[i].previousTarget=f.target;
-                // No transaction IDs exist in the drive ACK. A changed target
-                // readback must independently corroborate the new cached move.
-                if(members_[i].target==f.target) {abort("sync_target_association_uncertain",now);return;}
+                // No transaction IDs exist in the drive ACK. Distinct old and
+                // new target windows make a later readback unambiguous.
+                // The drive may use a slightly different internal position
+                // when applying a relative move. Keep old and new targets
+                // separated by more than both completion windows.
+                if(targetNear(members_[i].target,f.target,2*settings_.completionTenths)) {
+                    abort("sync_target_association_uncertain",now);return;
+                }
                 if(members_[i].target>INT32_MAX || members_[i].target<INT32_MIN) {
                     abort("sync_target_out_of_range",now);return;
                 }
@@ -164,17 +169,21 @@ public:
             for(uint8_t i=0;i<plan_.count;++i) {
                 auto& m=members_[i];const uint8_t id=plan_.axes[i].id;const auto f=port_.syncFeedback(id);
                 if(!m.accepted) {ready=false;continue;}
-                // A fresh target readback verifies the cached relative command.
-                // Cache target/readback/consumption semantics are a bench gate.
-                if(!m.targetConfirmed && f.targetValid && newer(f.targetAt,m.sentAt) && int32_t(f.targetRequestedAt-m.sentAt)>=0) {
-                    if(int64_t(f.target)!=m.target) {abort("sync_target_mismatch",now);return;}
-                    m.targetConfirmed=true;
+                // A fresh readback may be the new target or the old target:
+                // this drive applies its cached target only when FF arrives.
+                // Any third value is an association error before the trigger.
+                if(!m.targetObserved && f.targetValid && newer(f.targetAt,m.sentAt) && int32_t(f.targetRequestedAt-m.sentAt)>=0) {
+                    m.lastTargetReadback=f.target;m.targetReadbackValid=true;
+                    if(targetNear(f.target,m.target,settings_.completionTenths)) m.targetConfirmed=true;
+                    else if(targetNear(f.target,m.previousTarget,settings_.completionTenths)) m.targetDeferred=true;
+                    else {abort("sync_target_mismatch",now);return;}
+                    m.targetObserved=true;
                 }
-                if(!m.targetConfirmed) demand(id,0x33,500,now,3);
+                if(!m.targetObserved) demand(id,0x33,500,now,3);
                 else scheduler_.release(id,0x33,CanQueryScheduler::Sync);
                 demandStationary(id,now);
                 if(f.flagsValid && f.homeValid && fault(f)) {abort("sync_prepare_member_fault",now);return;}
-                if(!m.targetConfirmed || !stationary(f,now,m.sentAt)) {ready=false;continue;}
+                if(!m.targetObserved || !stationary(f,now,m.sentAt)) {ready=false;continue;}
                 if(!(f.flags&1) || fault(f)) {abort("sync_prepare_member_fault",now);return;}
                 if(fabs(double(int64_t(f.position)-m.start))>settings_.completionTenths) {
                     abort("sync_start_position_changed",now);return;
@@ -197,6 +206,9 @@ public:
     }
 private:
     static bool newer(uint32_t a,uint32_t b) {return int32_t(a-b)>0;}
+    static bool targetNear(int64_t observed,int64_t expected,int64_t tolerance) {
+        return observed>=expected-tolerance && observed<=expected+tolerance;
+    }
     bool fresh(uint32_t at,uint32_t now) const {return now-at<settings_.feedbackTimeoutMs;}
     static bool fault(const SyncFeedback& f) {return (f.flags&0x0C) || (f.homeFlags&0x3C);}
     bool stationary(const SyncFeedback& f,uint32_t now,uint32_t since) const {
@@ -243,6 +255,22 @@ private:
                 abort("sync_member_rejected",now);return;
             }
             if(f.flagsValid && f.homeValid && (!(f.flags&1) || fault(f))) {abort("sync_member_fault",now);return;}
+            if(!m.targetConfirmed) {
+                demand(id,0x33,200,now,3);
+                if(f.targetValid && newer(f.targetAt,startedAt_) &&
+                   int32_t(f.targetRequestedAt-startedAt_)>=0) {
+                    m.lastTargetReadback=f.target;m.targetReadbackValid=true;
+                    if(targetNear(f.target,m.target,settings_.completionTenths)) {
+                        m.targetConfirmed=true;
+                        scheduler_.release(id,0x33,CanQueryScheduler::Sync);
+                    } else if(!targetNear(f.target,m.previousTarget,settings_.completionTenths)) {
+                        abort("sync_target_mismatch",now);return;
+                    }
+                }
+                if(!m.targetConfirmed && now-startedAt_>=settings_.feedbackTimeoutMs) {
+                    abort("sync_target_not_applied",now);return;
+                }
+            }
             // Keep observing early finishers until every axis has completed.
             // Otherwise a member can drift while the remaining axes run.
             demand(id,0x36,200,now,3);
@@ -266,7 +294,7 @@ private:
             }
             const bool valid=positionFresh && (!m.done || velocityFresh) && f.flagsValid && f.homeValid &&
                 fresh(f.flagsAt,now) && fresh(f.homeAt,now);
-            if(!m.done || !completionFresh || !valid) all=false;
+            if(!m.done || !completionFresh || !valid || !m.targetConfirmed) all=false;
             if(!valid && now-startedAt_>=settings_.feedbackTimeoutMs) {abort("sync_feedback_lost",now);return;}
             if(!valid) comparable=false;
             const double length=double(plan_.axes[i].distanceTenths);

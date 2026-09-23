@@ -1304,8 +1304,15 @@ String CommandQueue::statusJson() const {
         json += ",\"sentAt\":";json += static_cast<unsigned long>(m.sentAt);
         json += ",\"accepted\":";json += m.accepted?"true":"false";
         json += ",\"ackAssociation\":\"";
-        json += m.targetConfirmed?"opcode_only_with_changed_target":"opcode_only";json += '"';
+        json += m.targetConfirmed?(m.targetDeferred?"opcode_only_with_triggered_target":
+            "opcode_only_with_changed_target"):"opcode_only";json += '"';
+        json += ",\"targetObserved\":";json += m.targetObserved?"true":"false";
+        json += ",\"targetDeferred\":";json += m.targetDeferred?"true":"false";
         json += ",\"targetConfirmed\":";json += m.targetConfirmed?"true":"false";
+        json += ",\"targetExpectedTenths\":";json += String(static_cast<long>(m.target));
+        json += ",\"previousTargetTenths\":";json += m.previousTarget;
+        json += ",\"targetReadbackTenths\":";
+        if(m.targetReadbackValid) json += m.lastTargetReadback;else json += "null";
         json += ",\"done\":";json += m.done?"true":"false";
         json += ",\"stopSent\":";json += m.stopSent?"true":"false";
         json += ",\"stopped\":";json += m.stopped?"true":"false";

@@ -6,13 +6,22 @@
 using namespace motion;
 struct Port : SyncPort {
     SyncFeedback feedback[256];std::vector<uint8_t> cached,stopped;
-    bool isolation=true,failTrigger=false;uint8_t failCache=0;unsigned triggers=0;uint32_t now=0;
+    int32_t pendingTarget[256]={};
+    bool isolation=true,failTrigger=false,deferTargetUntilTrigger=false;
+    uint8_t failCache=0;unsigned triggers=0;uint32_t now=0;
     SyncFeedback syncFeedback(uint8_t id) const override {return feedback[id];}
     bool syncSendMove(const QueueStep& step) override {
-        cached.push_back(step.id);auto& f=feedback[step.id];f.target=f.position+step.distanceTenths;
+        cached.push_back(step.id);auto& f=feedback[step.id];
+        pendingTarget[step.id]=f.position+step.distanceTenths;
+        if(!deferTargetUntilTrigger) f.target=pendingTarget[step.id];
         ++f.ackSequence;f.ackAt=now;f.ack=2;return step.id!=failCache;
     }
-    bool syncTrigger() override {++triggers;return !failTrigger;}
+    bool syncTrigger() override {
+        ++triggers;
+        if(failTrigger) return false;
+        if(deferTargetUntilTrigger) for(uint8_t id:cached) feedback[id].target=pendingTarget[id];
+        return true;
+    }
     bool syncStop(uint8_t id) override {stopped.push_back(id);return true;}
     void syncObserve(uint8_t,bool) override {}
     bool syncIsolationReady() const override {return isolation;}
@@ -133,6 +142,50 @@ int main() {
         assert(!strcmp(r.runtime.error(),"sync_target_mismatch") && r.port.triggers==0);
     }
     {
+        Rig r;r.port.deferTargetUntilTrigger=true;r.prepare();
+        assert(r.port.triggers==1 && r.runtime.phase()==SyncRuntime::Phase::Monitoring);
+        assert(r.runtime.member(0).targetDeferred && !r.runtime.member(0).targetConfirmed);
+        r.port.fresh(10);r.tick(10);
+        assert(r.runtime.member(0).targetConfirmed && r.runtime.member(1).targetConfirmed);
+        r.port.fresh(20,true);r.tick(20);r.port.fresh(30,true);r.tick(30);
+        assert(r.runtime.phase()==SyncRuntime::Phase::Complete && r.port.stopped.empty());
+    }
+    {
+        Rig r;r.port.deferTargetUntilTrigger=true;r.prepare();
+        r.port.fresh(10);r.port.feedback[1].targetRequestedAt=4;r.tick(10);
+        assert(!r.runtime.member(0).targetConfirmed); // reply to a pre-FF query is not proof
+        r.port.fresh(20);r.tick(20);
+        assert(r.runtime.member(0).targetConfirmed);
+    }
+    {
+        Rig r;r.port.deferTargetUntilTrigger=true;r.prepare();
+        r.port.fresh(10);r.port.feedback[2].target+=1;r.tick(10);
+        assert(r.runtime.member(1).targetConfirmed && r.runtime.phase()==SyncRuntime::Phase::Monitoring);
+    }
+    {
+        Rig r;r.port.deferTargetUntilTrigger=true;r.prepare();
+        r.port.fresh(10);r.port.feedback[2].target+=2;r.tick(10);
+        assert(r.runtime.member(1).targetConfirmed && r.runtime.phase()==SyncRuntime::Phase::Monitoring);
+    }
+    {
+        Rig r;r.port.deferTargetUntilTrigger=true;r.prepare();
+        r.port.fresh(10);r.port.feedback[2].target+=3;r.tick(10);
+        assert(!strcmp(r.runtime.error(),"sync_target_mismatch") && r.port.stopped.size()==2);
+    }
+    {
+        Rig r;r.port.deferTargetUntilTrigger=true;r.prepare();
+        r.port.fresh(10);r.port.feedback[2].target=123;r.tick(10);
+        assert(!strcmp(r.runtime.error(),"sync_target_mismatch") && r.port.triggers==1);
+        assert(r.port.stopped==std::vector<uint8_t>({1,2}));
+    }
+    {
+        Rig r;r.port.deferTargetUntilTrigger=true;r.prepare();
+        r.port.fresh(10);r.port.feedback[2].target=0;r.tick(10);
+        r.port.fresh(5010);r.tick(5010);
+        assert(!strcmp(r.runtime.error(),"sync_target_not_applied") && r.port.triggers==1);
+        assert(r.port.stopped==std::vector<uint8_t>({1,2}));
+    }
+    {
         Rig r;r.prepare();r.port.feedback[1].ack=0xE2;r.tick(10);
         assert(!strcmp(r.runtime.error(),"sync_member_rejected"));
         r.runtime.abort("second_cancel",11);assert(r.port.stopped.size()==2);
@@ -146,6 +199,11 @@ int main() {
     {
         Rig r;assert(!r.runtime.start(r.axes,2,r.settings,0));r.port.fresh(1);
         r.port.feedback[1].target=3600;r.tick(1);
+        assert(!strcmp(r.runtime.error(),"sync_target_association_uncertain") && r.port.cached.empty());
+    }
+    {
+        Rig r;assert(!r.runtime.start(r.axes,2,r.settings,0));r.port.fresh(1);
+        r.port.feedback[1].target=3599;r.tick(1);
         assert(!strcmp(r.runtime.error(),"sync_target_association_uncertain") && r.port.cached.empty());
     }
     {
