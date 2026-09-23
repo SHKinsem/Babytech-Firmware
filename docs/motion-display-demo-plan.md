@@ -57,45 +57,54 @@ Motion ESP32 ---- non-blocking flow ---- existing command queue ---- CAN motors
 | 离线 | 屏幕 2.5 秒无有效快照显示离线；主控不因屏幕断线自动中止动作 |
 | 无效帧 | 错版本、CRC、长度及未知 intent 不触发运动 |
 
-只传业务阶段、完成、阶段超时和必要停止/错误终态，不传单条指令、位置或详细电机反馈。详细日志留网页/USB。明确电机故障仍立即停止，不等超时才处理；屏幕使用通用错误。五个冲奶阶段超时映射既有对应错误，找零/起始归位超时使用通用错误，不新增协议枚举。Stop 后不能还显示正在冲奶。
+只传业务阶段、完成、阶段超时和必要停止/错误终态，不传单条指令、位置或详细电机反馈。详细日志留网页/USB。明确电机故障仍立即停止，不等超时才处理；屏幕使用通用错误。五个冲奶阶段超时映射既有对应错误，首次找零超时使用通用错误，不新增协议枚举。Stop 后不能还显示正在冲奶。
 
-现有屏幕没有 Stop、初始化或复位 intent，这些操作留在网页。没有独立初始化阶段和百分比进度字段；初始化/起始检查/归位使用 NotReady 且 startEnabled=false。
+现有屏幕没有 Stop、初始化或复位 intent，这些操作留在网页。没有独立初始化阶段和百分比进度字段；首次初始化使用 NotReady 且 startEnabled=false。
 
 ### Dummy 值与真实状态
 
 - babyName、formulaBrand、waterMl、temperatureC 可以是演示配置；水量/温度不是实测值。
 - 未接温控时 thermalSimulated=true，保留 sim 提示；cloudConnected=false，接受原屏幕 Cloud offline，不伪造联网。
-- stage、startEnabled 和 error 必须对应实际执行情况。条件提示只传有依据的值，不伪造传感器读数。
+- stage、startEnabled 和 error 必须对应实际执行情况。`startEnabled` 不维护第二套隐藏门禁，固定等于 `stage == Ready`；Motion 收到 Start intent 时重新确认当前仍为 Ready。条件提示只传有依据的值，不伪造传感器读数。
 - 加水/加粉初版建议非阻塞等待模拟，具体是否模拟及等待时间待确认。屏幕无专用模拟出料标志，网页须标明演示边界，演示产物不用于喂养。
 
 ## 3. 初始化与流程状态机
 
 ```text
-Boot -> Load embedded JSON -> Not initialized
-Web Initialize -> Collision homing -> Establish software zero -> Ready
+Boot -> Load embedded JSON -> Reference invalid -> NotReady
+Web Initialize (once after coordinate reset)
+  -> Collision homing -> Establish software zero/start position -> Ready
 
-Screen/Web Start
-  -> Validate config / reference / idle / no fault
-  -> Read fresh positions
-     -> At zero and stationary: Open cap
-     -> Away from zero: Run start-position script -> Verify at zero -> Open cap
-  -> Water -> Powder -> Close cap -> Mix -> Complete
+Screen/Web Start (Ready only)
+  -> Open cap -> Water -> Powder -> Close cap
+  -> Mix: lift axes return to software zero, then mix
+  -> Verify script done + required axes at zero/stationary/fresh
+  -> Complete -> hold 3 seconds without motion -> Ready
 
 Stop / fault / timeout -> Cancel remaining stages -> Stop handling -> Latched state
 ```
 
-- 初始化找零是独立按钮，通过堵转/碰撞建立软件零点；上电不自动动作，不恢复中断流程。
-- 每轮开始都检查指定轴软件零位。有效参考且偏离零位时回已有零位，不重复碰撞；参考无效时拒绝启动，提示初始化。
-- 在位置容差内且静止才算到位。缺失/过期反馈不得当作在零位。归位顺序和速度由调好脚本决定，不默认多轴同时运动。
+- 初始化找零是独立按钮，通过堵转/碰撞建立软件零点；只在 Motion 上电后或坐标参考明确失效时执行一次。上电不自动动作，不恢复中断流程。
+- 后续每轮不重新碰撞找零，也不增加独立的起始归位阶段。只有首次初始化成功并处于 Ready 才接受 Start。
+- 初始化结束以及混合结束时，在配置容差内且静止才算处于软件零位。缺失/过期反馈不得当作在零位；混合阶段本身负责让升降轴回零后再混合。
 - 当前工具 `move` 为相对实际位置，不可用 `move ... 0` 冒充绝对归零。实施时核对现有绝对定位/位置反馈能力，明确工具原点和软件零点关系；没有现成入口时只补薄适配。不在未验证情况下硬套 home 模式代替软件归位。
-- 混合前相关轴已由前序脚本回零，不另插入初始化。正常完成保留有效参考，下一轮仍检查位置。
-- 断电、坐标配置变化、Stop/故障或参考不可信后需恢复检查；本版 Stop/故障保守撤销运行资格，人工复位并初始化，不自动续跑。
-- Complete 不自动循环。无可靠瓶位检测时，通过网页人工确认换瓶后允许下一轮，不能伪造已换瓶。
+- 混合脚本完成、所需轴仍在软件零位、反馈新鲜且静止后才能进入 Complete。没有独立“回到起始位置”动作；Complete 到 Ready 的 3 秒仅用于屏幕展示，不发送电机指令。
+- Motion 或驱动器重启、坐标换算/轴配置变化、改变原点的手动或 raw 操作、检测到位置跳变或其他坐标不可信情况会清除参考。正常完成、屏幕重启、网络断开以及位置仍可信的已确认 Stop 不清除参考。
+- Stop、故障或阶段超时先退出运行状态并锁存结果。复位后参考仍有效、所需轴在零位且反馈新鲜静止时可恢复 Ready；参考不可信才要求重新初始化找零，不自动续跑中断流程。
+- Complete 固定展示 3 秒；期间故障/Stop 仍优先，结束时再次确认参考有效、所需轴在零位且反馈新鲜静止，满足才回到 Ready，全程不发送电机指令。无可靠瓶位检测时，Ready 只表示控制器可以接受下一次 Start，不表示已经检测到换瓶；操作者须在下一次启动前自行换瓶。
 - 原开盖脚本含 home/disable，拆分初始化时人工确认哪些动作迁移，不自动删改；承重轴失能风险须实机确认。
+
+### Ready 与 Start
+
+- 对外只使用 NotReady、Ready、五个业务阶段、Complete 和 Error；Idle、Cleaning、Offline、Unknown 不作为正常 Motion 流程阶段发送。屏幕链路离线仍由 DisplayController 自行判断。
+- `stage == Ready` 是唯一启动资格，快照中的 `startEnabled` 直接由该条件生成；其他所有阶段一律为 false。屏幕仅用 startEnabled 控制 Start 按钮，不从阶段名称自行推导额外规则。
+- 配置、首次找零、零位/静止确认、故障和所有权检查都在 Motion 进入 Ready 之前完成，不再维护与 Ready 并行的第二套启动条件。
+- Ready 期间只维护同一状态：参考、零位、静止或反馈条件失效时立即转回 NotReady，因此 startEnabled 同步变为 false。
+- 屏幕快照可能已经过期，因此收到 Start intent 时仍须原子地重读当前阶段：仍为 Ready 则接受并立即离开 Ready，否则只返回 `not_ready`，不启动动作。
 
 ### 非阻塞要求
 
-初始化、起始检查、归位、单阶段、完整流程及阶段切换都采用 tick 状态机：
+首次初始化、单阶段、完整流程、Complete 展示计时及阶段切换都采用 tick 状态机：
 
 ```text
 loop: Web/Stop -> UART -> CAN feedback / queue poll -> flow tick -> State heartbeat
@@ -115,8 +124,8 @@ loop: Web/Stop -> UART -> CAN feedback / queue poll -> flow tick -> State heartb
 ### 页面操作
 
 - 独立“初始化找零”按钮及其脚本编辑入口；复用现有 Stop，不增加重复按钮。
-- 阶段选项：起始归位、开盖、加水、加粉、关盖、混合。每阶段独立编辑、应用到 RAM、单阶段运行。
-- “完整流程运行”调用与屏幕相同的入口，从起始检查开始按固定顺序运行。
+- 阶段选项：开盖、加水、加粉、关盖、混合。每阶段独立编辑、应用到 RAM、单阶段运行。
+- “完整流程运行”调用与屏幕相同的入口，只在 Ready 接受并按固定顺序运行。
 - 单阶段检查必要前提，不偷偷执行其他业务阶段；不满足条件时明确拒绝。
 - Load JSON 恢复全部阶段和参数到编辑器；应用到设备前校验，加载/应用均不启动电机。
 - Export JSON 导出全部配置用于下次继续调试、备份和 Git 留档；不是执行日志。
@@ -143,13 +152,18 @@ loop: Web/Stop -> UART -> CAN feedback / queue poll -> flow tick -> State heartb
 {
   "schema_version": 1,
   "name": "v1-demo",
-  "initialization": {"timeout_ms": 60000, "commands": []},
-  "start_position": {
-    "axes": [
+  "display": {
+    "baby_name": "DEMO",
+    "formula_brand": "NOT FOR FEEDING",
+    "water_ml": 180,
+    "temperature_c": 45
+  },
+  "initialization": {
+    "timeout_ms": 60000,
+    "zero_axes": [
       {"motor_id": 1, "zero_tolerance_deg": 1.0},
       {"motor_id": 3, "zero_tolerance_deg": 1.0}
     ],
-    "timeout_ms": 30000,
     "commands": []
   },
   "stages": [
@@ -178,7 +192,7 @@ commands 中每项就是一行原工具指令，例如：
 上述片段只演示包装，不是完整开盖动作。原脚本顺序和 await 语义不变；转换不自动删除 home 或 disable。增加电机动作只改 commands，不改 C++ 阶段接口。
 
 - 新配置层读取 JSON、检查阶段、超时及命令，再交现有指令解析器，不重新实现电机协议。
-- 初始化/归位/五阶段的业务 ID 与顺序固定，屏幕映射在固件中维护；重复/缺少/未知阶段不得启用。
+- 初始化/五阶段的业务 ID 与顺序固定，屏幕映射在固件中维护；重复/缺少/未知阶段不得启用。
 - 最终 schema 需记录或校验 rotationDistance 等影响指令含义的配置；与设备实际参数不匹配则拒绝执行，不静默换算。字段从现有工具配置提取，不另造一套参数含义。
 - 保持执行器既有容量限制（当前单队列 64 动作、8192 字节），另限定总 JSON 大小和超时范围。配置解析仅在空闲进行，不影响运行中的停止监督。
 - 自动演示只允许能够定义结束条件的指令组合；raw CAN 和无限持续输出留在原手动工具，不默认进入完整流程。
@@ -188,8 +202,8 @@ commands 中每项就是一行原工具指令，例如：
 | 步骤 | 工作 | 验收 |
 | --- | --- | --- |
 | 1 | 编译宏、协议复用、DisplayLink、State/Start/ACK | BRAIN 原功能不回归；DISPLAY 与原显示板互通、重试不重复启动 |
-| 2 | JSON schema、内置构建、RAM 配置解析、fake executor 状态机 | 同 JSON 两种来源结果一致；无电机验证找零门禁、归位、阶段顺序及非阻塞超时 |
-| 3 | 对接现有队列/反馈、阶段监督、Stop 取消流程 | 失败/停止不进入下一阶段；反馈和位置检查真实，不重构电机驱动 |
+| 2 | JSON schema、内置构建、RAM 配置解析、fake executor 状态机 | 同 JSON 两种来源结果一致；无电机验证首次找零、Ready/Start、阶段顺序、Complete 展示计时及非阻塞超时 |
+| 3 | 对接现有队列/反馈、阶段监督、Stop 取消流程 | 混合完成时真实确认回零/静止；失败/停止不进入下一阶段，不重构电机驱动 |
 | 4 | 阶段编辑/运行、独立找零、完整运行、Load/Apply/Export | 上次 JSON 可继续调试；导入不运动；忙碌不能替换配置；无需新增停止按钮 |
 | 5 | 双板实机与文档交付 | 逐轴、单阶段、完整流程通过；断线/重启/故障可恢复；内置版本可脱离电脑演示 |
 
@@ -200,10 +214,10 @@ commands 中每项就是一行原工具指令，例如：
 ## 6. 验证与待确认
 
 - 协议：CRC/截断/版本、golden bytes、重复/冲突 sequence、ACK 丢失重试、重启和屏幕离线。
-- 状态机：参考无效拒绝、在零直接开始、偏离先归位、反馈过期、容差边界、归位失败、每阶段超时；Stop 与完成同时到达不推进。
+- 状态机：上电参考无效、首次找零成功/失败、Ready 与 startEnabled 始终一致、非 Ready 的 Start 被拒绝、反馈过期、零位容差边界、混合结束未回零、Complete 3 秒内无运动及每阶段超时；Stop 与完成同时到达不推进。
 - JSON：导入导出等价、内置/RAM 同语义、未知版本/非法指令/过大文件/换算不匹配拒绝；无效配置不替换原配置；重启回内置且不运动。
 - 调度：await/wait/长动作/阶段切换时网页、CAN 和 UART 持续响应；原停止入口仍有效。
-- 实机：确认归位顺序/干涉、承重保持、单位换算和实际到位；先低速逐轴，再单阶段，最后完整演示。自动测试不能代替机械验收。
+- 实机：确认首次找零顺序/干涉、混合阶段升降回零、承重保持、单位换算和实际到位；先低速逐轴，再单阶段，最后完整演示。自动测试不能代替机械验收。
 - Review：代码逻辑与 QA 分别检查；独立 reviewer 不可用时说明自审限制。
 
-仍需落实：最终阶段脚本、相关轴/位置容差、软件零点与工具坐标对应关系、各阶段超时、混合结束位置、承重轴停机策略，以及加水/加粉是否使用模拟等待。软件骨架和协议测试可先推进，不要求先重构 Product。
+仍需落实：最终阶段脚本、需确认回零的轴及位置容差、软件零点与工具坐标对应关系、各阶段超时、承重轴停机策略，以及加水/加粉是否使用模拟等待。软件骨架和协议测试可先推进，不要求先重构 Product。
