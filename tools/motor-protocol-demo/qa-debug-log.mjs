@@ -50,7 +50,7 @@ const pushFrame=(dir,data,canId=0x100)=>{
   traceFrames.push({seq:traceSeq,atMs:traceSeq*5,dir,id:canId,extended:true,remote:false,data});
   if(traceFrames.length>200)traceFrames.shift();
 };
-const html=await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const html=await readFile(new URL('../../device-controller/data/index.html',import.meta.url),'utf8');
 await page.route('http://device.test/**',async route=>{
   const url=new URL(route.request().url()), path=url.pathname;
   const json=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});

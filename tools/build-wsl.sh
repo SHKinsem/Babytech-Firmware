@@ -4,10 +4,11 @@ set -euo pipefail
 source_root=$(realpath "$(wslpath -u "$1")")
 target=${2:-all}
 jobs=${3:-8}
-case "$target" in all|brain|motion|test) ;; *) echo 'Invalid build target' >&2; exit 2;; esac
+case "$target" in brain) target=main-controller;; motion) target=device-controller;; esac
+case "$target" in all|main-controller|device-controller|test) ;; *) echo 'Invalid build target' >&2; exit 2;; esac
 [[ "$jobs" =~ ^[0-9]+$ ]] && ((jobs >= 1 && jobs <= 32)) || exit 2
-test -f "$source_root/brain/platformio.ini"
-test -f "$source_root/motion/platformio.ini"
+test -f "$source_root/main-controller/platformio.ini"
+test -f "$source_root/device-controller/platformio.ini"
 test -f "$source_root/shared/BoardProtocol/library.json"
 
 export PATH="$HOME/.local/bin:$HOME/.platformio/penv/bin:$HOME/.venvs/platformio/bin:$PATH"
@@ -52,7 +53,7 @@ python3 tools/test_protocol.py
 python3 tools/test_motion.py
 python3 tools/test_raw_can.py
 if [[ "$target" == test ]]; then exit 0; fi
-if [[ "$target" == all ]]; then projects=(motion brain); else projects=("$target"); fi
+if [[ "$target" == all ]]; then projects=(device-controller main-controller); else projects=("$target"); fi
 
 for project in "${projects[@]}"; do
     started=$(date +%s)

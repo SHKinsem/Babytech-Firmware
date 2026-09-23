@@ -15,7 +15,7 @@ let online=true, held=false, pendingRelease, seq=1;
 let saved=false, wifiState='idle', scanning=false;
 let motor={enabled:false,state:'disabled',online:true,canReady:true,busState:'running',txErrors:0,positionDeg:12.5,speedRpm:0,currentMa:0,driverEnabled:false,lastAck:'none',fault:'none'};
 let scaleSample=20, scaleTared=true, scaleFactor=7842.125, scaleDoutPin=1, scaleSckPin=2;
-const html=await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const html=await readFile(new URL('../../device-controller/data/index.html',import.meta.url),'utf8');
 await page.route('http://device.test/**',async route=>{
   const url=new URL(route.request().url()), path=url.pathname;
   const json=body=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});

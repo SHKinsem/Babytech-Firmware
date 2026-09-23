@@ -16,13 +16,13 @@ label{display:block;margin:10px 0}input{float:right;width:130px;padding:6px;font
 <main>
 <small>BABYTECH / FIRMWARE</small>
 <h1>双板通信调试</h1>
-<p class="note">通过上板调试下板的单电机相对运动阶段。</p>
+<p class="note">通过主控板调试设备控制板的单电机相对运动阶段。</p>
 <section class="card">
-<p id="connection" role="status">正在连接大脑…</p>
-<dl><dt>小脑连接</dt><dd id="motion">等待反馈</dd>
-<dt>小脑运行时间</dt><dd id="uptime">—</dd>
+<p id="connection" role="status">正在连接主控板…</p>
+<dl><dt>设备控制板连接</dt><dd id="motion">等待反馈</dd>
+<dt>设备控制板运行时间</dt><dd id="uptime">—</dd>
 <dt>已收到响应</dt><dd id="responses">0</dd></dl>
-<button id="query" type="button">查询小脑状态</button>
+<button id="query" type="button">查询设备控制板状态</button>
 <p id="result" role="status"></p>
 </section>
 <section class="card">
@@ -104,19 +104,19 @@ async function refresh() {
     const s = await reply.json();
     responseCount = s.responses;
     latest=s; updateControls(s);
-    byId('connection').textContent = '大脑已连接';
+    byId('connection').textContent = '主控板已连接';
     byId('motion').textContent = s.connected ? '在线' : '未连接';
     byId('uptime').textContent = s.connected ? (s.motionUptimeMs / 1000).toFixed(1) + ' 秒' : '—';
     byId('responses').textContent = s.responses;
     if (expectedAfter !== null) {
       if (s.connected && s.responses > expectedAfter) {
-        byId('result').textContent = '已收到小脑反馈。'; expectedAfter = null;
+        byId('result').textContent = '已收到设备控制板反馈。'; expectedAfter = null;
       } else if (Date.now() - queryAt > 2000) {
-        byId('result').textContent = '未收到反馈，请检查小脑供电和串口接线。'; expectedAfter = null;
+        byId('result').textContent = '未收到反馈，请检查设备控制板供电和串口接线。'; expectedAfter = null;
       }
     }
   } catch {
-    byId('connection').textContent = '大脑连接断开，请检查 Wi-Fi。';
+    byId('connection').textContent = '主控板连接断开，请检查 Wi-Fi。';
     for (const key of ['apply','reload','enable','run','disable']) byId(key).disabled=true;
     byId('stage-state').textContent='状态未知，请检查连接。';
     byId('motion').textContent = '未知';
@@ -126,7 +126,7 @@ async function refresh() {
 }
 byId('query').onclick = async () => {
   byId('query').disabled = true;
-  byId('result').textContent = '等待小脑反馈…';
+  byId('result').textContent = '等待设备控制板反馈…';
   expectedAfter = responseCount; queryAt = Date.now();
   try {
     const reply = await fetch('/api/query', {method:'POST'});

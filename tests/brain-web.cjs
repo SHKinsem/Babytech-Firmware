@@ -14,7 +14,7 @@ catch { playwright=require('C:/Users/xusen/.cache/codex-runtimes/codex-primary-r
   let state={connected:true,boot:'0000000000000009',revision:1,parameterRevision:1,
    motionState:'idle',motionUptimeMs:500,responses:5,motorFlags:3,busy:false,
    command:'none',reason:0,params:{motor:1,angleTenths:100,speedTenths:50,accel:10,decel:10,current:800}};
-  const html=fs.readFileSync(path.join(__dirname,'../brain/data/index.html'),'utf8');
+  const html=fs.readFileSync(path.join(__dirname,'../main-controller/data/index.html'),'utf8');
   await page.route('http://brain.test/**',async route=>{
    const url=new URL(route.request().url());
    if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:html});

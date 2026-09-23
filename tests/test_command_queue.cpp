@@ -1,5 +1,5 @@
-// Host tests for the board queue (motion/src/CommandQueue.cpp) and the readable
-// program DSL (motion/include/QueueProgram.h).
+// Host tests for the board queue (device-controller/src/CommandQueue.cpp) and the readable
+// program DSL (device-controller/include/QueueProgram.h).
 //
 // The queue runs against the real MotorControl over the fake X42sProtocol bus,
 // so every step is asserted on what actually reached the wire and on the

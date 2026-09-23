@@ -1,18 +1,26 @@
-"""Package an already-tested Motion build. Never opens a serial port."""
+"""Package an already-tested device controller build. Never opens a serial port."""
 from pathlib import Path
+import argparse
 import hashlib
 import json
 import shutil
 import zipfile
+import re
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--release', required=True, help='Release identifier, e.g. 20260923-rc1')
+args = parser.parse_args()
+if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', args.release):
+    parser.error('Release must contain only letters, digits, dot, underscore or hyphen')
 
 root = Path(__file__).resolve().parents[1]
-build = root / 'out/wsl/motion'
-release = root / 'out/releases/motion-workbench-20260921'
-release.mkdir(parents=True, exist_ok=True)
-html = (root / 'motion/data/index.html').read_bytes()
+build = root / 'out/wsl/device-controller'
+release = root / 'out/releases' / ('device-controller-' + args.release)
+html = (root / 'device-controller/data/index.html').read_bytes()
 firmware = (build / 'firmware.bin').read_bytes()
 if html not in firmware:
     raise SystemExit('Firmware does not contain the exact current embedded HTML; rebuild first.')
+release.mkdir(parents=True, exist_ok=False)
 
 artifacts = ['bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'firmware.bin', 'firmware.elf', 'build-info.txt']
 for name in artifacts:
@@ -32,14 +40,14 @@ layout = {
 (release / 'flash-layout.json').write_text(json.dumps(layout,ensure_ascii=False,indent=2),encoding='utf-8')
 
 sources = set()
-for folder in ['brain','motion','shared','tests']:
+for folder in ['main-controller','device-controller','shared','tests']:
     for file in (root / folder).rglob('*'):
         if not file.is_file() or any(p in {'.pio','.git','__pycache__','node_modules'} for p in file.parts):
             continue
         if file.suffix.lower() in {'.cpp','.h','.c','.ini','.json','.md','.html','.py','.cjs','.txt'}:
             sources.add(file)
 sources.update((root / 'docs').glob('*.md'))
-for name in ['build-wsl.ps1','build-wsl.sh','test_protocol.py','test_motion.py','package-motion.py']:
+for name in ['build-wsl.ps1','build-wsl.sh','test_protocol.py','test_motion.py','package-device.py']:
     sources.add(root / 'tools' / name)
 sources.add(root / 'README.md')
 front = root / 'tools/motor-protocol-demo'

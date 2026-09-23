@@ -1,7 +1,7 @@
 // ESP32-S3 motion board MVP.
 //
 // Responsibilities of this file:
-//   * brain link (BoardProtocol v2 READ/WRITE/EXEC/STOP frames) over UART1,
+//   * main controller link (BoardProtocol v2 READ/WRITE/EXEC/STOP frames) over UART1,
 //   * CAN bring-up + motor command HTTP API (delegated to motion::MotorControl),
 //   * WiFi soft-AP + single embedded debug page (motion/data/index.html).
 //
@@ -36,7 +36,7 @@ extern const uint8_t indexHtmlEnd[] asm("_binary_data_index_html_end");
 
 namespace {
 
-HardwareSerial brain(1);
+HardwareSerial mainController(1);
 babytech::v2::Parser parser;
 motion::MotorControl motor;
 motion::Hx711Scale powderScale;
@@ -48,7 +48,7 @@ WebServer server(kHttpPort);
 // and the scale/config endpoints stay blocked.
 bool motionBusy() { return endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
 WiFiSetup wifiSetup(server, motionBusy);
-uint32_t lastBrainByteAt = 0;
+uint32_t lastMainControllerByteAt = 0;
 int scaleDoutPin = kScaleDoutPin;
 int scaleSckPin = kScaleSckPin;
 
@@ -527,20 +527,20 @@ bool argDecimal(const char* name, double& out) {
 }
 
 // ---------------------------------------------------------------------------
-// Brain link: v2 shared endpoint, bounded receive and event servicing.
+// Main controller link: v2 shared endpoint, bounded receive and event servicing.
 // ---------------------------------------------------------------------------
 void sendFrame(const babytech::v2::Frame& frame) {
     uint8_t bytes[babytech::v2::kMaxFrameSize];
     const size_t n=babytech::v2::encode(frame,bytes,sizeof(bytes));
-    if (n) brain.write(bytes,n);
+    if (n) mainController.write(bytes,n);
 }
-void serviceBrainLink() {
+void serviceMainControllerLink() {
     using namespace babytech::v2;
-    if (millis()-lastBrainByteAt>kByteTimeoutMs) parser.reset();
+    if (millis()-lastMainControllerByteAt>kByteTimeoutMs) parser.reset();
     boardMotion.setRadioBusy(wifiSetup.busy() || queue.active());
-    for (size_t count=0;count<kLinkBytesPerPass && brain.available()>0;++count) {
-        lastBrainByteAt=millis(); Frame request,response;
-        if (parser.push(uint8_t(brain.read()),request)) {
+    for (size_t count=0;count<kLinkBytesPerPass && mainController.available()>0;++count) {
+        lastMainControllerByteAt=millis(); Frame request,response;
+        if (parser.push(uint8_t(mainController.read()),request)) {
             // Endpoint validates and deduplicates before QueueBoardMotion::stop
             // cancels any queue. Reads cannot acquire mechanical ownership.
             if (endpoint.handle(request,millis(),response)) sendFrame(response);
@@ -813,7 +813,7 @@ void handleControlReset() {
                   motor.faultTag() ? motor.faultTag() : "none");
 
     // Terminate UART ownership first: at most one exec and one stop record, each
-    // finished as Cancelled exactly once and answered to the brain.
+    // finished as Cancelled exactly once and answered to the mainController.
     babytech::v2::Frame event;
     uint8_t cancelled = 0;
     while (cancelled < 2 && endpoint.cancelPending(event)) {
@@ -1092,7 +1092,7 @@ void handleQueueCancel() {
 void setup() {
     Serial.begin(115200);
     Serial.println();
-    Serial.println("[boot] Babytech Motion: AP + HTTP debug bridge. No motion on boot.");
+    Serial.println("[boot] Babytech Device Controller: AP + HTTP debug bridge. No motion on boot.");
 
     uint64_t boot=(uint64_t(esp_random())<<32)|esp_random();
     // The diagnostic log starts with this boot's identity and the reset reason,
@@ -1101,8 +1101,8 @@ void setup() {
     debugLog.addf(millis(), "info", "boot", "boot=%s reset=%d",
                   debugLog.bootId(), static_cast<int>(esp_reset_reason()));
     endpoint.begin(boot);
-    brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
-    Serial.println("[uart] brain link ready on TX43/RX44 @115200");
+    mainController.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
+    Serial.println("[uart] main controller link ready on TX43/RX44 @115200");
 
     loadScalePins();
     if (!powderScale.begin(makeScaleConfig(), millis())) {
@@ -1190,12 +1190,12 @@ void loop() {
     motor.poll();
     // The queue drives one supervised action per poll and never blocks.
     queue.poll(millis());
-    serviceBrainLink();
+    serviceMainControllerLink();
     server.handleClient();
     wifiSetup.poll();
     powderScale.poll(millis());
     motor.poll();
     queue.poll(millis());
-    serviceBrainLink();
+    serviceMainControllerLink();
     delay(1);
 }

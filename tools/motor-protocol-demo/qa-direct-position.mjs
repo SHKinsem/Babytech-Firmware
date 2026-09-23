@@ -1,6 +1,6 @@
 // Desktop QA for the supervised direct (FB/CB) position commands.
 //
-// Same conventions as qa-device.mjs: the built device page (motion/data/index.html)
+// Same conventions as qa-device.mjs: the built device page (device-controller/data/index.html)
 // is served behind a mocked board API, the page is driven in a real Chromium, and
 // every request the page makes is recorded so the assertions are about actual
 // submitted bytes and nothing else. Nothing here talks to hardware.
@@ -26,7 +26,7 @@ page.on('pageerror',e=>errors.push(e.message));
 const motor={enabled:true,state:'idle',online:true,canReady:true,busState:'running',txErrors:0,
   positionDeg:100.0,speedRpm:0,currentMa:0,targetDeg:200.0,driverEnabled:true,lastAck:'received',fault:'none',
   activeId:0,homeOutcome:'none',homeId:0,homeMode:null,homeOrg:null,homeRunning:null,homeFailed:null};
-const html=await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const html=await readFile(new URL('../../device-controller/data/index.html',import.meta.url),'utf8');
 await page.route('http://device.test/**',async route=>{
   const url=new URL(route.request().url()), path=url.pathname;
   const json=body=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});

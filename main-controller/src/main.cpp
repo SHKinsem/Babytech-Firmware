@@ -25,10 +25,10 @@ void sendFrame(const Frame& f) {
     uint8_t bytes[kMaxFrameSize]; const size_t n=encode(f,bytes,sizeof(bytes));
     if (n) motion.write(bytes,n);
 }
-void queryMotion(bool force=false) {
+void queryDeviceController(bool force=false) {
     Frame f; if (client.query(millis(),f,force)) sendFrame(f);
 }
-void pollMotion() {
+void pollDeviceController() {
     if (millis()-lastByteAt>kByteTimeoutMs) parser.reset();
     for (size_t n=0;n<256 && motion.available()>0;++n) {
         lastByteAt=millis(); Frame f;
@@ -138,13 +138,13 @@ void setup() {
         server.send_P(200,"text/html; charset=utf-8",reinterpret_cast<const char*>(indexStart),indexEnd-indexStart);
     });
     server.on("/api/status",HTTP_GET,sendStatus);
-    server.on("/api/query",HTTP_POST,[] { queryMotion(true); sendJson(202,"{\"queued\":true}"); });
+    server.on("/api/query",HTTP_POST,[] { queryDeviceController(true); sendJson(202,"{\"queued\":true}"); });
     server.on("/api/params",HTTP_POST,writeParameters);
     server.on("/api/exec",HTTP_POST,execute);
     server.on("/api/stop",HTTP_POST,stopAll);
     server.onNotFound([] { sendJson(404,"{\"error\":\"not_found\"}"); });
-    server.begin(); queryMotion(true);
+    server.begin(); queryDeviceController(true);
 }
 void loop() {
-    pollMotion(); queryMotion(); server.handleClient(); delay(1);
+    pollDeviceController(); queryDeviceController(); server.handleClient(); delay(1);
 }

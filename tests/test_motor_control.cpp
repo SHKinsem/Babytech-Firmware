@@ -1,4 +1,4 @@
-// Host integration tests for the *real* motion/src/MotorControl.cpp.
+// Host integration tests for the *real* device-controller/src/MotorControl.cpp.
 //
 // The module is compiled as-is; it talks to a fake X42sProtocol (a fake CAN
 // driver) whose receive queue, millis() clock, controller state and captured
