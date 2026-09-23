@@ -20,6 +20,8 @@ import {
   validateAddress,
 } from '../src/protocol.js';
 
+import { displayError, displayRange, displayUnit, displayValue, protocolValue } from '../src/field-display.js';
+
 import {
   ACK_STATUS,
   MANUAL_DEFAULTS,
@@ -51,6 +53,57 @@ const allVariants = () =>
   COMMAND_ITEMS.flatMap((item) =>
     item.variants.map((variant) => ({ item, variant, variantKey: variant.key })),
   );
+
+test('human RPM and angle inputs become the exact protocol bytes once', () => {
+  const speed = getCommandItem('velocity');
+  const speedField = getVariant(speed, 'base').layout.find((field) => field.key === 'vel');
+  assert.equal(displayUnit(speedField), 'RPM');
+  assert.equal(displayValue(speedField, 600), '60');
+  assert.match(displayRange(speedField), /6553\.5 RPM/);
+  const speedRaw = protocolValue(speedField, '60.1');
+  assert.equal(speedRaw, '601');
+  const speedFrame = encodeCommand({
+    item: speed,
+    variantKey: 'base',
+    values: { ...defaultValues(speed, 'base'), vel: speedRaw },
+    address: 1,
+  });
+  assert.equal(speedFrame.ok, true);
+  assert.deepEqual(speedFrame.bytes.slice(5, 7), [0x02, 0x59]);
+
+  const position = getCommandItem('passthroughPosition');
+  const angleField = getVariant(position, 'base').layout.find((field) => field.key === 'clk');
+  assert.equal(displayUnit(angleField), '°');
+  assert.equal(displayValue(angleField, 1800), '180');
+  const angleRaw = protocolValue(angleField, '180.5');
+  assert.equal(angleRaw, '1805');
+  const positionFrame = encodeCommand({
+    item: position,
+    variantKey: 'base',
+    values: { ...defaultValues(position, 'base'), clk: angleRaw },
+    address: 1,
+  });
+  assert.equal(positionFrame.ok, true);
+  assert.deepEqual(positionFrame.bytes.slice(5, 9), [0x00, 0x00, 0x07, 0x0d]);
+});
+
+test('scaled inputs preserve partial drafts and reject excess precision', () => {
+  const item = getCommandItem('velocity');
+  const field = getVariant(item, 'base').layout.find((entry) => entry.key === 'vel');
+  assert.equal(protocolValue(field, ''), '');
+  assert.equal(protocolValue(field, '60.'), '60.');
+  assert.equal(displayValue(field, '60.'), '60.');
+  assert.equal(protocolValue(field, '60.05'), '60.05');
+  assert.equal(displayError(field, '60.05', 'raw invalid'), '速度最多填写 1 位小数（RPM）');
+  const result = encodeCommand({
+    item,
+    variantKey: 'base',
+    values: { ...defaultValues(item, 'base'), vel: protocolValue(field, '60.05') },
+    address: 1,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.vel);
+});
 
 test('F3 enable example matches the reference design byte for byte', () => {
   const result = encode('enable', { state: 1, sync: 0 });

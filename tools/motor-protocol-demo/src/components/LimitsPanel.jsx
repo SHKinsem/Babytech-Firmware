@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { DEFAULT_LIMITS, LIMIT_FIELDS, checkLimitsDraft, limitsEqual, limitsToDraft } from '../device-limits.js';
 import { GlyphInfo, HelpTip } from './glyphs.jsx';
+import { CompactPanel } from './CompactPanel.jsx';
 
 const emptyDraft = () => Object.fromEntries(LIMIT_FIELDS.map((field) => [field.key, '']));
 
@@ -104,7 +105,7 @@ export function LimitsPanel({
 
   return (
     <div className="limits-page">
-      <section className="limits-card" aria-label="板上当前限制">
+      <CompactPanel title="板上当前限制" initiallyOpen className="compact-panel--limits-current"><section className="limits-card" aria-label="板上当前限制">
         <div className="limits-card__head">
           <h2>板上当前限制</h2>
           <span className={`chip ${ready ? 'chip--ok' : state === 'loading' ? 'chip--soft' : 'chip--muted'}`}>
@@ -146,9 +147,9 @@ export function LimitsPanel({
             <button type="button" className="button button--outline" onClick={onReload}>重新读取</button>
           </>
         )}
-      </section>
+      </section></CompactPanel>
 
-      <section className="limits-card" aria-label="编辑限制">
+      <CompactPanel title="编辑限制" className="compact-panel--limits-edit"><section className="limits-card" aria-label="编辑限制">
         <div className="limits-card__head">
           <h2>编辑限制</h2>
           {!ready ? null : dirty
@@ -200,7 +201,7 @@ export function LimitsPanel({
 
         {saveError ? <p className="device-error" role="alert">{saveError}</p> : null}
         {saveNotice ? <p className="device-notice" role="status">{saveNotice}</p> : null}
-      </section>
+      </section></CompactPanel>
     </div>
   );
 }

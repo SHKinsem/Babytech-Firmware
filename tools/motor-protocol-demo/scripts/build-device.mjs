@@ -20,6 +20,7 @@ for (const match of [...html.matchAll(/<link\b[^>]*href="([^"]+\.css)"[^>]*>/g)]
   html = html.replace('CSS_PLACEHOLDER', () => `<style>${css}</style>`);
 }
 html = html.replace(/<link\b[^>]*rel="modulepreload"[^>]*>/g,'');
+html = html.replace(/\r\n?/g, '\n');
 if (/<(?:script|link)\b[^>]*(?:src|href)="\//.test(html)) throw Error('External asset remains in device HTML');
 const target=resolve(root,'../../motion/data/index.html');
 await mkdir(dirname(target),{recursive:true});

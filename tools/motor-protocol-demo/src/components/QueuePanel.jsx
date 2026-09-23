@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { GlyphInfo, HelpTip } from './glyphs.jsx';
+import { CompactPanel } from './CompactPanel.jsx';
 import { ROTATION_DISTANCE_MAX, ROTATION_DISTANCE_MIN, errorLabels, queueProgressText, queueStateLabels, queueActionLabels, queueMessageText, readMotorDistance, readQueueStatus, request } from '../device-api.js';
 import {
   QUEUE_LIMITS,
@@ -464,6 +465,7 @@ export function QueuePanel({
 
   return (
     <div className="queue-page">
+      <CompactPanel title="队列程序与操作" initiallyOpen className="compact-panel--queue-source">
       <section className="queue-col queue-col--source" aria-label="队列程序">
         <div className="queue-col__head">
           <h2 className="panel__title">编排队列</h2>
@@ -542,6 +544,7 @@ export function QueuePanel({
           <p className={`queue-notice queue-notice--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.text}</p>
         ) : null}
 
+        <CompactPanel title="动作插入（可选）" desktopInitiallyOpen={false} className="compact-panel--queue-builder">
         <section className="queue-builder" aria-label="动作插入">
           <h3 className="section__title">动作插入（可选）</h3>
           <div className="field">
@@ -592,8 +595,11 @@ export function QueuePanel({
           <button type="button" className="button button--outline" onClick={insertAction}>插入到程序末尾</button>
           {builderError ? <p className="field__error" role="alert">{builderError}</p> : null}
         </section>
+        </CompactPanel>
       </section>
+      </CompactPanel>
 
+      <CompactPanel title="语义预览" desktopInitiallyOpen={false} className="compact-panel--queue-preview">
       <section className="queue-col queue-col--preview" aria-label="语义预览">
         <div className="queue-col__head">
           <h2 className="panel__title">语义预览</h2>
@@ -620,7 +626,9 @@ export function QueuePanel({
           原始帧（hex / can）只报告“已发送”，不代表电机已动作或已停止；原始步骤之后需要停止时，请显式写 stop 或 disable。
         </p>
       </section>
+      </CompactPanel>
 
+      <CompactPanel title="板端进度与设置" desktopInitiallyOpen={false} preferenceKey="queue-side-layout-v2" className="compact-panel--queue-side">
       <section className="queue-col queue-col--side" aria-label="板端进度与旋转距离">
         <div className="queue-col__head">
           <h2 className="panel__title">板端进度</h2>
@@ -727,6 +735,7 @@ export function QueuePanel({
         </h3>
         <VerbHelp />
       </section>
+      </CompactPanel>
     </div>
   );
 }

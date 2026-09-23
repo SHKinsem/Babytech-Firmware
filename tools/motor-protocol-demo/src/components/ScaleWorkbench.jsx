@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { request } from '../device-api.js';
+import { CompactPanel } from './CompactPanel.jsx';
 import { GlyphDot, GlyphInfo, GlyphSearch } from './glyphs.jsx';
 
 const EMPTY_SCALE = {
@@ -296,24 +297,24 @@ export function ScaleWorkbench() {
 
   return <>
     <main className="scale-workspace">
-      <aside className="scale-summary" aria-label="称重传感器状态">
+      <CompactPanel title="称重状态" initiallyOpen className="compact-panel--scale-summary"><aside className="scale-summary" aria-label="称重传感器状态">
         <div className="scale-summary__head"><h2>称重传感器</h2><span className={`chip ${scale.calibrated?'chip--ok':'chip--warn'}`}>{scale.calibrated?'已校准':'待校准'}</span></div>
         <p className="scale-summary__sub">HX711 · 通道 1<br/>两个全桥传感器并联</p>
         <p className="scale-summary__label">当前净重</p><p className="scale-summary__weight">{formatNumber(scale.weightG,2)} <small>g</small></p>
         <dl className="scale-summary__list"><div><dt>状态</dt><dd className={`scale-tone scale-tone--${diagnostics.tone}`}><GlyphDot tone={diagnostics.tone} size={10}/>{diagnostics.label}</dd></div><div><dt>设备状态</dt><dd>{connected && scale.initialized ? '在线' : '离线'}</dd></div><div><dt>数据更新时间</dt><dd>{Number.isFinite(scale.sampleAgeMs) ? `${scale.sampleAgeMs} ms` : '—'}</dd></div></dl>
         <div className="scale-summary__divider"/><h3>操作状态</h3><p className="scale-summary__message" role="status">{message}</p>
-      </aside>
+      </aside></CompactPanel>
 
-      <section className="scale-drift" aria-label="零点漂移诊断">
+      <CompactPanel title="零点漂移与校准" className="compact-panel--scale-drift"><section className="scale-drift" aria-label="零点漂移诊断">
         <div className="scale-drift__head"><h2>零点漂移诊断</h2><span className={`chip ${connected?'chip--ok':'chip--muted'}`}>{connected?'实时采集':'等待设备'}</span><span className="scale-drift__channel">HX711 通道 1（两个全桥并联）</span></div>
         <div className="scale-kpis"><div><span>当前净重</span><strong>{formatNumber(scale.weightG,2)} <small>g</small></strong></div><div><span>60 秒漂移量</span><strong>{Number.isFinite(diagnostics.drift) ? `${diagnostics.drift>=0?'+':''}${formatNumber(diagnostics.drift,2)}` : '—'} <small>g</small></strong></div><div><span>噪声幅度（峰-峰值）</span><strong>{formatNumber(diagnostics.noise,2)} <small>g</small></strong></div></div>
         <div className="scale-chart-wrap"><span className="scale-chart__axis">漂移 (g)</span><ScaleChart points={diagnostics.points}/><span className="scale-chart__time">时间（秒）</span></div>
         <div className="scale-chart__legend"><span><i className="legend-line"/>重量信号</span><span><i className="legend-band"/>稳定范围（±0.10 g）</span><span><i className="legend-zero"/>零点基线</span></div>
         <div className="scale-actions"><button type="button" className="button button--primary" disabled={!connected || !scale.initialized || action || scale.tareInProgress} onClick={runTare}>{scale.tareInProgress?'正在去皮…':'重新去皮'}</button><button type="button" className="button button--outline" disabled={!connected || !scale.initialized || action} onClick={()=>setCalibrationOpen(open=>!open)}>校准传感器</button><p><GlyphInfo/>请确保称重机构保持静止，避免振动和外力干扰。</p></div>
         {calibrationOpen && <div className="scale-calibration"><label htmlFor="known-weight">标准砝码重量</label><div><input id="known-weight" className={`input input--mono${knownWeight&&!calibrationValid?' has-error':''}`} value={knownWeight} inputMode="decimal" onChange={event=>setKnownWeight(event.target.value)}/><span>g</span></div><button type="button" className="button button--primary" disabled={!calibrationValid || action || !scale.tareCompleted} onClick={runCalibration}>{action==='calibrate'?'正在校准…':'使用此重量校准'}</button><button type="button" className="link-button" onClick={()=>setCalibrationOpen(false)}>取消</button>{!scale.tareCompleted && <span className="scale-calibration__hint">校准前必须先完成去皮</span>}</div>}
-      </section>
+      </section></CompactPanel>
 
-      <aside className="scale-diagnostics" aria-label="诊断信息">
+      <CompactPanel title="诊断与 IO 设置" desktopInitiallyOpen={false} className="compact-panel--scale-diagnostics"><aside className="scale-diagnostics" aria-label="诊断信息">
         <div className="scale-diagnostics__head"><h2>诊断信息</h2><button type="button" className="link-button" disabled={!connected || action} onClick={openPinConfig}>配置 IO</button></div>
         {pinConfigOpen && <div className="scale-pin-config" aria-label="HX711 IO 配置">
           <label htmlFor="scale-dout-pin">DOUT GPIO</label><input id="scale-dout-pin" className={`input input--mono${doutPinInput&&!pinAllowed(parsedDoutPin)?' has-error':''}`} value={doutPinInput} inputMode="numeric" onChange={event=>setDoutPinInput(event.target.value)}/>
@@ -322,8 +323,8 @@ export function ScaleWorkbench() {
           <p>可用 GPIO：1、2、6–18、21、38–42{scale.gpio45Allowed?'、45':''}、47、48。GPIO45 仅在 eFuse 已把 VDD_SPI 固定为 3.3 V 时开放。</p>
         </div>}
         <dl><div><dt>HX711 DOUT</dt><dd>{Number.isInteger(scale.doutPin)?`GPIO ${scale.doutPin}`:'—'}</dd></div><div><dt>HX711 SCK</dt><dd>{Number.isInteger(scale.sckPin)?`GPIO ${scale.sckPin}`:'—'}</dd></div><div><dt>原始计数</dt><dd>{formatInteger(scale.rawCounts)}</dd></div><div><dt>净重计数</dt><dd>{formatInteger(scale.netCounts)}</dd></div><div><dt>采样频率</dt><dd>{Number.isFinite(diagnostics.sampleRate)?`${formatNumber(diagnostics.sampleRate,1)} Hz`:'—'}</dd></div><div><dt>样本更新时间</dt><dd>{Number.isFinite(scale.sampleAgeMs)?`${scale.sampleAgeMs} ms`:'—'}</dd></div><div><dt>稳定持续时间</dt><dd>{`${formatNumber(diagnostics.stableSeconds,1)} s`}</dd></div><div><dt>零点偏移</dt><dd>{formatInteger(scale.tareRaw)}</dd></div><div><dt>每克计数</dt><dd>{formatNumber(scale.countsPerGram,3)}</dd></div><div><dt>故障状态</dt><dd className={scale.status==='fault'||scale.status==='stale'?'is-danger':'is-ok'}>{scale.status==='fault'||scale.status==='stale'?(STATUS_LABELS[scale.status]||scale.status):'无故障'}</dd></div></dl><p className="scale-diagnostics__note"><GlyphInfo/>两个全桥并联读作一个合成通道；无法分别判断单个传感器漂移。</p>
-      </aside>
+      </aside></CompactPanel>
     </main>
-    <ScaleEventsPanel events={events} onClear={()=>setEvents([])}/>
+    <CompactPanel title="称重采样记录" desktopInitiallyOpen={false} className="compact-panel--scale-events"><ScaleEventsPanel events={events} onClear={()=>setEvents([])}/></CompactPanel>
   </>;
 }
