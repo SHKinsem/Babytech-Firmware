@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { GlyphInfo, HelpTip } from './glyphs.jsx';
 import { QueueDiagnostics } from './QueueDiagnostics.jsx';
 import { SyncSettings } from './SyncSettings.jsx';
-import { ROTATION_DISTANCE_MAX, ROTATION_DISTANCE_MIN, errorLabels, queueProgressText, queueStateLabels, queueActionLabels, queueMessageText, readMotorDistance, readQueueStatus, request } from '../device-api.js';
+import { ROTATION_DISTANCE_MAX, ROTATION_DISTANCE_MIN, errorLabels, queueProgressText, queueStateLabels, queueActionLabels, queueMessageText, readMotorDistance, readQueueStatus, request, syncIsolationReasonText } from '../device-api.js';
 import {
   QUEUE_LIMITS,
   QUEUE_VERBS,
@@ -339,13 +339,15 @@ export function QueuePanel({
         });
       } else {
         const line = error.payload?.line ?? error.payload?.programLine;
+        const cause = error.message === 'sync_cache_isolation_unverified' && error.payload?.isolationReason
+          ? ` 板端记录原因：${syncIsolationReasonText(error.payload.isolationReason)}。` : '';
         // A refusal is a known outcome: the board answered, so nothing is
         // running because of this request. 400 means the program never started;
         // 409 means something else owns the bus and the status poll will show it.
         onQueueBusy({ pending: false, unconfirmed: false });
         setNotice({
           tone: 'error',
-          text: `板端拒绝（HTTP ${error.status}）${Number.isInteger(Number(line)) && Number(line) > 0 ? ` · 源程序第 ${line} 行` : ''}：${detail}`,
+          text: `板端拒绝（HTTP ${error.status}）${Number.isInteger(Number(line)) && Number(line) > 0 ? ` · 源程序第 ${line} 行` : ''}：${detail}${cause}`,
         });
         onRefreshQueue();
       }

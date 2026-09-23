@@ -114,6 +114,7 @@ helix 1 2 3 2 1 1 -1 1 60 60 800 0.1
 - `GET /api/sync-settings` 读取配置与最后确认的缓存隔离许可。
 - `POST /api/sync-settings` 保存完整字段：`progressTolerance` (0,0.25]、`timeToleranceMs` 1..60000、`feedbackTimeoutMs` 200..30000、`prepareTimeoutMs` 1000..60000、`stopTimeoutMs` 500..30000、`responseBudgetMs` 1..5000、`completionTenths` 1..1000。除进度容差外均为整数；进度容差按百万分之一向下取整。应答预算还必须小于查询超时，最终许可按具体轨迹重新计算。
 - `POST /api/sync-isolation` 只有显式填写 `cacheSemanticsVerified=1`、`allNodesIsolated=1`、`pendingRepliesDrained=1` 才记录人工确认；`revoke=1` 撤销。接口不发送清缓存帧、不检测或证明硬件已清理。确认只在 RAM 中，重启、原始帧、外部控制命令或同步异常使许可失效；成功同步可按已经人工验证的缓存消费语义继续下一组。
+- 操作顺序：先在队列外完成使能，再核实并记录隔离确认，最后提交同步程序；`enable` 与 `sync` 写在同一段队列时，整段预检会在执行 `enable` 前拒绝。普通使能／失能帧当前也会使确认失效。`GET /api/sync-settings` 的 `cacheIsolationReason` 报告最近一次失效原因；此类 HTTP 400 也返回 `isolationReason`，便于区分重启、人工撤销、使能／失能、其他控制命令、原始帧和同步中断。
 - 查询预算保存在 NVS `can-query/v1`，同步数值保存在 `sync-settings/v1`，不迁移旧配置。升级不要擦除整片 Flash；降级可忽略新增键。独立操作人与所有总线节点必须受控，不支持另一主站并发写入或热插拔后沿用旧隔离确认。
 
 `GET /api/queue` 增加 `active`、`motionComplete`、`programHash`、`sync`。同步对象含阶段、错误、成员源行/发送时间/接受/目标确认/到位/停止证据、反馈预算、当前配合误差区间及最大可观测偏差。helix 同时报告 mm 单位区间。诊断里的 `raw_submitted` 只记录原始帧发送，不猜应答归属；外部同轴控制会使关联变为不确定。定位只在当前程序指纹匹配时跳转，避免把旧运行的行号套到新草稿。

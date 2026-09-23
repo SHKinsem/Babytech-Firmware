@@ -103,6 +103,7 @@ MotorControl::MotorControl()
 
 bool MotorControl::begin(int tx, int rx, long bitrate) {
     syncIsolationVerified_=syncCacheClear_=false;
+    syncIsolationReason_="boot_unconfirmed";
     // Reset software tracking only: no motor is enabled, moved or stopped here.
     // The selected id survives a re-init so a configured node stays selected.
     job_ = MoveJob{};
@@ -1482,6 +1483,7 @@ bool MotorControl::queueSendFrame(uint32_t id, bool extended, const uint8_t* dat
 
 void MotorControl::noteRawTransmission(uint8_t id) {
     syncCacheClear_=false;
+    syncIsolationReason_="raw_command";
     queueDiagnostics_.invalidate(id);
     for (uint16_t nodeId = 1; nodeId < kNodeCount; ++nodeId) {
         if (id != 0 && nodeId != id) continue;
@@ -1973,6 +1975,7 @@ void MotorControl::traceSink(void* context, const CanRawFrame& frame, bool tx) {
        !CanQueryScheduler::supported(frame.data[0])) {
         self->queueDiagnostics_.invalidate(uint8_t(frame.identifier>>8));
         self->syncCacheClear_=false;
+        self->syncIsolationReason_=frame.data[0]==0xF3?"enable_disable_command":"control_command";
     }
     TraceEntry& entry = self->trace_[self->traceNext_];
     entry.frame = frame;

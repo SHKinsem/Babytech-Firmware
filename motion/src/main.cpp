@@ -1048,6 +1048,11 @@ void sendQueueResult(const motion::Result& result, bool started) {
     body += result.message;
     body += F("\",\"line\":");
     body += static_cast<unsigned int>(queue.lastErrorLine());
+    if (String(result.message)=="sync_cache_isolation_unverified") {
+        body += F(",\"isolationReason\":\"");
+        body += motor.syncIsolationReason();
+        body += '"';
+    }
     body += '}';
     sendJson(result.code, body);
 }

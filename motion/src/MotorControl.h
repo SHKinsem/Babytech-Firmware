@@ -36,9 +36,11 @@ public:
     String queryStatusJson() const;
     bool confirmSyncIsolation(bool verified) {
         if(operationBusy()) return false;
-        syncIsolationVerified_=verified;syncCacheClear_=verified;return true;
+        syncIsolationVerified_=verified;syncCacheClear_=verified;
+        syncIsolationReason_=verified?"confirmed":"operator_revoked";return true;
     }
     bool syncIsolationReady() const {return syncIsolationVerified_ && syncCacheClear_;}
+    const char* syncIsolationReason() const {return syncIsolationReason_;}
     void setAutoQueriesEnabled(bool enabled) { autoQueriesEnabled_ = enabled; }
     bool autoQueriesEnabled() const { return autoQueriesEnabled_; }
 
@@ -185,6 +187,7 @@ private:
     friend class CommandQueue;
     bool syncObserve_[256]={};
     bool syncIsolationVerified_=false,syncCacheClear_=false;
+    const char* syncIsolationReason_="boot_unconfirmed";
     bool queueTransport_=false;
     QueueDiagnostics queueDiagnostics_;
     CanQueryScheduler queries_;

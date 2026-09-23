@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { request } from '../device-api.js';
+import { request, syncIsolationReasonText } from '../device-api.js';
 
 const budgetFields=[['queriesPerSecond','总查询上限 / 秒'],['gapMs','最小间距 ms'],['timeoutMs','请求超时 ms'],['cooldownMs','超时冷却 ms'],['maxInflight','最大在途数']];
 const syncFields=[['progressTolerance','进度容差 0..0.25'],['timeToleranceMs','量化时间容差 ms'],['feedbackTimeoutMs','反馈失效 ms'],['prepareTimeoutMs','准备期限 ms'],['stopTimeoutMs','停止确认期限 ms'],['responseBudgetMs','实测应答延迟预算 ms'],['completionTenths','到位角度容差 0.1°']];
@@ -31,6 +31,17 @@ export function SyncSettings({ connected, locked }) {
     } catch(e) {setNotice(e.status?`板端拒绝（HTTP ${e.status}）：${e.message}`:`操作结果未知：${e.message}。不会自动重发，请重新读取核对。`);}
     finally {setPending(false);}
   }
+  async function refreshIsolation() {
+    if(pending) return;
+    setPending(true);
+    try {
+      const result=await request('/api/sync-settings');
+      if(typeof result?.cacheIsolationReady!=='boolean') throw new Error('板端未返回启动许可状态');
+      setSync(result);
+      setNotice(result.cacheIsolationReady?'当前隔离确认仍有效。':'当前隔离确认无效；请先完成使能，再核实并记录确认。');
+    } catch(e) {setNotice(`启动许可读取失败：${e.message}`);}
+    finally {setPending(false);}
+  }
   const fields=(items,value,setter)=>items.map(([key,label])=><label className="queue-builder__arg" key={key}>
     <span>{label}</span><input className="input input--mono" aria-label={label} value={value?.[key]??''}
       disabled={pending} onChange={e=>setter(prev=>({...prev,[key]:e.target.value}))}/>
@@ -44,7 +55,9 @@ export function SyncSettings({ connected, locked }) {
     <button className="button button--outline" disabled={!sync||!connected||locked||pending}
       onClick={()=>save('/api/sync-settings',Object.fromEntries(syncFields.map(([k])=>[k,sync[k]])),'sync')}>保存同步容差与期限</button>
     <details><summary>启动许可（最后读取）：{sync?.cacheIsolationReady?'人工已确认隔离':'未确认／已失效'}</summary>
-      <p>仅在完成台架检查后勾选；本按钮不能清除或验证硬件缓存。重启、原始帧、同步失败后必须重新检查。</p>
+      <p>先在队列外完成使能，再核实总线并记录隔离确认；不要把 enable 与 sync 写在同一段程序里。当前固件的使能／失能、原始控制帧、重启或同步中断会使确认失效。本按钮不能清除或验证硬件缓存。</p>
+      <p>板端记录原因：{sync?.cacheIsolationReason?syncIsolationReasonText(sync.cacheIsolationReason):'当前固件未提供'}。</p>
+      <button className="link-button" disabled={!connected||pending} onClick={refreshIsolation}>刷新启动许可</button>
       {attestLabels.map((label,i)=><label className="queue-builder__check" key={label}>
         <input type="checkbox" checked={attest[i]} disabled={pending} onChange={e=>setAttest(a=>a.map((v,j)=>j===i?e.target.checked:v))}/>{label}
       </label>)}

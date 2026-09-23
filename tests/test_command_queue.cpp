@@ -1278,6 +1278,20 @@ static void test_trigger_only_sync_parse() {
     CHECK(!parseQueueProgram(invalid, std::strlen(invalid), rig.rotation, parsed, error));
 }
 
+static void test_sync_isolation_reports_the_command_that_invalidated_it() {
+    QueueRig rig;
+    rig.begin();
+    CHECK(has(rig.queue.syncSettingsJson().str(), "\"cacheIsolationReason\":\"boot_unconfirmed\""));
+    CHECK(rig.motor.confirmSyncIsolation(true));
+    CHECK(rig.motor.syncIsolationReady());
+    CHECK(has(rig.queue.syncSettingsJson().str(), "\"cacheIsolationReason\":\"confirmed\""));
+    setMillis(10);
+    const uint8_t rawEnable[]={1,0xF3,0xAB,1,0,0x6B};
+    CHECK(rig.motor.rawLogical(rawEnable,sizeof(rawEnable)));
+    CHECK(!rig.motor.syncIsolationReady());
+    CHECK(has(rig.queue.syncSettingsJson().str(), "\"cacheIsolationReason\":\"enable_disable_command\""));
+}
+
 // Sequential homing must switch observation to an otherwise unselected motor.
 static void test_home_await_switches_to_motor_three() {
     QueueRig rig;
@@ -1454,6 +1468,7 @@ int main() {
         {"saved board policy does not gate the queue", test_saved_board_policy_does_not_gate_the_queue},
         {"short torque/velocity forms and protocol bounds", test_short_forms_and_protocol_bounds},
         {"trigger-only sync syntax is explicit", test_trigger_only_sync_parse},
+        {"sync isolation exposes its last invalidating command", test_sync_isolation_reports_the_command_that_invalidated_it},
         {"hostile tokens, hex ids and embedded NULs are rejected", test_hostile_tokens_are_rejected_without_sending},
         {"direct program sends without any RX", test_direct_program_sends_without_any_rx},
         {"move frames keep the big-endian wire layout", test_move_frames_keep_big_endian_layout},
