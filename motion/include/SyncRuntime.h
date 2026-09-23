@@ -243,28 +243,34 @@ private:
                 abort("sync_member_rejected",now);return;
             }
             if(f.flagsValid && f.homeValid && (!(f.flags&1) || fault(f))) {abort("sync_member_fault",now);return;}
-            if(!m.done) {
-                demand(id,0x36,200,now,3);
-                if(near) demand(id,0x35,200,now,3);
-                if(f.positionValid && f.velocityValid && newer(f.positionAt,m.positionCountedAt) &&
-                   newer(f.velocityAt,m.velocityCountedAt) && int32_t(f.positionRequestedAt-startedAt_)>=0 &&
-                   int32_t(f.velocityRequestedAt-startedAt_)>=0 && fresh(f.positionAt,now) && fresh(f.velocityAt,now)) {
-                    m.positionCountedAt=f.positionAt;m.velocityCountedAt=f.velocityAt;
-                    if(fabs(double(int64_t(f.position)-m.target))<=settings_.completionTenths &&
-                       f.velocity>=-5 && f.velocity<=5) ++m.doneSamples;else m.doneSamples=0;
-                    if(m.doneSamples>=2) {
-                        m.done=true;scheduler_.release(id,0x36,CanQueryScheduler::Sync);
-                        scheduler_.release(id,0x35,CanQueryScheduler::Sync);
-                    }
-                }
+            // Keep observing early finishers until every axis has completed.
+            // Otherwise a member can drift while the remaining axes run.
+            demand(id,0x36,200,now,3);
+            if(near || m.done) demand(id,0x35,200,now,3);
+            const bool positionFresh=f.positionValid && newer(f.positionAt,startedAt_) && fresh(f.positionAt,now);
+            const bool velocityFresh=f.velocityValid && newer(f.velocityAt,startedAt_) && fresh(f.velocityAt,now);
+            const bool completionFresh=positionFresh && velocityFresh &&
+                now-f.positionAt<=sampleBudgetMs_ && now-f.velocityAt<=sampleBudgetMs_;
+            if(m.done && !completionFresh) {m.done=false;m.doneSamples=0;}
+            if(completionFresh && newer(f.positionAt,m.positionCountedAt) &&
+               newer(f.velocityAt,m.velocityCountedAt) && int32_t(f.positionRequestedAt-startedAt_)>=0 &&
+               int32_t(f.velocityRequestedAt-startedAt_)>=0) {
+                m.positionCountedAt=f.positionAt;m.velocityCountedAt=f.velocityAt;
+                const bool atTarget=fabs(double(int64_t(f.position)-m.target))<=settings_.completionTenths &&
+                    f.velocity>=-5 && f.velocity<=5;
+                if(m.done && !atTarget) {abort("sync_member_left_target",now);return;}
+                if(atTarget) {
+                    if(m.doneSamples<2) ++m.doneSamples;
+                    m.done=m.doneSamples>=2;
+                } else {m.done=false;m.doneSamples=0;}
             }
-            if(!m.done) all=false;
-            const bool valid=(m.done || (f.positionValid && newer(f.positionAt,startedAt_) && fresh(f.positionAt,now))) &&
-                f.flagsValid && f.homeValid && fresh(f.flagsAt,now) && fresh(f.homeAt,now);
+            const bool valid=positionFresh && (!m.done || velocityFresh) && f.flagsValid && f.homeValid &&
+                fresh(f.flagsAt,now) && fresh(f.homeAt,now);
+            if(!m.done || !completionFresh || !valid) all=false;
             if(!valid && now-startedAt_>=settings_.feedbackTimeoutMs) {abort("sync_feedback_lost",now);return;}
             if(!valid) comparable=false;
             const double length=double(plan_.axes[i].distanceTenths);
-            progress[i]=m.done?1:double(int64_t(f.position)-m.start)/length;
+            progress[i]=double(int64_t(f.position)-m.start)/length;
             const double endpointMargin=(settings_.completionTenths+1)/fabs(length);
             if(!m.done && valid && (progress[i]<-endpointMargin || progress[i]>1+endpointMargin)) {
                 abort("sync_travel_envelope_exceeded",now);return;
@@ -272,8 +278,8 @@ private:
             // Compare possible progress at a common time, with reception delay
             // and sample age covered by the commanded speed bound. This does
             // not assert continuous actual accuracy between samples.
-            uncertainty[i]=m.done?(settings_.completionTenths+1)/fabs(length):
-                (plan_.encoded[i].speed*(now-f.positionAt+settings_.responseBudgetMs)/1000.0+1/fabs(length));
+            uncertainty[i]=plan_.encoded[i].speed*(now-f.positionAt+settings_.responseBudgetMs)/1000.0+
+                1/fabs(length);
         }
         if(all) {phase_=Phase::Complete;port_.syncCompletedIsolation();release();return;}
         if(comparable) {

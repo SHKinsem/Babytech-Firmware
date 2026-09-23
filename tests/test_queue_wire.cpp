@@ -86,6 +86,28 @@ static void syncWire() {
     assert(motor.queries().statistics().queries<=now/100+1);
     puts("PASS real sync wire: budgeted fresh reads, target change corroboration, both cache ACKs, batched 02/9F, 6 CD packets, single FF, independent completion");
 }
+static void allStopDuringSync() {
+    tx.clear();rx.clear();failPacket=0;now=100;
+    Rotation rotation;motion::MotorControl motor;motion::CommandQueue queue(motor);
+    assert(motor.begin(4,5,500000));
+    motion::SyncSettings settings;settings.tolerance.progress=.2;settings.tolerance.timeMs=50;
+    settings.feedbackTimeoutMs=5000;settings.prepareTimeoutMs=10000;settings.stopTimeoutMs=2000;
+    settings.responseBudgetMs=20;settings.completionTenths=2;
+    assert(queue.setSyncSettings(settings));
+    assert(motor.confirmSyncIsolation(true));
+    const char* program="sync begin\nmove 6 360 deg 1 60 60 800\nmove 7 -180 deg 1 60 60 800\nsync end";
+    assert(queue.start(program,strlen(program),1,rotation,now).code==202);
+    queue.poll(now);
+    assert(contains(queue.statusJson(),"\"phase\":\"checking\""));
+    assert(queue.cancel("stopped").code==202);
+    bool broadcastStop=false,broadcastHomeAbort=false;
+    for(const auto& frame:tx) {
+        if(frame.identifier==0 && frame.data[0]==0xFE) broadcastStop=true;
+        if(frame.identifier==0 && frame.data[0]==0x9C) broadcastHomeAbort=true;
+    }
+    assert(broadcastStop && broadcastHomeAbort);
+    puts("PASS all-stop during sync also reaches nonmember motors");
+}
 static void parserChecks() {
     Rotation rotation;motion::QueueProgram parsed;motion::QueueError error;
     const auto parse=[&](const char* text){return motion::parseQueueProgram(text,strlen(text),rotation,parsed,error);};
@@ -147,4 +169,5 @@ int main() {
     assert(contains(queue.statusJson(),"send_failed"));
     puts("PASS real queue wire: two IDs, mm conversion, direction, all CD packets, passive ACK/reject/late/missing, partial TX");
     syncWire();
+    allStopDuringSync();
 }

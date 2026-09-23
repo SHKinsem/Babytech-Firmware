@@ -89,6 +89,31 @@ int main() {
         assert(!strcmp(r.runtime.error(),"sync_coordination_error"));assert(r.port.stopped.size()==2);
     }
     {
+        Rig r;r.prepare();
+        r.port.fresh(10);r.port.feedback[1].position=r.port.feedback[1].target;
+        r.port.feedback[2].position=r.port.feedback[2].target*9/10;r.tick(10);
+        r.port.fresh(20);r.port.feedback[1].position=r.port.feedback[1].target;
+        r.port.feedback[2].position=r.port.feedback[2].target*9/10;r.tick(20);
+        assert(r.runtime.member(0).done && !r.runtime.member(1).done);
+        r.port.fresh(30);r.port.feedback[1].position=r.port.feedback[1].target+100;r.tick(30);
+        assert(!strcmp(r.runtime.error(),"sync_member_left_target"));
+        assert(r.port.stopped==std::vector<uint8_t>({1,2}));
+    }
+    {
+        Rig r;r.prepare();
+        r.port.fresh(10);r.port.feedback[1].position=r.port.feedback[1].target;
+        r.port.feedback[2].position=r.port.feedback[2].target*9/10;r.tick(10);
+        r.port.fresh(20);r.port.feedback[1].position=r.port.feedback[1].target;
+        r.port.feedback[2].position=r.port.feedback[2].target*9/10;r.tick(20);
+        assert(r.runtime.member(0).done);
+        r.port.fresh(2000);r.port.feedback[2].position=r.port.feedback[2].target;
+        r.port.feedback[1].positionAt=20;r.port.feedback[1].velocityAt=20;
+        r.tick(2000);assert(r.runtime.phase()==SyncRuntime::Phase::Monitoring);
+        r.port.fresh(2010);r.port.feedback[2].position=r.port.feedback[2].target;
+        r.port.feedback[1].positionAt=20;r.port.feedback[1].velocityAt=20;
+        r.tick(2010);assert(r.runtime.phase()==SyncRuntime::Phase::Monitoring);
+    }
+    {
         Rig r;r.prepare();r.tick(6000);
         assert(!strcmp(r.runtime.error(),"sync_feedback_lost") && r.port.stopped.size()==2);
     }

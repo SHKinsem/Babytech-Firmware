@@ -729,7 +729,7 @@ export function QueuePanel({
         <div className="divider" />
         <details><summary>指令与默认值</summary><h3 className="section__title">
           指令与默认值
-          <HelpTip label="编排队列" text="板端整份校验后执行；本页只做语法与数值框架检查，策略（速度/加速度/电流/行程/时长）由板端判定。" />
+          <HelpTip label="编排队列" text="板端先校验整份程序，再按顺序直接发送；只检查报文编码、单位换算和资源容量所需边界。速度、电流和行程由操作者按实机条件判断。" />
         </h3>
         <VerbHelp />
         </details>

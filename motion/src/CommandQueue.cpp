@@ -764,6 +764,9 @@ Result CommandQueue::cancel(const char* reason) {
     }
     if(sync_.active()) {
         sync_.abort(reason ? reason : "cancelled",millis());
+        // A prior direct move or raw command may still be running outside the
+        // sync group. The user-facing all-stop must cover those nodes too.
+        if (!stopEverything()) return Result{503,"can_tx_failed"};
         return Result{202,"sync_stop_requested"};
     }
     // Stop everything unconditionally: an authorised stop must keep working even

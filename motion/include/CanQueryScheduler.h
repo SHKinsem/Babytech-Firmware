@@ -139,10 +139,16 @@ private:
     static uint32_t elapsed(uint32_t a,uint32_t b) {return a-b;}
     static bool active(const Demand& d,uint32_t now) {return d.active && elapsed(now,d.renewed)<d.lease;}
     static bool hasDemand(const Entry& e,uint32_t now) {
-        for(const auto& d:e.demands) if(active(d,now)) return true;return false;
+        for (const auto& d : e.demands) {
+            if (active(d, now)) return true;
+        }
+        return false;
     }
     Entry* find(uint8_t id,uint8_t field) {
-        for(auto& e:entries_) if(e.id==id && e.field==field) return &e;return nullptr;
+        for (auto& e : entries_) {
+            if (e.id == id && e.field == field) return &e;
+        }
+        return nullptr;
     }
     void expire(Entry& e,uint32_t now) {
         e.evidence.pending=false;e.cooling=true;e.coolAt=now;++stats_.unanswered;
