@@ -25,6 +25,8 @@
 
 新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
 
+待开发的 [Motion / Display 流程演示计划](docs/motion-display-demo-plan.md) 描述与现有产品显示板的 UART 对接、非阻塞流程、阶段调试和 JSON 配置。采用“调试用内存、演示用内置 JSON”，尚未实现；不替代当前 Brain/Motion v2 协议说明。
+
 ## 目录
 
 ```text
