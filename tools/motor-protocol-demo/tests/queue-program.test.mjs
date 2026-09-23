@@ -2,6 +2,7 @@
 // No React, no network, no hardware: node --test runs this file directly.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   QUEUE_LIMITS,
@@ -97,6 +98,17 @@ test('sample program is short, valid and needs explicit enables', () => {
   const torquePreview = result.preview.find((row) => row.line === 9);
   assert.doesNotMatch(`${torquePreview.summary} ${torquePreview.detail}`, /\d\s*Nm/);
   assert.match(torquePreview.summary, /800 mA · 1500 ms/);
+});
+
+test('bottle cap cycle preset parses with the recorded linear leads', () => {
+  const program = readFileSync(new URL('../src/examples/bottle-cap-cycle.queue', import.meta.url), 'utf8');
+  const result = validateProgram(program, { distances: { 1: 2, 3: 40 } });
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.stats.actions, 35);
+  assert.deepEqual(result.stats.usedIds, [1, 2, 3, 5]);
+  assert.equal(result.actions.filter(action => action.verb === 'sync').length, 4);
+  assert.equal(result.actions.filter(action => action.verb === 'hex').length, 0);
+  assert.equal(actionAngleDegrees(result.actions.find(action => action.verb === 'move' && action.id === 5), {}).deg, 180000);
 });
 
 test('units, defaults and mm conversion follow the contract', () => {

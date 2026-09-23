@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { GlyphInfo, HelpTip } from './glyphs.jsx';
 import { QueueDiagnostics } from './QueueDiagnostics.jsx';
 import { SyncSettings } from './SyncSettings.jsx';
+import BOTTLE_CAP_PROGRAM from '../examples/bottle-cap-cycle.queue?raw';
 import { ROTATION_DISTANCE_MAX, ROTATION_DISTANCE_MIN, errorLabels, queueProgressText, queueStateLabels, queueActionLabels, queueMessageText, readMotorDistance, readQueueStatus, request } from '../device-api.js';
 import {
   QUEUE_LIMITS,
@@ -498,6 +499,7 @@ export function QueuePanel({
 
         <div className="queue-buttons">
           <button type="button" className="link-button" onClick={() => { setProgram(SAMPLE_PROGRAM); setNotice(null); }}>载入示例</button>
+          <button type="button" className="link-button" onClick={() => { setProgram(BOTTLE_CAP_PROGRAM); setNotice({ tone: 'warn', text: '已载入瓶盖流程草稿；请先核对 ID 1/3 的 mm/rev 设置。载入不会发送指令。' }); }}>载入瓶盖流程</button>
           <button type="button" className="link-button" onClick={copyProgram}>复制</button>
           <button type="button" className="link-button" onClick={exportProgram}>导出</button>
           <button type="button" className="link-button" onClick={() => fileRef.current?.click()}>导入</button>

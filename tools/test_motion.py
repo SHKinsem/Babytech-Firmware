@@ -48,4 +48,4 @@ with tempfile.TemporaryDirectory(prefix='babytech-motion-') as output:
     for name, sources in suites:
         binary = Path(output) / (name + ('.exe' if os.name == 'nt' else ''))
         subprocess.run(common + sources + ['-o', str(binary)], check=True)
-        subprocess.run([str(binary)], check=True)
+        subprocess.run([str(binary)], check=True, cwd=root)

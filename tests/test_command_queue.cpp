@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 using namespace motion;
@@ -1393,6 +1395,32 @@ static void test_paused_page_queries_keep_sync_supervision() {
     CHECK(rig.queue.cancel("test_cancel").code == 202);
 }
 
+static void test_bottle_cap_cycle_example_is_accepted() {
+    std::ifstream file("tools/motor-protocol-demo/src/examples/bottle-cap-cycle.queue",
+                       std::ios::binary);
+    CHECK(file.good());
+    if (!file) return;
+    const std::string program((std::istreambuf_iterator<char>(file)),
+                              std::istreambuf_iterator<char>());
+    QueueRig rig;
+    rig.begin();
+    rig.rotation.set(1, 2.0);
+    rig.rotation.set(3, 40.0);
+    SyncSettings settings;
+    settings.tolerance.progress = .2;
+    settings.tolerance.timeMs = 50;
+    settings.feedbackTimeoutMs = 5000;
+    settings.prepareTimeoutMs = 10000;
+    settings.stopTimeoutMs = 2000;
+    settings.responseBudgetMs = 20;
+    settings.completionTenths = 2;
+    CHECK(rig.queue.setSyncSettings(settings));
+    const Result started = startQueue(rig, program.c_str(), 1, 10);
+    CHECK(started.code == 202);
+    if (started.code != 202) std::printf("    example rejected: %s\n", started.message);
+    CHECK(capturedTX.empty()); // loading/validating a preset never moves motors
+}
+
 static void test_home_batched_rx_keeps_transition() {
     QueueRig rig;
     rig.begin();
@@ -1475,6 +1503,7 @@ int main() {
         {"home RX ordering, same tick and rejection", test_home_rx_order_and_same_tick},
         {"batched homing RX retains ACK and running-to-idle transition", test_home_batched_rx_keeps_transition},
         {"paused idle Page reads preserve sync supervision", test_paused_page_queries_keep_sync_supervision},
+        {"bottle cap cycle preset is accepted without sending", test_bottle_cap_cycle_example_is_accepted},
         {"paused idle Page reads preserve home await and explicit TX", test_paused_page_queries_keep_home_await_and_manual_tx},
         {"await switches from motor 1 to unselected motor 3", test_home_await_switches_to_motor_three},
         {"explicit await syntax, completion, rejection and cancellation", test_explicit_await},
