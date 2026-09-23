@@ -1,8 +1,8 @@
 # 电机协议工作台交付说明
 
-本版把 Claude Code 开发的桌面工作台接入 Motion 固件，整合原有 Wi-Fi 配网与电机控制。`motion/data/index.html` 是构建生成的单文件页面，CSS、JavaScript 均已内联，烧录后不依赖电脑网页服务、CDN 或单独文件系统分区。
+本版把 Claude Code 开发的桌面工作台接入 Motion 固件，整合原有 Wi-Fi 配网与电机控制。`device-controller/data/index.html` 是构建生成的单文件页面，CSS、JavaScript 均已内联，烧录后不依赖电脑网页服务、CDN 或单独文件系统分区。
 
-目标硬件：ESP32-S3 N16R8，16 MB Flash、8 MB OPI PSRAM。CAN TX GPIO4、RX GPIO5，500 kbit/s；需要外接 CAN 收发器。UART brain 链路维持 GPIO43/44、115200。
+目标硬件：ESP32-S3 N16R8，16 MB Flash、8 MB OPI PSRAM。CAN TX GPIO4、RX GPIO5，500 kbit/s；需要外接 CAN 收发器。UART main-controller 链路维持 GPIO43/44、115200。
 
 ## 本版可执行范围
 
@@ -41,15 +41,15 @@ CD 范围：角度绝对值 0.1–3600°，速度 0.1–120 RPM，加减速度�
 
 ## 重建
 
-在 `tools/motor-protocol-demo` 执行 `npm ci`（首次），随后 `npm run build:device`。该步骤覆盖生成的 `motion/data/index.html`，不要手工编辑生成文件。
+在 `tools/motor-protocol-demo` 执行 `npm ci`（首次），随后 `npm run build:device`。该步骤覆盖生成的 `device-controller/data/index.html`，不要手工编辑生成文件。
 
 回到仓库根目录执行：
 
 ```powershell
-./tools/build-wsl.ps1 -Target motion
+./tools/build-wsl.ps1 -Target device-controller
 ```
 
-也可使用已安装的原生 PlatformIO：`pio run -d motion`。前端未修改时，直接编译已提交的内嵌 HTML 即可，无需 Node。WSL 产物在 `out/wsl/motion/`。
+也可使用已安装的原生 PlatformIO：`pio run -d device-controller`。前端未修改时，直接编译已提交的内嵌 HTML 即可，无需 Node。WSL 产物在 `out/wsl/device-controller/`。
 
 ## 烧录文件
 
@@ -62,7 +62,7 @@ CD 范围：角度绝对值 0.1–3600°，速度 0.1–120 RPM，加减速度�
 | boot_app0.bin | 0xE000 |
 | firmware.bin | 0x10000 |
 
-`firmware.elf` 用于调试与符号解析，不直接烧录。推荐以后在确认端口后，用原工程 `pio run -d motion -t upload --upload-port 实际端口` 上传；不要擦除整片 Flash 来更新网页，否则会清掉已保存的 Wi-Fi NVS。
+`firmware.elf` 用于调试与符号解析，不直接烧录。推荐以后在确认端口后，用原工程 `pio run -d device-controller -t upload --upload-port 实际端口` 上传；不要擦除整片 Flash 来更新网页，否则会清掉已保存的 Wi-Fi NVS。
 
 ## 验证与剩余事项
 
@@ -70,4 +70,4 @@ CD 范围：角度绝对值 0.1–3600°，速度 0.1–120 RPM，加减速度�
 
 浏览器测试覆盖无上电自动 POST、真实 F3/CD 请求、断线清空、非法地址、HEX 地址不匹配、在途请求期间全局停止，以及 Wi-Fi 扫描／连接／忘记。固件测试覆盖协议截断与越界拒绝、5 秒板端停止、反馈过期、发送失败、使能 ACK、到位确认及 bus-off。
 
-这些是编译、主机和模拟 HTTP 测试，不是实板验收。实际 CAN 电机型号／固件响应、接线、AP/STA 切换与物理停止仍须上板验证。未支持的指令已明确禁用；本版不声称驱动所有功能都能直接执行。
+这些是编译、主机和模拟 HTTP 测试，不是实板验收。实际 CAN 电机型号／固件响应、接线、AP/STA 切换与物理停止仍须实机验证。未支持的指令已明确禁用；本版不声称驱动所有功能都能直接执行。

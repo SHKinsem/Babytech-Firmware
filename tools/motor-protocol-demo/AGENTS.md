@@ -26,7 +26,7 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 - 用户最新要求：当前只面向电脑，不再投入手机布局或手机验收；交付验收视口为 1513×1039 和 1280×800。
 
-- 2026-09-21 实机集成：`DeviceApp.jsx` 独立使用板端 API，`App.jsx` 保留离线仿真。`npm run build:device` 将实机入口及 CSS/JS 内联生成 `motion/data/index.html`。设备版本不得生成模拟反馈或在超时后自动重发操作。Wi-Fi 设置必须复用现有 NVS/API，停止按钮独立于普通操作锁。
+- 2026-09-21 实机集成：`DeviceApp.jsx` 独立使用板端 API，`App.jsx` 保留离线仿真。`npm run build:device` 将实机入口及 CSS/JS 内联生成 `device-controller/data/index.html`。设备版本不得生成模拟反馈或在超时后自动重发操作。Wi-Fi 设置必须复用现有 NVS/API，停止按钮独立于普通操作锁。
 
 - 1513×1039 和 1280×800 已经通过 Playwright 浏览器检查；发送区在面板底部保持可达，长参数表与报文可在面板内滚动。
 - 底层扩展指令的标签为「驱动已实现」，仅基础相对位置 CD、非同步使能和停止对应「基础接口」。这不代表 Demo 连接了设备。

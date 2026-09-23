@@ -2,7 +2,7 @@
 
 Implement now using the existing files. Other work is present: preserve ScaleWorkbench, Wi-Fi, polling, operation gates, all unrelated edits. Desktop only. No hardware, shell, network, git or global settings changes. Your tools are file-only; Codex runs all tests/build/browser checks. Codex owns backend ProtocolGate.h and independent QA. You own src/protocol.js and new src/manual-reference.js ONLY for this checkpoint. Do not edit other files yet.
 
-Read AGENTS.md, src/protocol.js, and ../../docs/ZDT_X42S/ZDT_X42S_Agent精简参考.md. Full reference ../../docs/ZDT_X42S/ZDT_X42S第二代闭环步进电机用户手册V1.0.5_260527.md has page anchors. Current source baseline remains X firmware. No Emm encoder. Do not expand motion permissions. Keep all byte layouts and current field keys stable.
+Read AGENTS.md, src/protocol.js, and ../../docs/ZDT_X42S/ZDT_X42S_Agent精简参考.md. Full reference ../../docs/ZDT_X42S/ZDT_X42S第二代闭环步进电机用户手册V1.0.5_260527.md has page anchors. Current source baseline remains X firmware. No Emm encoder. Do not expand device-controller permissions. Keep all byte layouts and current field keys stable.
 
 Update catalog labels/hints/source certainty using manual V1.0.5:
 - add certainty manual='手册明确'. CW/CCW direction, sync immediate/cached. Position mode enums 0 relative previous target,1 absolute zero,2 relative actual. CtrlMode enum0 open1 closed, retain 46 69 (p79 confirmed). C5 maxSpeed raw counts0.1RPM. X FB/CB angle default0.1degree (not pulses). Position scale configurable0.01degree but this app expects default0.1. Explicit X firmware expectations, not auto detection.

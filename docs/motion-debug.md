@@ -11,17 +11,17 @@
 * **尚无同步 / 联动 / 插补语义**，也没有相关接口，页面上也没有同步标签页。
 * 页面只原样呈现 `/api/status` 上报的数据，**不做任何推断**：不推断命令已被驱动
   确认，也不推断已启动、已完成或已物理停止。
-* 机械运行时在脑板链路上仍为 `not_configured`：HX711 已由下板独立采样并开放 HTTP
-  API，但称重数据暂未加入脑板 UART 状态载荷。
+* 机械运行时在主控板链路上仍为 `not_configured`：HX711 已由设备控制板独立采样并开放 HTTP
+  API，但称重数据暂未加入主控板 UART 状态载荷。
 * 本文只描述接口契约与页面行为，不含构建、烧录或测试结论。
 
 本切片涉及的文件：
 
 | 文件 | 作用 |
 | --- | --- |
-| `motion/include/board_config.h` | UART、CAN 与软 AP 常量 |
-| `motion/src/main.cpp` | AP + HTTP 服务 + 脑板链路状态桥 |
-| `motion/data/index.html` | 内嵌调试页（内联 CSS/JS，无外部依赖） |
+| `device-controller/include/board_config.h` | UART、CAN 与软 AP 常量 |
+| `device-controller/src/main.cpp` | AP + HTTP 服务 + 主控板链路状态桥 |
+| `device-controller/data/index.html` | 内嵌调试页（内联 CSS/JS，无外部依赖） |
 | `docs/motion-debug.md` | 本文档 |
 
 ## 双 move 实机排查（2026-09-23）
@@ -56,17 +56,17 @@
 
 | 信号 | GPIO | 说明 |
 | --- | --- | --- |
-| 脑板链路 TX | 43 | UART1 接脑板，115200 8N1 |
-| 脑板链路 RX | 44 | UART1 接脑板 |
+| 主控板链路 TX | 43 | UART1 接主控板，115200 8N1 |
+| 主控板链路 RX | 44 | UART1 接主控板 |
 | CAN TX | 4 | 接外部收发器 TXD/CTX 输入 |
 | CAN RX | 5 | 接外部收发器 RXD/CRX 输出 |
 | CAN 波特率 | 500 kbit/s | 沿用已验证的台架配置 |
 | HX711 DOUT | 1 | 3.3 V HX711 数据输出 |
 | HX711 SCK | 2 | 3.3 V HX711 时钟，空闲保持 LOW |
 
-HX711 引脚集中在 `motion/include/board_config.h`。新板型可以修改默认值，也可以在
+HX711 引脚集中在 `device-controller/include/board_config.h`。新板型可以修改默认值，也可以在
 构建参数中指定 `BABYTECH_SCALE_DOUT_PIN` 与 `BABYTECH_SCALE_SCK_PIN`；编译期冲突
-检查会阻止它们与 CAN 或脑板 UART 引脚重叠。
+检查会阻止它们与 CAN 或主控板 UART 引脚重叠。
 
 **ESP32-S3 片上没有 CAN 收发器。** 这些引脚只是 CAN 控制器，必须外接 3.3 V 逻辑
 收发器（SN65HVD230 / TJA1051T/3 一类）。仅 5 V 的收发器（如经典 TJA1050）需要在
@@ -144,7 +144,7 @@ curl -s "http://192.168.4.1/api/status?id=1"
 
 ### HX711 称重 API
 
-称重功能完全运行在 motion 下板。内嵌网页的「称重传感器」页使用这些接口显示合成
+称重功能完全运行在 device-controller 设备控制板。内嵌网页的「称重传感器」页使用这些接口显示合成
 重量、最近 60 秒漂移、诊断信息，并执行去皮和砝码标定。
 
 `GET /api/scale` 返回最新称重快照：
@@ -175,7 +175,7 @@ NVS 命名空间并立即重新初始化 HX711，重启后继续使用；默认�
 curl -s -X POST http://192.168.4.1/api/scale/tare
 ```
 
-接口返回 `202 tare_started`，下板异步采集 16 个样本。轮询 `/api/scale`，等待
+接口返回 `202 tare_started`，设备控制板异步采集 16 个样本。轮询 `/api/scale`，等待
 `tareInProgress=false` 且 `tareCompleted=true` 后放置已知砝码，再标定：
 
 ```bash
@@ -184,7 +184,7 @@ curl -s -X POST -d "knownWeightG=500" \
 ```
 
 `knownWeightG` 范围为 1..5000 g。去皮和标定均在机构运动期间返回 `409`；标定要求
-本次启动已完成去皮且读数新鲜。成功的 `tareRaw` 与 `countsPerGram` 保存到下板 NVS 的
+本次启动已完成去皮且读数新鲜。成功的 `tareRaw` 与 `countsPerGram` 保存到设备控制板 NVS 的
 独立 `scale-cfg` 命名空间，重启后继续使用。实际出粉闭环尚未接入这组读数。
 
 ### `POST /api/enable`
@@ -277,7 +277,7 @@ curl -s -X POST http://192.168.4.1/api/stop-all
   失联时清空实时值并禁用运动控制；图表保留历史并留出缺口。
 * 布局：14 px 中文字体栈，390 px 宽度起可用。无网络字体、无外部脚本、无 CDN。
 
-## 5. 脑板链路（协议不变，只是载荷来源换了）
+## 5. 主控板链路（协议不变，只是载荷来源换了）
 
 板卡仍使用既有的 `BoardProtocol` 组帧，在 UART1 上以 115200 通信：带**空载荷**的
 `GetStatus` 帧会收到一个回显请求序号的 `Status` 帧。六个载荷字节为：
@@ -288,11 +288,11 @@ curl -s -X POST http://192.168.4.1/api/stop-all
 | 4 | 运动状态，`0` = `not_configured`（机械运行时尚未接入） |
 | 5 | 标志位，bit0 = `motorsAvailable`（`anyMotorOnline()`），bit1 = `sensorsAvailable`（恒为 0） |
 
-脑板侧 `Babytech` 代码与 `BoardProtocol` 在本切片中**不做修改**。载荷非空的查询、
+主控板侧 `Babytech` 代码与 `BoardProtocol` 在本切片中**不做修改**。载荷非空的查询、
 以及其他类型的帧都会被忽略。每轮循环最多读取 128 字节 UART，以免链路噪声饿死
 CAN 轮询或 HTTP 处理。
 
-要注意：这个运行时间只存在于脑板链路帧里，`/api/status` 的 JSON 没有 `uptime` 字段。
+要注意：这个运行时间只存在于主控板链路帧里，`/api/status` 的 JSON 没有 `uptime` 字段。
 
 ## 6. 页面嵌入
 
@@ -336,7 +336,7 @@ AP、CAN 与 HTTP 监听信息，并且**不发送任何使能或运动命令**�
 ## 8. 来源说明与后续工作
 
 * UART 组帧、CRC、解析超时以及 `GetStatus`/`Status` 语义来自既有的
-  `BoardProtocol` 库和上一切片已交付的脑板侧代码；本文件只改变了回复的载荷来源
+  `BoardProtocol` 库和上一切片已交付的主控板侧代码；本文件只改变了回复的载荷来源
   （电机可用性标志）。
 * CAN 收发器引脚与波特率沿用此前已验证的单电机台架配置。
 
@@ -372,6 +372,6 @@ ESP32-S3 只有一个 2.4 GHz 无线电：AP+STA 模式支持扫描，但扫描�
 
 接口：GET `/api/wifi` 读取连接状态；POST `/api/wifi/connect`（ssid/password 表单）保存并尝试连接；POST `/api/wifi/forget` 忘记配置；POST `/api/wifi/scan` 启动异步扫描，GET 同路径读取结果。202 表示受理，是否连接成功以状态接口为准。密码不会通过状态 API 返回，网页也不会写入浏览器存储。
 
-本轮验证：WSL motion 编译通过；原有协议和电机状态机测试通过；Wi-Fi 网页模拟接口测试用于验证状态、表单、错误处理和布局。真实无线扫描、密码保存后重启、错误密码及 AP/STA 切信道仍需板上验收。
+本轮验证：WSL device-controller 编译通过；原有协议和电机状态机测试通过；Wi-Fi 网页模拟接口测试用于验证状态、表单、错误处理和布局。真实无线扫描、密码保存后重启、错误密码及 AP/STA 切信道仍需板上验收。
 
 官方支持依据：[ESP32-S3 Wi-Fi Scan / ESP-IDF 4.4.2](https://docs.espressif.com/projects/esp-idf/en/v4.4.2/esp32s3/api-guides/wifi.html#esp32-s3-wi-fi-scan)。

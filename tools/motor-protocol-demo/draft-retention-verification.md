@@ -13,6 +13,6 @@
 - `node qa-drafts.mjs`：13 项通过。真实 Chromium + 模拟板端 HTTP，验证切换指令/变体/ID/标签、刷新恢复、原始 HEX、存储失败和真实限制校验，0 自动 POST、0 浏览器错误。
 - `node qa-current-limit.mjs`：6 项通过，恢复草稿后的发送路径仍按手册编码且一次点击一次提交。
 - 已检查 `qa/drafts-lab-1513.png`；本机预览 `http://127.0.0.1:4175/?device` 可访问。浏览器检查不等于实机验证。
-- `./tools/build-wsl.ps1 -Target motion`：原生测试全部通过，Motion 控制器 1175 checks、队列 308 checks；固件构建成功。RAM 92460 / 327680，Flash 1243733 / 6553600。
+- `./tools/build-wsl.ps1 -Target device-controller`：原生测试全部通过，Motion 控制器 1175 checks、队列 308 checks；固件构建成功。RAM 92460 / 327680，Flash 1243733 / 6553600。
 
 交付目录：`out/releases/motion-drafts-20260922`。本轮没有烧录或发送硬件指令。固件包含构建时工作区现有代码，未丢弃其它任务的修改。

@@ -1,6 +1,6 @@
 # Stage 1: real homing and stop semantics
 
-Implement now through configured Claude Code/DeepSeek. Other tasks have edits; preserve them. Ownership ONLY motion/src/MotorControl.h, motion/src/MotorControl.cpp, motion/include/ProtocolGate.h, tests/test_motor_control.cpp. Read other files freely. Do not edit main.cpp, frontend, XMotor driver or other tests yet. Codex runs builds; file tools only.
+Implement now through configured Claude Code/DeepSeek. Other tasks have edits; preserve them. Ownership ONLY device-controller/src/MotorControl.h, device-controller/src/MotorControl.cpp, device-controller/include/ProtocolGate.h, tests/test_motor_control.cpp. Read other files freely. Do not edit main.cpp, frontend, XMotor driver or other tests yet. Codex runs builds; file tools only.
 
 User wants existing preview-only homing connected and then a board-executed programmable queue supporting readable actions and raw CAN. This first checkpoint delivers controller foundation, not the queue.
 

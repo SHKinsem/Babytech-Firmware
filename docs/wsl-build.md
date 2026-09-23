@@ -9,12 +9,14 @@ Windows 目录仍是源码主目录；WSL 只维护自动同步的编译副本�
 
 ```powershell
 ./tools/build-wsl.ps1
-./tools/build-wsl.ps1 -Target motion
-./tools/build-wsl.ps1 -Target brain
+./tools/build-wsl.ps1 -Target device-controller
+./tools/build-wsl.ps1 -Target main-controller
 ./tools/build-wsl.ps1 -Target test
 ```
 
 默认发行版 `Ubuntu`，默认 8 个编译任务。可传 `-Distro Ubuntu -Jobs 4`。
+
+旧 `-Target brain` / `-Target motion` 仍分别映射到 `main-controller` / `device-controller`；输出只更新新名称目录，见 [命名迁移](controller-naming.md)。
 
 脚本会：
 
@@ -52,6 +54,6 @@ USB 继续留在 Windows。当前仍可使用 README 中的 Windows PlatformIO �
 
 ## 本机验证（2026-09-21）
 
-协议主机测试、motion 和 brain 的 Linux 编译均通过。首次完整编译的 PlatformIO 耗时分别为 5.38 秒、6.43 秒；紧接着无源码变化的增量检查分别为 1.33 秒、1.40 秒。这些数字不含 WSL 启动、源码同步和产物导出，不能视作端到端耗时。当前机器 WSL 启动仍可能有额外等待。
+协议主机测试、device-controller 和 main-controller 的 Linux 编译均通过。首次完整编译的 PlatformIO 耗时分别为 5.38 秒、6.43 秒；紧接着无源码变化的增量检查分别为 1.33 秒、1.40 秒。这些数字不含 WSL 启动、源码同步和产物导出，不能视作端到端耗时。当前机器 WSL 启动仍可能有额外等待。
 
 两块板的产物已导出到 `out/wsl/`；尚未烧录或做实机验证。

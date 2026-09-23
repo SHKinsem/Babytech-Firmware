@@ -19,7 +19,7 @@
 - 新增真实 `X42sProtocol.cpp` + 模拟 TWAI 边界测试：C6 分包与手算字节一致、原始标准／扩展 ID、数据原样、DLC 边界、发送记录和部分发送失败处理通过。不是只测另一个模拟协议实现。
 - Playwright：最终 `qa-queue.mjs`、原有 `qa-device.mjs`（13项）、`qa-manual-v105.mjs` 通过；可配置限制流程也在本轮通过。队列检查覆盖单次提交、失败与未知结果、旧轮询、跨ID保存、取消、重载不启动和1280×800／1513×1039。API 为模拟，不是机构验收。
 - `npm run build:device` 内嵌网页409690字节；已逐字节确认当前HTML包含在编译后的firmware.bin内。
-- `tools/build-wsl.ps1 -Target motion` 成功，RAM89292字节，Flash1221817字节。编译过程自动运行上述原生和真实CAN驱动测试。
+- `tools/build-wsl.ps1 -Target device-controller` 成功，RAM89292字节，Flash1221817字节。编译过程自动运行上述原生和真实CAN驱动测试。
 
 ## 烧录结果
 

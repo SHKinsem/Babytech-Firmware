@@ -1,10 +1,10 @@
 # 直通位置（FB / CB）实机接入完成报告
 
-日期：2026-09-22 · 范围：`motion/`（控制器）与 `tools/motor-protocol-demo/`（实机页面）
+日期：2026-09-22 · 范围：`device-controller/`（控制器）与 `tools/motor-protocol-demo/`（实机页面）
 
 直通位置以前在实机页面被标为「仅预览」，板端也拒绝这两个功能码。现在 FB/CB
 作为**受监督的立即执行运动**接入：原始功能码与字节原样保留，完成判定由板端
-的真实反馈决定。没有改动 CD（梯形）语义、WiFi、队列或 brain 代码。
+的真实反馈决定。没有改动 CD（梯形）语义、WiFi、队列或 main-controller 代码。
 
 ## 1. 来源与线上约定
 
@@ -33,9 +33,9 @@ CB:  A CB dir speed_u16 angle_u32 mode sync current_u16 6B         (14 字节)
 （网关与页面读取清单不变），但它的回包不影响任何运动许可或判定。
 它与实际位置 `0x36` 是**两个不同的事实**，在控制器里也分开保存。
 
-## 2. 控制器实现（motion/）
+## 2. 控制器实现（device-controller/）
 
-`motion/include/MotionCore.h`
+`device-controller/include/MotionCore.h`
 
 - `decodeFeedback()` 新增 `0x33` → `FeedbackField::Target`（与实际位置 `0x36`
   共用布局、不共用字段；`0x34` 不在此列）。
@@ -47,14 +47,14 @@ CB:  A CB dir speed_u16 angle_u32 mode sync current_u16 6B         (14 字节)
   `±INT32_MAX`（驱动器能回传的反馈范围）内，否则 `target_out_of_range`，
   不会回绕。
 
-`motion/include/ProtocolGate.h`
+`device-controller/include/ProtocolGate.h`
 
 - 新 `CommandKind::DirectMove`；`0xFB`（12 字节）与 `0xCB`（14 字节）在
   `dir ≤ 1`、`mode ≤ 2`、`sync == 0` 时通过，其余一律 Invalid。
 - `directPositionRefusal()` 给格式正确但被拒的缓存形式（sync 1）单独的原因
   `direct_sync_not_supported`，不再混成 `unsupported_or_invalid_command`。
 
-`motion/src/MotorControl.{h,cpp}`
+`device-controller/src/MotorControl.{h,cpp}`
 
 - `directPosition()`：与 `move()` 相同的准入门槛——已确认使能、新鲜位置与速度、
   速度在停止带内、单一受监督动作、无故障、无停止待确认。
@@ -119,7 +119,7 @@ CB:  A CB dir speed_u16 angle_u32 mode sync current_u16 6B         (14 字节)
   流程，验证 FB／CB 各只提交一次且字节精确、同步缓存仍被拦截、模式 0 已可用并
   标注 `0x33`／`0x34` 区别、零速只在零位移时放行；输入框按 `#field-*` 定位，
   避免标签文本同时命中提示气泡按钮。运行前需先 `npm run build:device` 生成
-  `motion/data/index.html`。
+  `device-controller/data/index.html`。
 
 ## 5. 明确的边界
 
