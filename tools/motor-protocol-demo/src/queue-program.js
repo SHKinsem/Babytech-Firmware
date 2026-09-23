@@ -56,10 +56,10 @@ const CAN_ID_RE = /^(?:0x)?([0-9a-fA-F]{1,8})$/;
  */
 export const QUEUE_VERBS = [
   {
-    verb: 'sync', label: '同步组边界', usage: 'sync begin | sync end', shortForm: 'sync begin',
+    verb: 'sync', label: '同步组边界', usage: 'sync begin | sync begin trigger | sync end', shortForm: 'sync begin',
     defaults: '组内 2–8 个不同地址的相对 move',
-    note: '共同轨迹、一次触发、全部到位后继续；异常请求成员停止并保留使能。必须先配置反馈预算与同步容差、完成缓存隔离台架确认。',
-    args: [{ key: 'boundary', label: '边界 begin 或 end', kind: 'raw', default: 'begin' }],
+    note: '共同轨迹、一次触发、全部到位后继续；trigger 适用于高速，只验证共同触发与最终到位，不保证运行中 2% 进度。异常请求成员停止并保留使能。必须先配置反馈预算与同步容差、完成缓存隔离台架确认。',
+    args: [{ key: 'boundary', label: '边界 begin、begin trigger 或 end', kind: 'raw', default: 'begin' }],
   },
   {
     verb: 'helix', label: '螺旋动作',
@@ -411,8 +411,11 @@ function parseVelocity(tokens, fail) {
 function parseTokens(verb, tokens, fail) {
   switch (verb) {
     case 'sync':
+      if(tokens.length===2 && tokens[0].toLowerCase()==='begin' && tokens[1].toLowerCase()==='trigger') {
+        return {boundary:'begin',triggerOnly:true};
+      }
       if(tokens.length!==1 || !['begin','end'].includes(tokens[0].toLowerCase())) {
-        fail('同步边界只能是 sync begin 或 sync end');return null;
+        fail('同步边界只能是 sync begin、sync begin trigger 或 sync end');return null;
       }
       return {boundary:tokens[0].toLowerCase()};
     case 'helix': {
@@ -561,7 +564,9 @@ export function actionAngleDegrees(action, distances) {
 export function previewAction(action, { distances = null } = {}) {
   const warnings = [];
   switch (action.verb) {
-    case 'sync': return {summary:action.boundary==='begin'?'同步组开始：先检查，再缓存与单次触发':'同步组结束：全部成员到位后继续',warnings};
+    case 'sync': return {summary:action.boundary==='begin'
+      ? action.triggerOnly?'高速同步组开始：共同触发，核对最终到位；不验证运行中 2% 进度':'同步组开始：先检查，再缓存与单次触发'
+      :'同步组结束：全部成员到位后继续',warnings};
     case 'helix': return {
       summary:`螺旋：旋转轴 ${action.id} / 直线轴 ${action.linearId} · ${action.turns} 瓶盖圈 · 轴向 ${num(action.turns*action.lead)} mm`,
       detail:`方向 ${action.rotaryDir}/${action.linearDir}；传动比 ${action.ratio}；轴向容差 ${action.tolerance} mm；板端换算与预算校验。未自动判断脱扣。`,

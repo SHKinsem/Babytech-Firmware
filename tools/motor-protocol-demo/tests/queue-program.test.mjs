@@ -33,11 +33,15 @@ const enabledIn = (text) => knownEnabledIds(parseProgram(text).actions);
 
 test('sync groups validate whole structure and preserve ordinary move semantics',()=>{
   assert.equal(validateProgram('sync begin\nmove 1 360\nmove 2 -180\nsync end').ok,true);
+  const fast=validateProgram('sync begin trigger\nmove 1 -1080 deg 100 300 300 800\nmove 2 5400 deg 500 1500 1500 500\nsync end');
+  assert.equal(fast.ok,true);
+  assert.match(fast.preview[0].summary,/不验证运行中 2% 进度/);
   for(const program of ['sync begin\nmove 1 90','sync end','sync begin\nmove 1 90\nsync end',
     'sync begin\nmove 1 90\nmove 1 90\nsync end','sync begin\nmove 1 90 await\nmove 2 90\nsync end',
     'sync begin\nsync begin\nmove 1 90\nmove 2 90\nsync end\nsync end',
     'sync begin\nhex 01 CD 6B\nmove 2 90\nsync end']) assert.equal(validateProgram(program).ok,false,program);
   assert.equal(buildActionLine('sync',{boundary:'end'}).line,'sync end');
+  assert.equal(buildActionLine('sync',{boundary:'begin trigger'}).line,'sync begin trigger');
 });
 test('helix requires explicit geometry and limits, counts expanded steps, and uses board linear conversion',()=>{
   const line='helix 1 2 3 2 1 1 -1 1 60 60 800 0.1';

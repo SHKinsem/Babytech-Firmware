@@ -9,6 +9,19 @@ static QueueStep axis(uint8_t id,int32_t distance) {
 }
 int main() {
     {
+        QueueStep fast[]={axis(1,-10800),axis(2,54000)};
+        fast[0].speedTenths=1000;fast[1].speedTenths=5000;
+        fast[0].accelRpmS=fast[0].decelRpmS=300;
+        fast[1].accelRpmS=fast[1].decelRpmS=1500;
+        SyncTolerance tolerance;tolerance.progress=.02;tolerance.timeMs=1000;
+        SyncPlan plan;
+        assert(!planSync(fast,2,tolerance,plan));
+        assert(plan.axes[0].speedTenths==1000 && plan.axes[1].speedTenths==5000);
+        assert(plan.axes[0].accelRpmS==300 && plan.axes[1].accelRpmS==1500);
+        assert(plan.maxProgressError<1e-12 && plan.maxTimeErrorMs<1e-9);
+        assert(fabs(plan.common.total-2.1333333333333333)<1e-9);
+    }
+    {
         QueueStep eight[8];for(uint8_t i=0;i<8;++i) {
             eight[i]=axis(i+1,(i%2?-1:1)*3600*(i+1));
             eight[i].speedTenths=320;eight[i].accelRpmS=eight[i].decelRpmS=64;

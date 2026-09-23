@@ -451,6 +451,10 @@ bool parseStep(const Tokens& tokens,
     switch (action) {
         case QueueAction::SyncBegin:
         case QueueAction::SyncEnd:
+            if(tokens.count==3 && tokenEquals(tokens.text[1],tokens.length[1],"begin") &&
+               tokenEquals(tokens.text[2],tokens.length[2],"trigger")) {
+                step.action=QueueAction::SyncBegin;step.syncTriggerOnly=true;return true;
+            }
             if(tokens.count!=2) return failAt(error,step.line,"argument_count");
             if(tokenEquals(tokens.text[1],tokens.length[1],"begin")) {step.action=QueueAction::SyncBegin;return true;}
             if(tokenEquals(tokens.text[1],tokens.length[1],"end")) {step.action=QueueAction::SyncEnd;return true;}
@@ -721,7 +725,7 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
         if(step.action!=QueueAction::SyncBegin) continue;
         SyncSettings settings=syncSettings_;
         if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
-        const char* reason=sync_.validate(scratch.steps+i+1,step.groupSize,settings);
+        const char* reason=sync_.validate(scratch.steps+i+1,step.groupSize,settings,nullptr,step.syncTriggerOnly);
         if(!reason && !motor_.autoQueriesEnabled()) reason="sync_queries_paused";
         if(!reason && !motor_.syncIsolationReady()) reason="sync_cache_isolation_unverified";
         if(reason) {errorLine_=step.line;setMessage(reason);return Result{400,reason};}
@@ -843,7 +847,7 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
         if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
         helixTravelMm_=step.helixTravelMm;
         helixGeometryErrorMm_=step.helixGeometryErrorMm;
-        const char* reason=sync_.start(program_.steps+stepIndex_+1,step.groupSize,settings,now);
+        const char* reason=sync_.start(program_.steps+stepIndex_+1,step.groupSize,settings,now,step.syncTriggerOnly);
         if(reason) {fail(now,reason,step.line);return;}
         phase_=kPhaseSync;setMessage("sync_checking");return;
     }
@@ -1284,6 +1288,7 @@ String CommandQueue::statusJson() const {
     json += program_.hasRaw ? "true" : "false";
     json += ",\"motionComplete\":";json += motionComplete_?"true":"false";
     json += ",\"sync\":{\"phase\":\"";json += SyncRuntime::phaseName(sync_.phase());
+    json += "\",\"mode\":\"";json += sync_.triggerOnly()?"trigger_only":"progress_guarded";
     json += "\",\"error\":\"";appendEscaped(json,sync_.error());
     json += "\",\"sampleBudgetMs\":";json += static_cast<unsigned long>(sync_.sampleBudgetMs());
     json += ",\"errorLower\":";json += String(sync_.errorLower(),6);

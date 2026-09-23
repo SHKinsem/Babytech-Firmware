@@ -1263,6 +1263,21 @@ static void test_explicit_await() {
     CHECK(rig.queue.state() == QueueState::Cancelled);
 }
 
+static void test_trigger_only_sync_parse() {
+    QueueRig rig;
+    rig.begin();
+    QueueProgram parsed;
+    QueueError error;
+    const char* program = "sync begin trigger\nmove 1 -1080 deg 100 300 300 800\n"
+                          "move 2 5400 deg 500 1500 1500 500\nsync end\n";
+    CHECK(parseQueueProgram(program, std::strlen(program), rig.rotation, parsed, error));
+    CHECK(parsed.count == 4);
+    CHECK(parsed.steps[0].syncTriggerOnly);
+    CHECK(parsed.steps[0].groupSize == 2);
+    const char* invalid = "sync begin unknown\nmove 1 1\nmove 2 1\nsync end\n";
+    CHECK(!parseQueueProgram(invalid, std::strlen(invalid), rig.rotation, parsed, error));
+}
+
 // Sequential homing must switch observation to an otherwise unselected motor.
 static void test_home_await_switches_to_motor_three() {
     QueueRig rig;
@@ -1438,6 +1453,7 @@ int main() {
         {"rotation distance, rev conversion and direction", test_rotation_distance_and_direction_conversion},
         {"saved board policy does not gate the queue", test_saved_board_policy_does_not_gate_the_queue},
         {"short torque/velocity forms and protocol bounds", test_short_forms_and_protocol_bounds},
+        {"trigger-only sync syntax is explicit", test_trigger_only_sync_parse},
         {"hostile tokens, hex ids and embedded NULs are rejected", test_hostile_tokens_are_rejected_without_sending},
         {"direct program sends without any RX", test_direct_program_sends_without_any_rx},
         {"move frames keep the big-endian wire layout", test_move_frames_keep_big_endian_layout},

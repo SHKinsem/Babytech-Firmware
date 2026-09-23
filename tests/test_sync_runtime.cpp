@@ -52,8 +52,8 @@ struct Rig {
         settings.responseBudgetMs=20;settings.completionTenths=2;
     }
     void tick(uint32_t now) {port.now=now;runtime.poll(now);}
-    void prepare() {
-        assert(!runtime.start(axes,2,settings,0));
+    void prepare(bool triggerOnly=false) {
+        assert(!runtime.start(axes,2,settings,0,triggerOnly));
         tick(0);assert(port.cached.empty()); // no old samples
         port.fresh(1);tick(1);tick(3);port.fresh(5);tick(5);
     }
@@ -77,6 +77,22 @@ int main() {
         Rig r;r.axes[0].speedTenths=300;r.axes[1].speedTenths=300;
         assert(!strcmp(r.runtime.start(r.axes,2,r.settings,0),"sync_feedback_budget_insufficient"));
         assert(r.port.cached.empty());
+    }
+    {
+        Rig r;
+        r.axes[0]=axis(1,-10800);r.axes[1]=axis(2,54000);
+        r.axes[0].speedTenths=1000;r.axes[1].speedTenths=5000;
+        r.axes[0].accelRpmS=r.axes[0].decelRpmS=300;
+        r.axes[1].accelRpmS=r.axes[1].decelRpmS=1500;
+        r.settings.tolerance.progress=.02;
+        assert(!strcmp(r.runtime.validate(r.axes,2,r.settings),"sync_feedback_budget_insufficient"));
+        assert(!r.runtime.validate(r.axes,2,r.settings,nullptr,true));
+        r.prepare(true);
+        assert(r.runtime.triggerOnly() && r.port.triggers==1);
+        r.port.fresh(10,true);r.tick(10);
+        r.port.fresh(20,true);r.tick(20);
+        assert(r.runtime.phase()==SyncRuntime::Phase::Complete);
+        assert(r.port.stopped.empty());
     }
     {
         Rig r;r.port.failCache=2;r.prepare();

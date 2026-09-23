@@ -86,6 +86,7 @@ struct QueueStep {
     uint8_t id = 0;
     bool awaitCompletion = false;  // explicit trailing await on move/home only
     uint8_t groupSize = 0;
+    bool syncTriggerOnly = false;   // shared trigger and final feedback, no live 2% progress claim
     double syncToleranceProgress = 0; // helix axial tolerance / axial travel
     double helixTravelMm = 0;        // zero for a generic sync group
     double helixGeometryErrorMm = 0; // displacement rounding envelope

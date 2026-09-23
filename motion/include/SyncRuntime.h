@@ -54,6 +54,7 @@ public:
     double errorUpper() const {return errorUpper_;}
     double maxObservableError() const {return maxObservableError_;}
     uint32_t sampleBudgetMs() const {return sampleBudgetMs_;}
+    bool triggerOnly() const {return triggerOnly_;}
     static const char* phaseName(Phase p) {
         switch(p) {
             case Phase::Idle:return "idle";case Phase::Checking:return "checking";
@@ -65,9 +66,10 @@ public:
     }
     void reset() {
         if(active()) return;
-        phase_=Phase::Idle;plan_.count=0;error_=nullptr;
+        phase_=Phase::Idle;plan_.count=0;error_=nullptr;triggerOnly_=false;
     }
-    const char* validate(const QueueStep* axes,uint8_t count,const SyncSettings& settings,SyncPlan* output=nullptr) {
+    const char* validate(const QueueStep* axes,uint8_t count,const SyncSettings& settings,
+                         SyncPlan* output=nullptr,bool triggerOnly=false) {
         static SyncPlan scratch;
         SyncPlan& checked=output ? *output : scratch;
         if(!settings.valid()) return "sync_settings_unconfigured";
@@ -83,16 +85,17 @@ public:
         const double uncertainty=2*checked.common.speed*sampleBudgetMs_/1000.0+2*quantization;
         if(sampleBudgetMs_>=settings.feedbackTimeoutMs ||
            settings.responseBudgetMs>=budget.timeoutMs ||
-           uncertainty+checked.maxProgressError>settings.tolerance.progress)
+           (!triggerOnly && uncertainty+checked.maxProgressError>settings.tolerance.progress))
             return "sync_feedback_budget_insufficient";
         return nullptr;
     }
-    const char* start(const QueueStep* axes,uint8_t count,const SyncSettings& settings,uint32_t now) {
+    const char* start(const QueueStep* axes,uint8_t count,const SyncSettings& settings,
+                      uint32_t now,bool triggerOnly=false) {
         if(active()) return "sync_busy";
-        const char* error=validate(axes,count,settings,&plan_);
+        const char* error=validate(axes,count,settings,&plan_,triggerOnly);
         if(error) return error;
         if(!port_.syncIsolationReady()) return "sync_cache_isolation_unverified";
-        settings_=settings;phase_=Phase::Checking;phaseAt_=now;startedAt_=0;cacheIndex_=0;
+        settings_=settings;triggerOnly_=triggerOnly;phase_=Phase::Checking;phaseAt_=now;startedAt_=0;cacheIndex_=0;
         error_=nullptr;errorLower_=errorUpper_=maxObservableError_=0;
         uncertain_=false;triggerAttempted_=false;
         scheduler_.release(CanQueryScheduler::Sync);scheduler_.exclusiveSync(true);
@@ -319,7 +322,7 @@ private:
             }
             maxObservableError_=fmax(maxObservableError_,errorLower_);
             if(errorLower_>settings_.tolerance.progress) {abort("sync_coordination_error",now);return;}
-            if(errorUpper_>settings_.tolerance.progress) {
+            if(!triggerOnly_ && errorUpper_>settings_.tolerance.progress) {
                 if(!uncertain_) {uncertain_=true;uncertainAt_=now;}
                 else if(now-uncertainAt_>=settings_.feedbackTimeoutMs) {abort("sync_feedback_indeterminate",now);return;}
             } else uncertain_=false;
@@ -335,7 +338,7 @@ private:
     const char* error_=nullptr;
     uint32_t phaseAt_=0,startedAt_=0,lastCacheAt_=0,sampleBudgetMs_=0,uncertainAt_=0;
     uint8_t cacheIndex_=0;
-    bool triggerAttempted_=false,uncertain_=false;
+    bool triggerAttempted_=false,uncertain_=false,triggerOnly_=false;
     double errorLower_=0,errorUpper_=0,maxObservableError_=0;
 };
 } // namespace motion
