@@ -2022,6 +2022,57 @@ static void test_direct_position_dispatch_api_and_cb_modes() {
           "direct_sync_not_supported");
 }
 
+static void test_paused_page_polling_keeps_direct_move_feedback() {
+    Rig rig;
+    rig.mc.begin(4, 5, 500000);
+    enableAndFeedStationary(rig, 1, 0);
+
+    setMillis(60);
+    rig.mc.setAutoQueriesEnabled(false);
+    rig.mc.watch(2);  // A selected idle page must not generate traffic.
+    capturedTX.clear();
+    txLog.clear();
+    setMillis(700);
+    rig.mc.poll();
+    CHECK(countTx(TxKind::ReadSysParam) == 0);
+
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    setMillis(720);
+    rig.mc.poll();
+    uint8_t move[14];
+    buildDirectLimit(move, 1, 0, 300, 900, 2, 0, 800);
+    setMillis(740);
+    CHECK(rig.mc.command(move, sizeof(move)).code == kCodeQueued);
+    injectRx(makeAck(1, 0xCB, 0x02));
+    setMillis(760);
+    rig.mc.poll();
+
+    uint32_t targetQueryAt = 0;
+    for (uint32_t t = 860; t <= 1760; t += 100) {
+        injectRx(makePosition(1, 0));
+        injectRx(makeVelocity(1, 0));
+        setMillis(t);
+        rig.mc.poll();
+        if (countTxOpcode(0x33, 1) != 0) { targetQueryAt = t; break; }
+    }
+    CHECK(targetQueryAt != 0);
+    if (!targetQueryAt) return;
+
+    injectRx(makeTarget(1, 900));
+    injectRx(makePosition(1, 900));
+    injectRx(makeVelocity(1, 0));
+    setMillis(targetQueryAt + 10);
+    rig.mc.poll();
+    injectRx(makePosition(1, 900));
+    injectRx(makeVelocity(1, 0));
+    setMillis(targetQueryAt + 30);
+    rig.mc.poll();
+    CHECK(!activeIs(rig, 1));
+    CHECK(status(rig, 1).find("\"fault\":\"none\"") != std::string::npos);
+    CHECK(status(rig, 1).find("\"enabled\":true") != std::string::npos);
+}
+
 static void test_direct_position_target_proof_uses_33_not_34() {
     // A direct job whose target is 100 + 900 = 1000 (mode 2).
     // A matching 0x34 real-time setpoint is never the proof: the position sits
@@ -2343,6 +2394,7 @@ int main() {
         {"direct FB/CB wire frame and modes 0/1/2", test_direct_position_wire_frame_and_modes},
         {"direct mode 0 needs a fresh 0x33 driver target, not 0x34", test_direct_position_mode0_needs_fresh_target},
         {"direct dispatch via the API and the CB form in every mode", test_direct_position_dispatch_api_and_cb_modes},
+        {"paused page polling retains CB target proof", test_paused_page_polling_keeps_direct_move_feedback},
         {"direct completion proof: 0x33 only, distant target rejected", test_direct_position_target_proof_uses_33_not_34},
         {"direct completion needs matched ack, fresh target and two pairs", test_direct_position_completion_proof},
         {"direct wrong-opcode ack never confirms the job", test_direct_position_wrong_opcode_ack_never_confirms},

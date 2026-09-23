@@ -92,6 +92,8 @@ private:
     void observeMotion(uint32_t now);
     uint32_t observedAckAt_ = 0, donePosAt_ = 0, doneVelAt_ = 0;
     uint8_t doneSamples_ = 0;
+    int64_t expectedMoveTargetTenths_ = 0;
+    bool expectedMoveTargetValid_ = false;
     uint32_t homeProofAt_ = 0;
     bool accepted_ = false, homeSeenRunning_ = false, homeComplete_ = false;
 

@@ -438,7 +438,7 @@ export function queueMessageText(message) {
   if(syncLabels[message]) return syncLabels[message];
   // The queue only ever reports transmission: every "done" wording says the
   // frames went out, never that the motor reached anything.
-  return ({home_wait_ack:'等待本次回零指令应答（9A）',home_wait_end:'已观察到正在回零，等待运行标志清除',home_wait_start_or_done:'指令已接收，等待启动宽限后的未回零状态或明确完成应答',home_wait_fresh_feedback:'已记录回零完成证据，等待完成后的新鲜位置和速度',home_wait_stationary:'已记录回零完成证据，速度尚未满足静止条件',home_confirming_stationary:'已记录回零完成证据，正在累计两次静止确认',automatic_queries_paused:'自动查询已暂停；仍接收回包并判断完成',waiting_home:'等待回零完成',waiting_position:'等待移动到位',waiting_feedback:'等待新鲜反馈',idle:'尚未执行',running:'正在按顺序发送',done:'发送结束',raw_frames_submitted:'发送结束（含原始帧，不判断机械动作）',frames_submitted:'发送结束（含原始帧，不判断机械动作）',cancelled:'已取消后续步骤并请求停止',stopped:'已停止队列',uart_stop:'已由串口停止队列',control_state_cleared:'已清除板端状态',home_no_motion:'驱动报告已在零点或限位触发，本次未运动'})[message] || errorLabels[message] || message;
+  return ({home_wait_ack:'等待本次回零指令应答（9A）',home_wait_end:'已观察到正在回零，等待运行标志清除',home_wait_start_or_done:'指令已接收，等待启动宽限后的未回零状态或明确完成应答',home_wait_fresh_feedback:'已记录回零完成证据，等待完成后的新鲜位置和速度',home_wait_stationary:'已记录回零完成证据，速度尚未满足静止条件',home_confirming_stationary:'已记录回零完成证据，正在累计两次静止确认',automatic_queries_paused:'自动查询已暂停；仍接收回包并判断完成',waiting_home:'等待回零完成',waiting_position:'等待移动到位',waiting_feedback:'等待新鲜反馈',waiting_move_start_feedback:'等待本次移动前的新鲜位置和速度',waiting_move_stationary:'等待电机静止后发送本次移动',waiting_move_target:'已发送移动，但驱动目标尚未更新到本次目标',idle:'尚未执行',running:'正在按顺序发送',done:'发送结束',raw_frames_submitted:'发送结束（含原始帧，不判断机械动作）',frames_submitted:'发送结束（含原始帧，不判断机械动作）',cancelled:'已取消后续步骤并请求停止',stopped:'已停止队列',uart_stop:'已由串口停止队列',control_state_cleared:'已清除板端状态',home_no_motion:'驱动报告已在零点或限位触发，本次未运动'})[message] || errorLabels[message] || message;
 }
 
 /**

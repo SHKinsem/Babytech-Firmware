@@ -726,7 +726,6 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
         SyncSettings settings=syncSettings_;
         if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
         const char* reason=sync_.validate(scratch.steps+i+1,step.groupSize,settings,nullptr,step.syncTriggerOnly);
-        if(!reason && !motor_.autoQueriesEnabled()) reason="sync_queries_paused";
         if(reason) {errorLine_=step.line;setMessage(reason);return Result{400,reason};}
     }
 
@@ -853,6 +852,12 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
     if (step.awaitCompletion) {
         motor_.queueObserveId_ = step.id;
         auto& node = motor_.nodes_[step.id];
+        int32_t startPosition = 0;
+        expectedMoveTargetValid_ = step.action == QueueAction::Move &&
+            motor_.freshPosition(step.id, now, startPosition);
+        if (expectedMoveTargetValid_) {
+            expectedMoveTargetTenths_ = int64_t(startPosition) + step.distanceTenths;
+        }
         node.queueAckFunction = node.queueAckStatus = 0;
         node.queueExpectedFunction = step.action == QueueAction::Home ? 0x9A : 0xCD;
         node.queueAckPending = false;
@@ -1041,6 +1046,21 @@ void CommandQueue::beginStep(uint32_t now) {
         uint32_t(now - lastRawAt_) < kRawSpacingMs) {
         return;  // keep raw frames apart
     }
+    if (step.action == QueueAction::Move && step.awaitCompletion) {
+        // An awaited relative move needs a fresh starting position. Otherwise
+        // an unchanged old target and old position could masquerade as arrival.
+        motor_.queueObserveId_ = step.id;
+        int32_t position = 0, velocity = 0;
+        const bool positionFresh = motor_.freshPosition(step.id, now, position);
+        const bool velocityFresh = motor_.freshVelocity(step.id, now, velocity);
+        if (!positionFresh || !velocityFresh || velocity < -5 || velocity > 5) {
+            motor_.queries_.demand(step.id, 0x36, CanQueryScheduler::Await, 150, 1000, 2, now);
+            motor_.queries_.demand(step.id, 0x35, CanQueryScheduler::Await, 150, 1000, 2, now);
+            setMessage(positionFresh && velocityFresh ? "waiting_move_stationary" :
+                       "waiting_move_start_feedback");
+            return;
+        }
+    }
     dispatchStep(now, step);
 }
 
@@ -1120,8 +1140,7 @@ bool CommandQueue::syncStop(uint8_t id) {
 }
 void CommandQueue::syncObserve(uint8_t id,bool value) {motor_.syncObserve_[id]=value;}
 void CommandQueue::pollSync(uint32_t now) {
-    if(sync_.active() && (!motor_.autoQueriesEnabled() || !motor_.ready()))
-        sync_.abort(!motor_.autoQueriesEnabled()?"sync_queries_paused":"can_unavailable",now);
+    if(sync_.active() && !motor_.ready()) sync_.abort("can_unavailable",now);
     sync_.poll(now);
     if(sync_.phase()==SyncRuntime::Phase::Failed) {
         if(state_==QueueState::Running) fail(now,sync_.error(),currentStep()?currentStep()->line:0);
@@ -1199,8 +1218,15 @@ void CommandQueue::observeMotion(uint32_t now) {
     const bool fresh = n.positionValid && n.velocityValid &&
         newer(n.positionMs, proofAt) && newer(n.velocityMs, proofAt) &&
         now-n.positionMs < 1000 && now-n.velocityMs < 1000;
+    // An accepted CD can still leave the driver's old target unchanged. If the
+    // pre-send position was fresh, require the target readback to represent this
+    // move before allowing two stationary samples to complete the await.
+    const bool expectedTargetSeen = !expectedMoveTargetValid_ ||
+        (int64_t(n.targetTenths) - expectedMoveTargetTenths_ <= 5 &&
+         int64_t(n.targetTenths) - expectedMoveTargetTenths_ >= -5);
     bool reached = home ? accepted_ && homeComplete_ :
         accepted_ && n.targetValid && newer(n.targetMs, phaseAt_) &&
+        expectedTargetSeen &&
         int64_t(n.positionTenths)-n.targetTenths <= 1 &&
         int64_t(n.positionTenths)-n.targetTenths >= -1;
     if (!fresh || !reached) doneSamples_ = 0;
@@ -1218,10 +1244,9 @@ void CommandQueue::observeMotion(uint32_t now) {
             !fresh ? "home_wait_fresh_feedback" :
             (n.velocityTenths < -5 || n.velocityTenths > 5) ? "home_wait_stationary" :
             "home_confirming_stationary");
-    }
-    if (!motor_.autoQueriesEnabled()) {
-        setMessage("automatic_queries_paused");
-        return;
+    } else if (accepted_ && n.targetValid && newer(n.targetMs, phaseAt_) &&
+               !expectedTargetSeen) {
+        setMessage("waiting_move_target");
     }
     const auto demand=[this,step,now](uint8_t field,uint32_t period) {
         motor_.queries_.demand(step->id,field,CanQueryScheduler::Await,period,1000,2,now);

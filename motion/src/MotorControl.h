@@ -34,7 +34,9 @@ public:
     void dispatchQueries();
     CanQueryScheduler& queries() { return queries_; }
     String queryStatusJson() const;
-    void setAutoQueriesEnabled(bool enabled) { autoQueriesEnabled_ = enabled; }
+    // Compatibility name: this controls idle page refresh only. Queries needed
+    // to supervise an active command always use the shared scheduler.
+    void setAutoQueriesEnabled(bool enabled);
     bool autoQueriesEnabled() const { return autoQueriesEnabled_; }
 
     // Selects the address the module tracks (1..255). Selecting a new id never

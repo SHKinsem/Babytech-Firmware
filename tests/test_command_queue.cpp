@@ -1207,18 +1207,20 @@ static void test_explicit_await() {
     tick(rig, 3000);
     CHECK(rig.queue.active());
     CHECK(countTxOpcode(0x9A) == 0);
-    CHECK(has(status(rig), "waiting_feedback"));
+    CHECK(has(status(rig), "waiting_move_start_feedback"));
+    feedStationary(rig, 1, 3010, 0);
+    tick(rig, 3020);  // fresh starting position dispatches the awaited move
     injectRx(makeAck(1, 0xCD, 2));
-    tick(rig, 3010);
+    tick(rig, 3030);
     injectRx(makeTarget(1, 900));
-    feedStationary(rig, 1, 3020, 900);
-    rig.queue.poll(3020);
+    feedStationary(rig, 1, 3040, 900);
+    rig.queue.poll(3040);
     CHECK(countTxOpcode(0x9A) == 0);
-    feedStationary(rig, 1, 3030, 900);
-    rig.queue.poll(3030);
-    tick(rig, 3040);
+    feedStationary(rig, 1, 3060, 900);
+    rig.queue.poll(3060);
+    tick(rig, 3080);
     CHECK(countTxOpcode(0x9A) == 1);
-    tick(rig, 3050);
+    tick(rig, 3090);
     CHECK(rig.queue.state() == QueueState::Done);
 
     CHECK(startQueue(rig, "home 2 2 await\nstop 1\n", 1, 4000).code == 202);
@@ -1250,6 +1252,7 @@ static void test_explicit_await() {
     CHECK(startQueue(rig, "move 1 90 await\nstop 2", 1, 5000).code == 202);
     tick(rig, 5010);
     // Cached completion from the preceding move cannot release the new step.
+    feedStationary(rig, 1, 5015, 0);
     tick(rig, 5020);
     CHECK(has(status(rig), "\"step\":1"));
     injectRx(makeAck(1, 0xCD, 0xE2));
@@ -1261,6 +1264,26 @@ static void test_explicit_await() {
     CHECK(rig.queue.cancel("cancelled").code == 202);
     tick(rig, 6020);
     CHECK(rig.queue.state() == QueueState::Cancelled);
+}
+
+static void test_await_move_rejects_unchanged_target_after_ack() {
+    QueueRig rig;
+    rig.begin();
+    rig.motor.watch(1);
+    CHECK(startQueue(rig, "move 1 360 deg 300 300 300 200 await\nwait 1\n", 1, 40).code == 202);
+    feedStationary(rig, 1, 50, 0);
+    tick(rig, 60);
+    injectRx(makeAck(1, 0xCD, 0x02));
+    tick(rig, 80);
+    // The driver accepted the opcode but kept its old target and never moved.
+    // A matching old target/position must not consume the awaited move.
+    injectRx(makeTarget(1, 0));
+    feedStationary(rig, 1, 100, 0);
+    rig.queue.poll(100);
+    feedStationary(rig, 1, 140, 0);
+    rig.queue.poll(140);
+    CHECK(has(status(rig), "\"step\":1"));
+    CHECK(rig.queue.active());
 }
 
 static void test_trigger_only_sync_parse() {
@@ -1306,20 +1329,24 @@ static void test_home_await_switches_to_motor_three() {
     CHECK(rig.queue.state() == QueueState::Done);
 }
 
-static void test_pause_queries_keeps_rx_and_manual_tx() {
+static void test_paused_page_queries_keep_home_await_and_manual_tx() {
     QueueRig rig;
     rig.begin();
+    rig.motor.watch(3);
     rig.motor.setAutoQueriesEnabled(false);
+    tick(rig, 10);
+    CHECK(capturedTX.empty()); // optional idle Page reads really are paused
     CHECK(startQueue(rig, "home 3 2 await", 1, 10).code == 202);
     tick(rig, 20);
     capturedTX.clear();
     tick(rig, 100);
     tick(rig, 200);
-    CHECK(capturedTX.empty());
-    CHECK(has(status(rig), "automatic_queries_paused"));
+    CHECK(countTx(TxKind::ReadSysParam) > 0); // awaited home still requests feedback
+    CHECK(!has(status(rig), "automatic_queries_paused"));
     const uint8_t query[] = {3, 0x3B, 0x6B};
+    const uint32_t homeQueriesBeforeManual = countTxOpcode(0x3B);
     CHECK(rig.motor.queueSendLogical(query, sizeof(query)));
-    CHECK(countTxOpcode(0x3B) == 1);
+    CHECK(countTxOpcode(0x3B) == homeQueriesBeforeManual + 1);
     injectRx(makeAck(3, 0x9A, 0x9F));
     tick(rig, 210);
     feedStationary(rig, 3, 220);
@@ -1328,39 +1355,42 @@ static void test_pause_queries_keeps_rx_and_manual_tx() {
     rig.queue.poll(230);
     tick(rig, 240);
     CHECK(rig.queue.state() == QueueState::Done);
-    CHECK(countTxOpcode(0x35) == 0 && countTxOpcode(0x36) == 0);
-    rig.motor.watch(3);
-    rig.motor.setAutoQueriesEnabled(true);
-    tick(rig, 300);
-    CHECK(countTx(TxKind::ReadSysParam) > 0);
+    CHECK(countTxOpcode(0x35) > 0 || countTxOpcode(0x36) > 0);
+    QueueRig idle;
+    idle.begin();
+    idle.motor.watch(3);
+    idle.motor.setAutoQueriesEnabled(false);
+    tick(idle, 300);
+    CHECK(capturedTX.empty());
+    idle.motor.setAutoQueriesEnabled(true);
+    tick(idle, 400);
+    CHECK(countTx(TxKind::ReadSysParam) > 0); // selected Page refresh resumes
 }
 
-static void test_pause_queries_keeps_receiving() {
+static void test_paused_page_queries_keep_sync_supervision() {
     QueueRig rig;
     rig.begin();
     rig.motor.setAutoQueriesEnabled(false);
-    CHECK(startQueue(rig, "home 3 2 await\nstop 2", 1, 10).code == 202);
+    SyncSettings settings;
+    settings.tolerance.progress = .2;
+    settings.tolerance.timeMs = 50;
+    settings.feedbackTimeoutMs = 5000;
+    settings.prepareTimeoutMs = 10000;
+    settings.stopTimeoutMs = 2000;
+    settings.responseBudgetMs = 20;
+    settings.completionTenths = 2;
+    CHECK(rig.queue.setSyncSettings(settings));
+    CHECK(startQueue(rig,
+        "sync begin trigger\nmove 6 360 deg 1 60 60 800\nmove 7 -180 deg 1 60 60 800\nsync end",
+        1, 10).code == 202);
     tick(rig, 20);
-    const size_t sent = capturedTX.size();
+    CHECK(has(status(rig), "\"phase\":\"checking\""));
     tick(rig, 100);
     tick(rig, 200);
-    CHECK(capturedTX.size() == sent); // both query schedulers are paused
-    CHECK(has(status(rig), "automatic_queries_paused"));
-    injectRx(makeAck(3, 0x9A, 0x9F));
-    tick(rig, 210);
-    feedStationary(rig, 3, 220);
-    rig.queue.poll(220);
-    feedStationary(rig, 3, 230);
-    rig.queue.poll(230);
-    CHECK(has(status(rig), "\"step\":2")); // RX still consumed
-    CHECK(capturedTX.size() == sent);
-    tick(rig, 240);
-    tick(rig, 250);
-    CHECK(rig.queue.state() == QueueState::Done);
-    rig.motor.watch(3);
-    rig.motor.setAutoQueriesEnabled(true);
-    tick(rig, 400);
     CHECK(countTx(TxKind::ReadSysParam) > 0);
+    CHECK(!has(status(rig), "sync_queries_paused"));
+    CHECK(rig.queue.state() == QueueState::Running);
+    CHECK(rig.queue.cancel("test_cancel").code == 202);
 }
 
 static void test_home_batched_rx_keeps_transition() {
@@ -1444,10 +1474,11 @@ int main() {
         {"broadcast enable and disable wire frames", test_broadcast_enable_frames},
         {"home RX ordering, same tick and rejection", test_home_rx_order_and_same_tick},
         {"batched homing RX retains ACK and running-to-idle transition", test_home_batched_rx_keeps_transition},
-        {"pause query TX while continuing RX", test_pause_queries_keeps_receiving},
-        {"pause automatic queries preserves RX and explicit TX", test_pause_queries_keeps_rx_and_manual_tx},
+        {"paused idle Page reads preserve sync supervision", test_paused_page_queries_keep_sync_supervision},
+        {"paused idle Page reads preserve home await and explicit TX", test_paused_page_queries_keep_home_await_and_manual_tx},
         {"await switches from motor 1 to unselected motor 3", test_home_await_switches_to_motor_three},
         {"explicit await syntax, completion, rejection and cancellation", test_explicit_await},
+        {"await move does not complete on unchanged target", test_await_move_rejects_unchanged_target_after_ack},
         {"program validation is atomic and reports source lines", test_program_validation_is_atomic_with_source_lines},
         {"strict numbers, units and raw id/DLC bounds", test_strict_numeric_and_raw_bounds},
         {"rotation distance, rev conversion and direction", test_rotation_distance_and_direction_conversion},

@@ -181,9 +181,16 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
 void MotorControl::watch(uint8_t id) {
     if (id == 0) return;
     selectedId_ = id;
+    if (!autoQueriesEnabled_) return;
     const uint8_t fields[]={0x36,0x35,0x3A};
     for (uint8_t field:fields)
         queries_.demand(id,field,CanQueryScheduler::Page,600,2000,0,millis());
+}
+
+void MotorControl::setAutoQueriesEnabled(bool enabled) {
+    autoQueriesEnabled_ = enabled;
+    if (!enabled) queries_.release(CanQueryScheduler::Page);
+    else if (selectedId_) watch(selectedId_);
 }
 
 bool MotorControl::canReady() const {
@@ -814,7 +821,7 @@ bool MotorControl::sendQuery(void* context,uint8_t id,uint8_t field) {
 
 void MotorControl::dispatchQueries() {
     queries_.poll(millis());
-    if (autoQueriesEnabled_ && canReady()) queries_.dispatch(millis(),sendQuery,this);
+    if (canReady()) queries_.dispatch(millis(),sendQuery,this);
 }
 
 String MotorControl::queryStatusJson() const {

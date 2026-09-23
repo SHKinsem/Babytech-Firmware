@@ -1212,6 +1212,8 @@ void setup() {
     server.on("/api/limits", HTTP_POST, handleLimits);
     server.on("/api/can-debug", HTTP_GET, []() { sendJson(200, motor.canDebugJson()); });
     server.on("/api/config-result", HTTP_GET, []() { sendJson(200, motor.configJson()); });
+    // Legacy API name: toggles optional idle Page refresh only. Required
+    // Controller/Await/Sync feedback remains scheduled during active work.
     server.on("/api/polling", HTTP_POST, []() {
         long enabled = 0;
         if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
