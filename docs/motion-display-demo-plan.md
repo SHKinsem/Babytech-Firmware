@@ -68,6 +68,26 @@ Motion ESP32 ---- non-blocking flow ---- existing command queue ---- CAN motors
 - stage、startEnabled 和 error 必须对应实际执行情况。`startEnabled` 不维护第二套隐藏门禁，固定等于 `stage == Ready`；Motion 收到 Start intent 时重新确认当前仍为 Ready。条件提示只传有依据的值，不伪造传感器读数。
 - 加水/加粉初版建议非阻塞等待模拟，具体是否模拟及等待时间待确认。屏幕无专用模拟出料标志，网页须标明演示边界，演示产物不用于喂养。
 
+### V1 最小状态、条件与错误映射
+
+- `DemoFlowController.stage` 是对外生命周期的唯一状态源；`startEnabled` 只由 `stage == Ready` 派生，`error` 只由 Error 终态及其锁存原因派生。不得再维护平行的 UI 状态、可启动标志或页面专用阶段。
+- DISPLAY 构建直接用 DemoFlowController 和演示 JSON 生成 `DisplaySnapshot`，复用既有协议编码/解码；不原样调用完整产品中依赖云连接门禁的 snapshot 组装逻辑，避免 `cloudConnected=false` 把演示 Start 永久禁用。
+- V1 没有真实传感器证据时，`primaryCondition=None`、`footerCondition=None`。控制器离线和协议不匹配继续由 DisplayController 本地判断，不伪造 LowWater、OverTemperature、BottleRemoved 或传感器异常。
+- 非 Error 阶段一律发送 `error=None`。Error 锁存到网页明确执行“复位/初始化”，不因心跳、屏幕重连或超时展示结束自行清除。复位时参考仍可信且轴在零位/静止/反馈新鲜，只重新检查后进入 Ready；参考已失效才重新碰撞找零。
+
+| 原因 | 对屏幕发送的 error |
+| --- | --- |
+| 开盖阶段超时 | `CapUnscrewTimeout` |
+| 加水阶段超时 | `WaterDispenseTimeout` |
+| 加粉阶段超时 | `PowderDispenseTimeout` |
+| 关盖阶段超时 | `CapScrewTimeout` |
+| 混合阶段超时 | `MixingTimeout` |
+| 已确认的 CAN/电机故障，或 Stop 因 CAN/反馈故障无法确认 | `CanFault` |
+| 初始化超时、无法分类的执行失败、非 CAN 原因的 Stop 未确认 | `Unknown` |
+| 用户 Stop 已确认且位置仍可信 | `None`，流程转 `NotReady` |
+
+演示版只主动产生 `None`、上述五个阶段超时、`CanFault` 和 `Unknown`。不产生缺少真实依据的 `LowWater`、`OverTemperature`、`BottleRemoved`、`WaterSensorInvalid`、`PowderSensorInvalid`、`TemperatureSensorInvalid`、`NetworkLost`，也不额外区分 `PowderMotorFault`；后续接入真实传感器时再扩展。
+
 ## 3. 初始化与流程状态机
 
 ```text
@@ -102,6 +122,13 @@ Stop / fault / timeout -> Cancel remaining stages -> Stop handling -> Latched st
 - Ready 期间只维护同一状态：参考、零位、静止或反馈条件失效时立即转回 NotReady，因此 startEnabled 同步变为 false。
 - 屏幕快照可能已经过期，因此收到 Start intent 时仍须原子地重读当前阶段：仍为 Ready 则接受并立即离开 Ready，否则只返回 `not_ready`，不启动动作。
 
+### 不可简化的执行底线
+
+- 上电、Load JSON 和 Apply JSON 都只更新状态/配置，绝不触发找零或任何电机运动。
+- 任一阶段故障或超时立即取消剩余阶段并请求停止；停止未确认时保持 Error，不用自动进入下一阶段或 Ready 掩盖问题。
+- 复用的 Stop 始终可用，优先级高于阶段完成、切换和 Complete 计时；物理急停仍是独立安全手段。
+- 自动流程独占队列；运行中不允许手动插入动作、替换 JSON、改变坐标换算或原点。这些是执行安全约束，不增加屏幕交互复杂度。
+
 ### 非阻塞要求
 
 首次初始化、单阶段、完整流程、Complete 展示计时及阶段切换都采用 tick 状态机：
@@ -121,13 +148,14 @@ loop: Web/Stop -> UART -> CAN feedback / queue poll -> flow tick -> State heartb
 
 ## 4. 工具页面与 JSON
 
-### 页面操作
+### 最小交互
 
-- 独立“初始化找零”按钮及其脚本编辑入口；复用现有 Stop，不增加重复按钮。
-- 阶段选项：开盖、加水、加粉、关盖、混合。每阶段独立编辑、应用到 RAM、单阶段运行。
-- “完整流程运行”调用与屏幕相同的入口，只在 Ready 接受并按固定顺序运行。
-- 单阶段检查必要前提，不偷偷执行其他业务阶段；不满足条件时明确拒绝。
-- Load JSON 恢复全部阶段和参数到编辑器；应用到设备前校验，加载/应用均不启动电机。
+- 屏幕沿用现有阶段/详情显示和唯一的 Start，不增加初始化、Stop、复位、JSON 或调试按钮；初始化和异常恢复留在网页。Cloud offline 提示可以保留，不影响由 Ready 派生的 Start。
+- 网页只新增 Load / Apply / Export JSON、单一“复位/初始化”（首次或参考失效时找零，参考仍有效时只重新检查）、五个阶段的脚本编辑与单阶段运行，以及“完整流程运行”；复用现有 Stop，不增加重复按钮。
+- 不增加独立“回到起始位置”、永久保存到设备、配方平台或恢复向导。混合阶段负责升降回零，网页通过现有状态和日志说明拒绝/故障原因。
+- “完整流程运行”调用与屏幕相同的 Start 入口，只在 Ready 接受并按固定顺序运行。
+- 单阶段检查必要前提，不偷偷执行其他业务阶段；不满足条件时明确拒绝。单阶段调试不改变完整流程的唯一状态源和队列所有权规则。
+- Load JSON 恢复全部阶段和参数到编辑器；Apply 前校验并在空闲时整份替换 RAM 配置，Load / Apply 均不启动电机。
 - Export JSON 导出全部配置用于下次继续调试、备份和 Git 留档；不是执行日志。
 
 ### 同一格式，两种来源
@@ -214,8 +242,10 @@ commands 中每项就是一行原工具指令，例如：
 ## 6. 验证与待确认
 
 - 协议：CRC/截断/版本、golden bytes、重复/冲突 sequence、ACK 丢失重试、重启和屏幕离线。
-- 状态机：上电参考无效、首次找零成功/失败、Ready 与 startEnabled 始终一致、非 Ready 的 Start 被拒绝、反馈过期、零位容差边界、混合结束未回零、Complete 3 秒内无运动及每阶段超时；Stop 与完成同时到达不推进。
-- JSON：导入导出等价、内置/RAM 同语义、未知版本/非法指令/过大文件/换算不匹配拒绝；无效配置不替换原配置；重启回内置且不运动。
+- 状态机：上电参考无效、首次找零成功/失败、DemoFlowController 为唯一状态源、Ready 与 startEnabled 始终一致、非 Ready 的 Start 被拒绝、反馈过期、零位容差边界、混合结束未回零、Complete 3 秒内无运动及每阶段超时；Stop 与完成同时到达不推进。
+- 快照：非 Error 阶段始终 `error=None`，V1 只产生约定的最小错误集合；无真实传感器时两个 condition 均为 None；`cloudConnected=false` 不覆盖 Ready 派生的 startEnabled。
+- JSON：导入导出等价、内置/RAM 同语义、未知版本/非法指令/过大文件/换算不匹配拒绝；无效配置不替换原配置；上电、Load、Apply 和重启回内置均不运动。
+- 交互：屏幕只保留现有 Start；网页只出现约定的最小操作，不新增独立归位、重复 Stop、永久保存或恢复向导。
 - 调度：await/wait/长动作/阶段切换时网页、CAN 和 UART 持续响应；原停止入口仍有效。
 - 实机：确认首次找零顺序/干涉、混合阶段升降回零、承重保持、单位换算和实际到位；先低速逐轴，再单阶段，最后完整演示。自动测试不能代替机械验收。
 - Review：代码逻辑与 QA 分别检查；独立 reviewer 不可用时说明自审限制。
