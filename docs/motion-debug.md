@@ -2,6 +2,8 @@
 
 > 本文保留基础 API 与控制器行为说明。最新工作台、Wi-Fi 集成、扩展命令范围和交付流程见 [工作台交付说明](motion-workbench-release.md)；下文旧页面布局说明已被新版替代。
 
+DISPLAY 编译分支的“屏幕流程”、JSON 与 `/api/demo*` 接口见 [演示操作说明](motion-display-demo.md)。其运行期间现有 Stop 保持可用，手动动作和配置修改受流程所有权约束。
+
 面向 ESP32-S3 运动板卡的单电机台架工具。板卡开启 WiFi 软 AP，提供一个自包含的
 调试页面，并通过 `motion::MotorControl` 经 CAN 把 HTTP 命令转发给电机驱动。
 

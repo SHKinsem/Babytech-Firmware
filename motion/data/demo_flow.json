@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "unconfigured-not-for-feeding",
+  "display": {"baby_name": "DEMO", "formula_brand": "NOT FOR FEEDING", "water_ml": 180, "temperature_c": 45},
+  "axes": [],
+  "initialization": {"timeout_ms": 60000, "zero_axes": [], "commands": []},
+  "stages": [
+    {"id": "open_cap", "timeout_ms": 120000, "commands": []},
+    {"id": "water", "timeout_ms": 30000, "commands": []},
+    {"id": "powder", "timeout_ms": 15000, "commands": []},
+    {"id": "close_cap", "timeout_ms": 60000, "commands": []},
+    {"id": "mix", "timeout_ms": 60000, "commands": []}
+  ]
+}

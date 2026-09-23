@@ -650,6 +650,7 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     // software supervisor: this clears MotorControl's volatile tracking and
     // sends nothing on CAN.
     program_ = scratch;
+    strictHome_ = false;
     motor_.clearControlState();
     repeat_ = static_cast<uint32_t>(repeat);
     runId_++;
@@ -661,6 +662,19 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     iteration_ = 0;
     lastRawAt_ = 0;
     errorLine_ = 0;
+    setMessage("running");
+    return Result{202, "queue_started"};
+}
+
+Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
+    if (active() || motor_.operationBusy()) return Result{409, "queue_busy"};
+    if (!motor_.ready() || motor_.hasFault()) return Result{503, "can_unavailable"};
+    if (!program.count || program.hasRaw) return Result{400, "invalid_demo_program"};
+    program_ = program;
+    strictHome_ = true;
+    repeat_ = 1; ++runId_; state_ = QueueState::Running;
+    phase_ = kPhaseIdle; phaseAt_ = now; deadlineAt_ = 0;
+    stepIndex_ = 0; iteration_ = 0; lastRawAt_ = 0; errorLine_ = 0;
     setMessage("running");
     return Result{202, "queue_started"};
 }
@@ -815,7 +829,7 @@ bool CommandQueue::encodeAndSend(const QueueStep& step) {
             frame[length++] = static_cast<uint8_t>((magnitude >> 16) & 0xFF);
             frame[length++] = static_cast<uint8_t>((magnitude >> 8) & 0xFF);
             frame[length++] = static_cast<uint8_t>(magnitude & 0xFF);
-            frame[length++] = 2;  // relative to the current position
+            frame[length++] = step.absolute ? 1 : 2;
             frame[length++] = 0;
             frame[length++] = static_cast<uint8_t>((step.currentMa >> 8) & 0xFF);
             frame[length++] = static_cast<uint8_t>(step.currentMa & 0xFF);
@@ -960,6 +974,9 @@ void CommandQueue::observeMotion(uint32_t now) {
             fail(now, code == 0xE2 ? "driver_rejected" : "driver_command_error", step->line);
             return;
         }
+        if (strictHome_ && home && (code == 0x12 || code == 0x22)) {
+            fail(now, "home_no_motion", step->line); return;
+        }
         if (code == 2 || code == 0x9F || (home && (code == 0x12 || code == 0x22))) {
             if (!accepted_) { accepted_ = true; phaseAt_ = n.queueAckMs; }
             if (home && code != 2 && !homeComplete_) {
@@ -975,7 +992,7 @@ void CommandQueue::observeMotion(uint32_t now) {
         // Fast homing may finish before any running sample is captured.
         // After a 1 s startup grace, accept a fresh idle/no-failure status.
         // Latch its first timestamp so later idle polls do not reset settling.
-        if (accepted_ && !n.queueHomeComplete && n.homeFlagsValid &&
+        if (!strictHome_ && accepted_ && !n.queueHomeComplete && n.homeFlagsValid &&
             newer(n.homeFlagsMs, phaseAt_) && uint32_t(n.homeFlagsMs - phaseAt_) >= 1000 &&
             uint32_t(now - n.homeFlagsMs) < 1000 && !(n.homeFlags & 0x3C)) {
             n.queueHomeComplete = true;
@@ -1012,7 +1029,7 @@ void CommandQueue::observeMotion(uint32_t now) {
             (n.velocityTenths < -5 || n.velocityTenths > 5) ? "home_wait_stationary" :
             "home_confirming_stationary");
     }
-    if (!motor_.autoQueriesEnabled()) {
+    if (!motor_.autoQueriesEnabled() && !strictHome_) {
         setMessage("automatic_queries_paused");
         return;
     }

@@ -45,6 +45,9 @@ public:
     // is still going, 503 when the bus cannot transmit at all.
     Result start(const char* text, size_t length, long repeat,
                  const QueueRotationSource& rotation, uint32_t now);
+    // Prevalidated demo scripts preserve feedback and require positive homing
+    // proof; the ordinary direct queue retains its existing behavior.
+    Result startDemo(const QueueProgram& program, uint32_t now);
 
     // Cancels the run (if any) and stops everything: broadcast 9C then the FE
     // broadcast stop. Returns 202 when a run was cancelled, 200 when idle.
@@ -84,6 +87,7 @@ private:
     uint8_t queryIndex_ = 0, doneSamples_ = 0;
     uint32_t homeProofAt_ = 0;
     bool accepted_ = false, homeSeenRunning_ = false, homeComplete_ = false;
+    bool strictHome_ = false;
 
     void advance(uint32_t now);
     void finish(QueueState state, const char* message);

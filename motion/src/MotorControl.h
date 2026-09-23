@@ -148,6 +148,11 @@ public:
         uint32_t positionAge=UINT32_MAX, velocityAge=UINT32_MAX, currentAge=UINT32_MAX;
     };
     Snapshot snapshot(uint8_t id) const;
+    // Read-only demo supervisor access; does not acquire manual job ownership.
+    void demoProbe(uint8_t id, uint8_t field);
+    void demoWatch(uint8_t id, bool enabled) { demoWatched_[id] = enabled; }
+    bool demoDriverFault(uint8_t id) const;
+    bool demoFlags(uint8_t id, uint8_t& flags, uint32_t& age) const;
     bool operationBusy() const;
     bool stopping() const { return anyStopPending(); }
     bool hasFault() const { return faultTag_ && strcmp(faultTag_, "none") != 0; }
@@ -172,6 +177,7 @@ public:
 
 private:
     friend class CommandQueue;
+    bool demoWatched_[256] = {};
     uint8_t queueObserveId_ = 0;
     struct MoveFailure {
         uint8_t id = 0;
@@ -202,6 +208,7 @@ private:
     enum : uint16_t { kNodeCount = 256, kMaxQueryTargets = 4 };
 
     struct NodeState {
+        bool demoRejected = false;
         bool seenEver = false;
         uint32_t lastSeenMs = 0;
 

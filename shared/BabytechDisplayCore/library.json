@@ -1,0 +1,8 @@
+{
+  "name": "BabytechDisplayCore",
+  "version": "0.1.0",
+  "description": "Arduino-independent display state and intent contract shared by Babytech controller and display firmware.",
+  "build": {
+    "includeDir": "src"
+  }
+}

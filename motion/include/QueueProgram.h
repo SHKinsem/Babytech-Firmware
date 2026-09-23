@@ -82,6 +82,7 @@ struct QueueStep {
     uint16_t line = 0;
     uint8_t id = 0;
     bool awaitCompletion = false;  // explicit trailing await on move/home only
+    bool absolute = false; // resolved software-zero target, demo adapter only
 
     // move: resolved at validation, 0.1 degree, the sign carries the direction.
     int32_t distanceTenths = 0;

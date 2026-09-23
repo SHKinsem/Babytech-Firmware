@@ -1,0 +1,10 @@
+.demo-workbench{display:grid;grid-template-columns:minmax(220px,.8fr) minmax(260px,1fr) minmax(330px,1.4fr);flex:1;min-height:0;overflow:hidden}
+.demo-workbench>.panel{padding:18px;min-width:0;overflow:auto;border-right:1px solid var(--line,#e4e7ed);display:flex;flex-direction:column;gap:12px}
+.demo-workbench p{font-size:12px;line-height:1.6;color:#586477;margin:0}
+.demo-workbench textarea{width:100%;min-height:140px;flex:1;resize:vertical;border:1px solid #d6dbe5;border-radius:5px;padding:10px;font:12px/1.6 ui-monospace,monospace;background:#fafbfe;color:#1d2943;box-sizing:border-box}
+.demo-workbench label{font-size:13px;display:flex;align-items:center;gap:12px}
+.demo-workbench select{flex:1}
+.demo-actions{display:flex;gap:6px;flex-wrap:wrap}
+.demo-workbench dl{display:grid;grid-template-columns:80px 1fr;gap:8px;font-size:12px;margin:0}
+.demo-workbench dd{margin:0;overflow-wrap:anywhere}
+.demo-status>.button{width:100%}

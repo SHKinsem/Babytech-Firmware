@@ -273,3 +273,5 @@ body.device-body {min-width:0;}
 
 .device-app .toolbar {flex-wrap:wrap;height:auto;min-height:72px;row-gap:8px;padding-top:10px;padding-bottom:10px;}
 .device-app .toolbar__right {flex-wrap:wrap;gap:10px;}
+.device-app {grid-template-rows:auto 48px minmax(0,1fr) auto;}
+.device-app:has(> .config-result) {grid-template-rows:auto 48px auto minmax(0,1fr) auto;}

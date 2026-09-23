@@ -4,7 +4,7 @@
 
 Milestone：V1 流程演示。更新日期：2026-09-23。
 
-状态：开发约定，尚未实现。本文不把规划描述为现有功能，不代表真实出料、温控或机械安全已验收。
+状态：软件接入已实现，机械脚本和双板实机验收待完成。操作、实际 JSON/API 与验证边界见 [演示操作说明](motion-display-demo.md)。本文保留已确认设计及验收目标，不代表真实出料、温控或机械安全已验收。
 
 ## 1. 范围与已有基础
 
@@ -44,7 +44,7 @@ Motion ESP32 ---- non-blocking flow ---- existing command queue ---- CAN motors
 
 ### 显示协议契约
 
-权威源是完整项目 `Embeded_System/libraries/BabytechDisplayCore/src/display_protocol.*`、`display_model.h` 和 `Embeded_System/DisplayController/src/controller_link.*`。实施时固定其来源提交，以最小协议源文件复用并建立 golden frame 测试，不手工另造字段布局。
+权威源是完整项目 `Embeded_System/libraries/BabytechDisplayCore/src/display_protocol.*`、`display_model.h` 和 `Embeded_System/DisplayController/src/controller_link.*`。当前已复制核心与测试到 `shared/BabytechDisplayCore`，来源固定为产品仓库 `V1-device@40cfcde`（协议最近修改 `2337b2f`），并建立 golden intent 测试。屏幕 UI 与驱动仍在产品仓库。
 
 | 内容 | 约定 |
 | --- | --- |
@@ -108,6 +108,8 @@ Stop / fault / timeout -> Cancel remaining stages -> Stop handling -> Latched st
 - 后续每轮不重新碰撞找零，也不增加独立的起始归位阶段。只有首次初始化成功并处于 Ready 才接受 Start。
 - 初始化结束以及混合结束时，在配置容差内且静止才算处于软件零位。缺失/过期反馈不得当作在零位；混合阶段本身负责让升降轴回零后再混合。
 - 当前工具 `move` 为相对实际位置，不可用 `move ... 0` 冒充绝对归零。实施时核对现有绝对定位/位置反馈能力，明确工具原点和软件零点关系；没有现成入口时只补薄适配。不在未验证情况下硬套 home 模式代替软件归位。
+- 已实现的薄适配是演示专用 `zero ID RPM ACCEL DECEL CURRENT`：以初始化完成时记录的驱动坐标为绝对目标，使用既有 CD 编码和 await；不改变普通队列 move 的相对语义。
+- 初始化末尾设置并读回各轴易失掉电标志 `50 01` / `3A.bit7`，标志恢复 0 时撤销参考。此步骤不运动；需实机确认各型号支持该标志。首次找零须有运行到完成状态或明确 9F 完成应答，ACK 加空闲、12/22 未运动均不建立零点。
 - 混合脚本完成、所需轴仍在软件零位、反馈新鲜且静止后才能进入 Complete。没有独立“回到起始位置”动作；Complete 到 Ready 的 3 秒仅用于屏幕展示，不发送电机指令。
 - Motion 或驱动器重启、坐标换算/轴配置变化、改变原点的手动或 raw 操作、检测到位置跳变或其他坐标不可信情况会清除参考。正常完成、屏幕重启、网络断开以及位置仍可信的已确认 Stop 不清除参考。
 - Stop、故障或阶段超时先退出运行状态并锁存结果。复位后参考仍有效、所需轴在零位且反馈新鲜静止时可恢复 Ready；参考不可信才要求重新初始化找零，不自动续跑中断流程。
@@ -180,6 +182,10 @@ loop: Web/Stop -> UART -> CAN feedback / queue poll -> flow tick -> State heartb
 {
   "schema_version": 1,
   "name": "v1-demo",
+  "axes": [
+    {"motor_id": 1, "rotation_distance_mm": 0},
+    {"motor_id": 3, "rotation_distance_mm": 0}
+  ],
   "display": {
     "baby_name": "DEMO",
     "formula_brand": "NOT FOR FEEDING",
@@ -221,8 +227,8 @@ commands 中每项就是一行原工具指令，例如：
 
 - 新配置层读取 JSON、检查阶段、超时及命令，再交现有指令解析器，不重新实现电机协议。
 - 初始化/五阶段的业务 ID 与顺序固定，屏幕映射在固件中维护；重复/缺少/未知阶段不得启用。
-- 最终 schema 需记录或校验 rotationDistance 等影响指令含义的配置；与设备实际参数不匹配则拒绝执行，不静默换算。字段从现有工具配置提取，不另造一套参数含义。
-- 保持执行器既有容量限制（当前单队列 64 动作、8192 字节），另限定总 JSON 大小和超时范围。配置解析仅在空闲进行，不影响运行中的停止监督。
+- `axes` 列出所有参与执行与停稳检查的电机，最多 5 个；`rotation_distance_mm` 对照该 ID 板端 rotationDistance 校验，不匹配拒绝执行。0 表示板端未配置换算，不是 0 mm/rev 的有效毫米换算。
+- 保持执行器既有容量限制（单队列 64 动作、8192 字节），总 JSON 限制 16384 bytes，阶段超时 100–3600000 ms。配置解析仅在空闲进行；错误配置不替换已应用配置。
 - 自动演示只允许能够定义结束条件的指令组合；raw CAN 和无限持续输出留在原手动工具，不默认进入完整流程。
 
 ## 5. 实施拆分
@@ -238,6 +244,8 @@ commands 中每项就是一行原工具指令，例如：
 建议文件：motion 中新增 DisplayLink、DemoFlowController、DemoFlowConfig；main.cpp 只接轮询；platformio.ini 增加宏/嵌入资源；motion/data/demo_flow.json 提供内置配置；网页源文件增加最小流程控件并重建内嵌页面。已有队列只补必要接口。文档同步 motor-queue、motion-debug、构建说明，不能把新功能写成旧功能已具备。
 
 初始内置配置应明确未配置或禁止运动，不能附带未经验收的通用机械脚本。每个子任务验证完成后按一笔逻辑提交组织，实际提交需授权。
+
+本轮按用户授权将软件步骤 1–4 和相关测试/文档合为一笔提交。步骤 5 的真实机械参数、烧录、串口线束和双板实机验收仍待现场完成；默认内置配置明确不可运行。
 
 ## 6. 验证与待确认
 

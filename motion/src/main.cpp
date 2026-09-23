@@ -26,12 +26,18 @@
 #include "WiFiSetup.h"
 
 #include "board_config.h"
+#include "UartPeer.h"
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#include "DemoMotorExecutor.h"
+#include "DisplayLinkCore.h"
+#endif
 
 // Single self-contained page embedded by the build (board_build.embed_txtfiles).
 // The blob is NUL terminated; subtract that byte when sending.
 extern "C" {
 extern const uint8_t indexHtmlStart[] asm("_binary_data_index_html_start");
 extern const uint8_t indexHtmlEnd[] asm("_binary_data_index_html_end");
+extern const uint8_t demoJsonStart[] asm("_binary_data_demo_flow_json_start");
 }
 
 namespace {
@@ -46,7 +52,8 @@ babytech::v2::Endpoint endpoint(boardMotion);
 WebServer server(kHttpPort);
 // The queue is a board operation like any other: while it runs, Wi-Fi scanning
 // and the scale/config endpoints stay blocked.
-bool motionBusy() { return endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
+bool demoBusy();
+bool motionBusy() { return demoBusy() || endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
 WiFiSetup wifiSetup(server, motionBusy);
 uint32_t lastBrainByteAt = 0;
 int scaleDoutPin = kScaleDoutPin;
@@ -297,6 +304,16 @@ public:
 };
 BoardRotationSource boardRotation;
 
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+motion::DemoMotorExecutor demoExecutor(motor, queue, boardRotation, []() { return !wifiSetup.busy(); });
+motion::DemoFlowController demo(demoExecutor);
+motion::DisplayLinkCore displayLink(demo);
+String demoConfigJson;
+bool demoBusy() { return demo.busy(); }
+#else
+bool demoBusy() { return false; }
+#endif
+
 constexpr char kScaleIoNamespace[] = "scale-io";
 constexpr char kScaleIoPinsKey[] = "pins";
 
@@ -530,11 +547,16 @@ bool argDecimal(const char* name, double& out) {
 // Brain link: v2 shared endpoint, bounded receive and event servicing.
 // ---------------------------------------------------------------------------
 void sendFrame(const babytech::v2::Frame& frame) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_BRAIN
     uint8_t bytes[babytech::v2::kMaxFrameSize];
     const size_t n=babytech::v2::encode(frame,bytes,sizeof(bytes));
     if (n) brain.write(bytes,n);
+#else
+    (void)frame;
+#endif
 }
 void serviceBrainLink() {
+#if MOTION_UART_PEER == MOTION_UART_PEER_BRAIN
     using namespace babytech::v2;
     if (millis()-lastBrainByteAt>kByteTimeoutMs) parser.reset();
     boardMotion.setRadioBusy(wifiSetup.busy() || queue.active());
@@ -548,7 +570,98 @@ void serviceBrainLink() {
     }
     Frame event;
     for (uint8_t i=0;i<2 && endpoint.tick(millis(),event);++i) sendFrame(event);
+#else
+    uint8_t bytes[babytech::display::kDisplayMaxFrameSize];
+    for (size_t count = 0; count < kLinkBytesPerPass && brain.available() > 0; ++count) {
+        const auto n = displayLink.receive(uint8_t(brain.read()), millis(), bytes, sizeof(bytes));
+        if (n) brain.write(bytes, n);
+    }
+    const auto n = displayLink.state(millis(), bytes, sizeof(bytes));
+    if (n) brain.write(bytes, n);
+#endif
 }
+
+bool demoManualMutation() {
+    if (demoBusy()) { sendError(409, F("demo_busy")); return false; }
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    demo.invalidate();
+#endif
+    return true;
+}
+
+// Stop remains reachable in every phase, including gaps between scripts.
+bool stopDemoIfOwned() {
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    if (demo.busy() || demo.referenceValid()) {
+        demo.stop(millis());
+        sendJson(202, F("{\"ok\":true,\"message\":\"stop_requested\"}"));
+        return true;
+    }
+#endif
+    return false;
+}
+
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+String demoStatusJson() {
+    String s = "{\"available\":true,\"stage\":\"";
+    s += babytech::display::displayStageKey(demo.stage());
+    s += "\",\"error\":\""; s += babytech::display::displayErrorKey(demo.error());
+    s += "\",\"reason\":\""; s += demo.reason();
+    s += "\",\"startEnabled\":"; s += demo.startEnabled() ? "true" : "false";
+    s += ",\"busy\":"; s += demo.busy() ? "true" : "false";
+    s += ",\"initializing\":"; s += demo.initializing() ? "true" : "false";
+    s += ",\"referenceValid\":"; s += demo.referenceValid() ? "true" : "false";
+    s += ",\"configured\":"; s += demo.config().configured ? "true" : "false";
+    s += '}'; return s;
+}
+bool applyDemoJson(const String& json, std::string& error) {
+    motion::DemoConfig candidate;
+    if (!motion::parseDemoConfig(json.c_str(), json.length(), candidate, error)) return false;
+    if (!motion::demoRotationMatches(candidate, boardRotation)) { error = "rotation_distance_mismatch"; return false; }
+    if (!demo.apply(std::move(candidate))) { error = "demo_busy"; return false; }
+    demoConfigJson = json;
+    demoExecutor.configure(demo.config());
+    return true;
+}
+void handleDemoConfig() {
+    if (demo.busy() || !demoExecutor.available() || wifiSetup.busy()) { sendError(409, F("demo_busy")); return; }
+    std::string error;
+    if (!applyDemoJson(server.arg("json"), error)) {
+        String body = "{\"error\":\""; body += error.c_str(); body += "\"}";
+        sendJson(400, body); return;
+    }
+    sendJson(200, demoStatusJson());
+}
+void handleDemoAction() {
+    if (wifiSetup.busy() || !motion::demoRotationMatches(demo.config(), boardRotation)) {
+        sendError(409, F("configuration_or_wifi_busy")); return;
+    }
+    const String action = server.arg("action");
+    bool accepted = false;
+    if (action == "initialize") accepted = demo.initialize(millis());
+    else if (action == "start") accepted = demo.start(millis());
+    else if (action == "stage") {
+        const String id = server.arg("stage");
+        for (uint8_t i = 0; i < 5; ++i) if (id == motion::kDemoStageIds[i]) accepted = demo.single(i, millis());
+    }
+    if (!accepted) { sendError(409, F("not_ready")); return; }
+    sendJson(202, demoStatusJson());
+}
+void pollDemo() {
+    demoExecutor.poll(millis());
+    demo.tick(millis());
+    static babytech::display::DisplayStage previous = babytech::display::DisplayStage::Unknown;
+    static const char* previousReason = nullptr;
+    if (previous != demo.stage() || previousReason != demo.reason()) {
+        debugLog.addf(millis(), "info", "demo.state", "stage=%s error=%s reason=%s",
+            babytech::display::displayStageKey(demo.stage()),
+            babytech::display::displayErrorKey(demo.error()), demo.reason());
+        previous = demo.stage(); previousReason = demo.reason();
+    }
+}
+#else
+void pollDemo() {}
+#endif
 
 // ---------------------------------------------------------------------------
 // HTTP handlers
@@ -683,6 +796,7 @@ void handleScaleConfig() {
 }
 
 void handleEnable() {
+    if (!demoManualMutation()) return;
     long id = 0;
     if (!argInteger("id", id) || id < 1 || id > 255) {
         sendError(400, F("id must be an integer 1..255"));
@@ -714,6 +828,7 @@ void handleEnable() {
 }
 
 void handleMove() {
+    if (!demoManualMutation()) return;
     if (queue.active()) { sendError(409, F("queue_busy")); return; }
     if (endpoint.busy()) { sendError(409, F("uart_operation_active")); return; }
     if (wifiSetup.busy()) {
@@ -787,6 +902,7 @@ void handleStop() {
     }
     // An authorised stop cancels a running queue first and always stays
     // available, even when the queue software already failed.
+    if (stopDemoIfOwned()) return;
     if (queue.active()) queue.cancel("stopped");
     const uint8_t target = static_cast<uint8_t>(id);
     sendResult("stop", id, motor.stop(target));
@@ -800,6 +916,10 @@ void handleStop() {
 // it never claims the shaft physically stopped - clearing internal bookkeeping
 // is not evidence of that. GET cannot reach this handler.
 void handleControlReset() {
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    demo.invalidate();
+    if (demo.busy()) demo.stop(millis());
+#endif
     // First record what is being cleared: without this the reset itself would
     // erase the only evidence of the state it repaired.
     debugLog.addf(millis(), "warn", "control.reset",
@@ -845,6 +965,7 @@ void handleControlReset() {
 }
 
 void handleEnableAll() {
+    if (!demoManualMutation()) return;
     long enabled = 0;
     if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
         sendError(400, F("enabled must be 0 or 1")); return;
@@ -862,6 +983,7 @@ void handleEnableAll() {
 }
 
 void handleStopAll() {
+    if (stopDemoIfOwned()) return;
     const auto result = queue.cancel("stopped");
     sendResult("stop-all", -1, result.code < 300 ? motion::Result{202,"queued"} : result);
 }
@@ -887,6 +1009,8 @@ void handleCommand() {
     // running program.
     const bool stopLike = kind==motion::CommandKind::Stop || kind==motion::CommandKind::Interrupt ||
         (kind==motion::CommandKind::Enable && bytes[3]==0);
+    if (stopLike && stopDemoIfOwned()) return;
+    if (!stopLike && kind != motion::CommandKind::Read && !demoManualMutation()) return;
     if (queue.active()) {
         // Reads stay available while a queue runs: only mutations need the
         // single-owner rule.
@@ -933,6 +1057,7 @@ void loadDebugLimits() {
 }
 
 void handleLimits() {
+    if (!demoManualMutation()) return;
     if (endpoint.busy() || motor.operationBusy() || queue.active()) {
         sendError(409, F("limits_busy")); return;
     }
@@ -1013,6 +1138,7 @@ void handleMotorDistance() {
     // A running queue has already resolved its mm steps: the distances are
     // immutable for that run, so the write is refused instead of taking effect
     // half way through.
+    if (!demoManualMutation()) return;
     if (queue.active() || endpoint.busy() || motor.operationBusy()) {
         sendError(409, F("distance_busy"));
         return;
@@ -1051,6 +1177,7 @@ void sendQueueResult(const motion::Result& result, bool started) {
 }
 
 void handleQueueStart() {
+    if (!demoManualMutation()) return;
     // The queue is a command sender: a fault, a pending stop, a busy UART/Wi-Fi
     // or an unloaded limit set must not refuse a program the operator wrote. Only
     // a queue that is already running is refused (one program owns the order of
@@ -1081,6 +1208,7 @@ void handleQueueStart() {
 }
 
 void handleQueueCancel() {
+    if (stopDemoIfOwned()) return;
     // Cancelling also stops everything, and it stays available even when the
     // queue itself already failed: an authorised stop must keep working.
     sendQueueResult(queue.cancel("cancelled"), false);
@@ -1102,7 +1230,8 @@ void setup() {
                   debugLog.bootId(), static_cast<int>(esp_reset_reason()));
     endpoint.begin(boot);
     brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
-    Serial.println("[uart] brain link ready on TX43/RX44 @115200");
+    Serial.printf("[uart] peer=%s TX43/RX44 @115200\n",
+        MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY ? "display-v3" : "brain-v2");
 
     loadScalePins();
     if (!powderScale.begin(makeScaleConfig(), millis())) {
@@ -1124,6 +1253,11 @@ void setup() {
 
     loadDebugLimits();
     loadRotationDistances();
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    std::string configError;
+    if (!applyDemoJson(reinterpret_cast<const char*>(demoJsonStart), configError))
+        Serial.printf("[demo] configuration rejected: %s\n", configError.c_str());
+#endif
     wifiSetup.begin();
 
     server.on("/", HTTP_GET, handleRoot);
@@ -1133,6 +1267,7 @@ void setup() {
     server.on("/api/can-debug", HTTP_GET, []() { sendJson(200, motor.canDebugJson()); });
     server.on("/api/config-result", HTTP_GET, []() { sendJson(200, motor.configJson()); });
     server.on("/api/polling", HTTP_POST, []() {
+        if (demoBusy()) { sendError(409, F("demo_busy")); return; }
         long enabled = 0;
         if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
             sendError(400, F("enabled must be 0 or 1"));
@@ -1173,6 +1308,14 @@ void setup() {
     server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
     server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);
     server.on("/api/motor-distance", HTTP_POST, handleMotorDistance);
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    server.on("/api/demo", HTTP_GET, []() { sendJson(200, demoStatusJson()); });
+    server.on("/api/demo/config", HTTP_GET, []() { sendJson(200, demoConfigJson); });
+    server.on("/api/demo/config", HTTP_POST, handleDemoConfig);
+    server.on("/api/demo/action", HTTP_POST, handleDemoAction);
+#else
+    server.on("/api/demo", HTTP_GET, []() { sendJson(200, F("{\"available\":false}")); });
+#endif
     server.onNotFound(handleNotFound);
     server.begin();
     debugLog.add(millis(), "info", "http.ready", "port=80 no_motion_on_boot");
@@ -1189,12 +1332,14 @@ void loop() {
     powderScale.poll(millis());
     motor.poll();
     // The queue drives one supervised action per poll and never blocks.
+    server.handleClient();
+    pollDemo();
     queue.poll(millis());
     serviceBrainLink();
-    server.handleClient();
     wifiSetup.poll();
     powderScale.poll(millis());
     motor.poll();
+    pollDemo();
     queue.poll(millis());
     serviceBrainLink();
     delay(1);

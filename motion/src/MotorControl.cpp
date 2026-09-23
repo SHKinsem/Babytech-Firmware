@@ -250,7 +250,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
     // claim on its own.
     if (function == kFrameEnable || function == kFrameMove ||
         function == kFrameDirect || function == kFrameDirectLimit ||
-        function == kFrameStop || function == kFrameHome) {
+        function == kFrameStop || function == kFrameHome || function == 0x50) {
         if (frame.length != 3 || frame.data[2] != kProtocolChecksum) return;
         handleAck(id, function, frame.data[1], now);
         return;
@@ -328,6 +328,7 @@ void MotorControl::handleAck(
     uint8_t id, uint8_t function, uint8_t status, uint32_t now) {
     NodeState& node = nodes_[id];
     const AckStatus ack = classifyAck(status);
+    if (status == 0xE2 || status == 0xEE) node.demoRejected = true;
     if (id == queueObserveId_ && function == node.queueExpectedFunction) {
         // Unrelated late ACKs must not replace this action's evidence. Preserve
         // rejection until consumed even if another ACK arrives in the RX batch.
@@ -513,6 +514,7 @@ bool MotorControl::faultAppliesTo(uint8_t id) const {
 
 bool MotorControl::nodeOfInterest(uint8_t id) const {
     if (id == 0) return false;
+    if (demoWatched_[id]) return true;
     if (id == selectedId_ || id == experimentId_ || id == queueObserveId_) return true;
     if (job_.active && job_.id == id) return true;
     if (home_.active && homeId_ == id) return true;
@@ -1833,6 +1835,30 @@ String MotorControl::statusJson(uint8_t id) const {
     json += "],\"blockerCount\":"; json += static_cast<unsigned int>(blockerCount);
     json += "}}";
     return json;
+}
+
+void MotorControl::demoProbe(uint8_t id, uint8_t field) {
+    if (!id || !canReady()) return;
+    const X42sSysParam fields[] = {X42sSysParam::Cpos, X42sSysParam::Vel,
+        X42sSysParam::Flag, X42sSysParam::Org};
+    can_.probeReadSysParams(id, fields[field % 4]);
+    can_.clearTransmissionError();
+}
+
+bool MotorControl::demoDriverFault(uint8_t id) const {
+    const auto& n = nodes_[id];
+    return faultAppliesTo(id) ||
+        n.demoRejected ||
+        (n.flagsValid && (n.flags & 0x08)) || // stall protection; collision detection alone is not a fault
+        (n.homeFlagsValid && (n.homeFlags & 0x38)) ||
+        n.queueAckStatus == 0xE2 || n.queueAckStatus == 0xEE;
+}
+
+bool MotorControl::demoFlags(uint8_t id, uint8_t& flags, uint32_t& age) const {
+    const auto& n = nodes_[id];
+    age = n.flagsValid ? millis() - n.flagsMs : UINT32_MAX;
+    flags = n.flags;
+    return n.flagsValid && age <= kFeedbackFreshMs;
 }
 
 MotorControl::Snapshot MotorControl::snapshot(uint8_t id) const {
