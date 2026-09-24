@@ -26,7 +26,7 @@ Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，�
 6. Ready 时用屏幕 Start 或网页“完整流程运行”：开盖 → 加水 → 加粉 → 关盖 → 混合（脚本内升降回软件零点）→ Complete 保持 3 秒 → Ready。没有额外回起始位置阶段；展示计时不发送运动指令。下次 Start 前操作者自行换瓶。
 7. 任何阶段可用顶部“全部停止”。取消剩余脚本并发送广播回零中断/停止；新鲜静止反馈才证明停止，超过 3 秒仍未确认则 Error。Error 由显式复位解除，参考失效时重新初始化，不续跑旧动作。
 
-[最新台架草稿](../motion/data/demo_flow.latest-bench.draft.json)与当前内置配置内容相同。两者都含当前 `main` 尚不识别的 `sync` 指令，暂不能整份 Apply；轴 1 的 68.2 mm 回程仅为位移账面平衡，尚未实机验证。
+当前内置配置含 `main` 尚不识别的 `sync` 指令，暂不能整份 Apply；轴 1 的 68.2 mm 回程仅为位移账面平衡，尚未实机验证。
 
 屏幕只保留原 Start 和状态显示。Motion `startEnabled` 由 Ready 派生，Cloud offline 提示允许保留。宝宝、品牌、水量、温度为演示数据，`thermalSimulated=true`，两个条件字段均为 None；产物不用于喂养。
 
