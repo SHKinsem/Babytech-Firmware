@@ -14,6 +14,8 @@
 
 ## 协作者开始调试
 
+设备板后续重构见 [目标架构与分阶段实施计划](docs/device-architecture-plan.md)、[执行路线](docs/device-control-refactor-execution.md) 和 [重构前行为基线](docs/device-control-baseline.md)。目标架构包含统一输入层、OOP 电机与指令对象、程序编排、调度伪代码和验收清单，仍是待实施设计，不代表当前固件能力；领域术语见 [CONTEXT.md](CONTEXT.md)。
+
 确认工作区干净后更新主线，再建立自己的调试分支：
 
 ```bash

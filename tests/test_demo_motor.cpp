@@ -3,6 +3,7 @@
 #include <cassert>
 #include <iostream>
 #include <cstring>
+#include <vector>
 using namespace motion;
 using namespace fakecan;
 struct Rotation : QueueRotationSource {
@@ -17,22 +18,32 @@ static void test_demo_polling_does_not_starve_queue_await() {
     struct Millimetres : QueueRotationSource {
         bool rotationMm(uint8_t, double& mm) const override { mm=10; return true; }
     } rotation;
-    assert(motor.begin(4,5,500000)); motor.setAutoQueriesEnabled(false);
+    assert(motor.begin(4,5,500000));
     CanQueryScheduler::Config budget; budget.queriesPerSecond=30; budget.gapMs=33;
     assert(motor.queries().configure(budget));
     DemoConfig config;
     for (uint8_t id=1;id<=5;++id) config.axes.push_back({id,10,10,false});
     DemoMotorExecutor executor(motor,queue,rotation); executor.configure(config);
+    motor.watch(6); // An open Page monitors another node while all five Demo axes poll.
     const char* program="enable 1\nmove 1 -5 mm 300 300 300 200 await\nhome 1 2\n";
     assert(queue.start(program,std::strlen(program),1,rotation,0).code==202);
-    bool moved=false, targetRead=false, homeSent=false;
+    bool moved=false, targetRead=false, homeSent=false, pageRead=false;
+    std::vector<uint32_t> queryTimes;
     size_t seen=0;
     for (uint32_t now=1;now<5000;++now) {
-        setMillis(now); motor.poll(false); executor.poll(now); queue.poll(now);
+        setMillis(now);
+        if (now%500==0) motor.watch(6); // Renew the Page lease as a live page does.
+        motor.poll(false); executor.poll(now); queue.poll(now);
         motor.dispatchQueries();
         while (seen<capturedTX.size()) {
-            const auto frame=capturedTX[seen++];
+            const auto frame=capturedTX[seen];
             const uint8_t id=uint8_t(frame.identifier>>8), op=frame.data[0];
+            if (frame.length==2 && frame.data[1]==0x6B && CanQueryScheduler::supported(op)) {
+                if (!queryTimes.empty()) assert(now-queryTimes.back()>=34); // ceil(1000/30)
+                queryTimes.push_back(now);
+                if (id==6) pageRead=true;
+            }
+            ++seen;
             if (op==0xCD && (frame.identifier&0xFF)==0) {
                 moved=true; injectRx(makeAck(id,op,2));
             } else if (op==0x9A) {
@@ -47,18 +58,30 @@ static void test_demo_polling_does_not_starve_queue_await() {
             }
         }
     }
-    if (!targetRead || !homeSent || queue.state()!=QueueState::Done)
-        std::cerr << "demo/await: targetRead=" << targetRead << " homeSent=" << homeSent
+    if (!pageRead || !targetRead || !homeSent || queue.state()!=QueueState::Done)
+        std::cerr << "demo/await: pageRead=" << pageRead << " targetRead=" << targetRead << " homeSent=" << homeSent
                   << " " << queue.statusJson().str() << '\n';
-    assert(targetRead && homeSent && queue.state()==QueueState::Done);
-    // Demo polling must also respect the sync owner's exclusive window.
+    assert(pageRead && targetRead && homeSent && queue.state()==QueueState::Done);
+    assert(motor.queries().statistics().queries==queryTimes.size());
+    // Page and Demo demands stay live, but only Sync queries may use its window.
     motor.queries().exclusiveSync(true);
+    assert(motor.queries().demand(7,0x36,CanQueryScheduler::Sync,100,600,2,5000));
     const size_t before=capturedTX.size();
     for (uint32_t now=5000;now<5500;++now) {
-        setMillis(now); motor.poll(false); executor.poll(now); motor.dispatchQueries();
+        setMillis(now);
+        if (now%100==0) motor.watch(6);
+        motor.poll(false); executor.poll(now); motor.dispatchQueries();
+        while (seen<capturedTX.size()) {
+            const auto frame=capturedTX[seen++];
+            assert(uint8_t(frame.identifier>>8)==7 && frame.data[0]==0x36);
+            assert(now-queryTimes.back()>=34);
+            queryTimes.push_back(now);
+            injectRx(makePosition(7,0));
+        }
     }
-    assert(capturedTX.size()==before);
-    std::cout << "PASS demo polling shares budget: move await reaches home, sync excludes demo queries\n";
+    assert(capturedTX.size()>before);
+    assert(motor.queries().statistics().queries==queryTimes.size());
+    std::cout << "PASS demo and Page polling share budget: move await reaches home, Sync excludes other queries\n";
 }
 
 int main() {
