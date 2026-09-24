@@ -1,11 +1,11 @@
 #pragma once
 #include <BoardEndpoint.h>
-#include "MotorControl.h"
+#include "DeviceAPI.h"
 
 // Typed bridge: no JSON parsing and no second mechanical state machine.
 class BoardMotion : public babytech::v2::Backend {
 public:
-    explicit BoardMotion(motion::MotorControl& motor) : motor_(motor) {}
+    BoardMotion(motion::MotorControl& motor, motion::DeviceAPI& api) : motor_(motor), api_(api) {}
     void setRadioBusy(bool busy) { radioBusy_=busy; }
     bool busy() const override { return radioBusy_ || motor_.operationBusy(); }
     bool stopping() const override { return motor_.stopping(); }
@@ -20,6 +20,7 @@ public:
     size_t motorFeedback(uint8_t id,uint8_t* data,size_t capacity) const override;
 private:
     motion::MotorControl& motor_;
+    motion::DeviceAPI& api_;
     bool radioBusy_=false, moving_=false, desired_=false, stopSent_=false;
     uint8_t id_=0; uint32_t since_=0, operationAt_=0;
     bool stopTargets_[256]{};

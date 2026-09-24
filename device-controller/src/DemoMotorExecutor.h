@@ -1,14 +1,14 @@
 #pragma once
 #include "DemoFlowConfig.h"
-#include "CommandQueue.h"
+#include "DeviceAPI.h"
 #include <memory>
 
 namespace motion {
 class DemoMotorExecutor final : public DemoExecutor {
 public:
-    DemoMotorExecutor(MotorControl& motor, CommandQueue& queue, const QueueRotationSource& rotation,
+    DemoMotorExecutor(MotorControl& motor, CommandQueue& queue, DeviceAPI& api, const QueueRotationSource& rotation,
                       bool (*externalAvailable)() = nullptr)
-        : motor_(motor), queue_(queue), rotation_(rotation), externalAvailable_(externalAvailable) {}
+        : motor_(motor), queue_(queue), api_(api), rotation_(rotation), externalAvailable_(externalAvailable) {}
     void configure(const DemoConfig& config) {
         motor_.queries().release(CanQueryScheduler::Demo);
         for (unsigned id = 1; id < 256; ++id) motor_.demoWatch(static_cast<uint8_t>(id), false);
@@ -26,8 +26,7 @@ public:
             const auto id = config_->axes[markIndex_].id;
             if (!markSent_) {
                 // X manual p77: volatile 0x50 marker resets on driver reboot.
-                const uint8_t command[] = {id, 0x50, 1, 0x6B};
-                if (!motor_.queueSendLogical(command, sizeof(command))) { markerFailed_ = true; marking_ = false; return; }
+                if (!api_.requestDemoMarker(id)) { markerFailed_ = true; marking_ = false; return; }
                 markAt_ = now; markSent_ = true;
             } else {
                 uint8_t flags; uint32_t age;
@@ -69,7 +68,7 @@ public:
         std::string error;
         if (!buildDemoProgram(script, *config_, initializing, zeros, *program, error)) return false;
         postStop_ = false;
-        const bool accepted = queue_.startDemo(*program, now).code < 300;
+        const bool accepted = api_.startDemo(*program, now).code < 300;
         if (accepted && initializing) {
             armed_.fill(false); marking_ = true; markIndex_ = 0; markSent_ = false;
         }
@@ -89,12 +88,12 @@ public:
     bool stop() override {
         marking_ = false;
         stopAt_ = millis(); postStop_ = true;
-        return queue_.cancel("demo_stop").code < 300;
+        return api_.cancelProgram("demo_stop").code < 300;
     }
     bool reset() override {
         if (config_) for (const auto& axis : config_->axes)
             if (driverRestarted(axis.id)) armed_[axis.id] = false;
-        const bool sent = queue_.clearControlState().code < 300;
+        const bool sent = api_.clearControlState().code < 300;
         stopAt_ = millis(); postStop_ = true; markerFailed_ = false; marking_ = false;
         return sent;
     }
@@ -105,6 +104,7 @@ private:
     }
     MotorControl& motor_;
     CommandQueue& queue_;
+    DeviceAPI& api_;
     const QueueRotationSource& rotation_;
     bool (*externalAvailable_)() = nullptr;
     const DemoConfig* config_ = nullptr;

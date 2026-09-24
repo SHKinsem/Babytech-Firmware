@@ -2,7 +2,7 @@
 //
 // Responsibilities of this file:
 //   * brain link (BoardProtocol v2 READ/WRITE/EXEC/STOP frames) over UART1,
-//   * CAN bring-up + motor command HTTP API (delegated to motion::MotorControl),
+//   * CAN bring-up + motor command HTTP API (dispatched through motion::DeviceAPI),
 //   * WiFi soft-AP + single embedded debug page (device-controller/data/index.html).
 //
 // It sends no enable or movement command on boot. Every motion command has to
@@ -17,6 +17,7 @@
 #include <Hx711Scale.h>
 #include "QueueBoardMotion.h"
 #include "CommandQueue.h"
+#include "DeviceAPI.h"
 #include "DebugLog.h"
 #include "ProtocolGate.h"
 #include <esp_efuse.h>
@@ -49,7 +50,8 @@ babytech::v2::Parser parser;
 motion::MotorControl motor;
 motion::Hx711Scale powderScale;
 motion::CommandQueue queue(motor);
-QueueBoardMotion boardMotion(motor, queue);
+motion::DeviceAPI deviceApi(motor, queue);
+QueueBoardMotion boardMotion(motor, queue, deviceApi);
 babytech::v2::Endpoint endpoint(boardMotion);
 WebServer server(kHttpPort);
 bool safeForOta();
@@ -318,7 +320,8 @@ public:
 BoardRotationSource boardRotation;
 
 #if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
-motion::DemoMotorExecutor demoExecutor(motor, queue, boardRotation, []() { return !wifiSetup.busy(); });
+motion::DemoMotorExecutor demoExecutor(motor, queue, deviceApi, boardRotation,
+                                      []() { return !wifiSetup.busy(); });
 motion::DemoFlowController demo(demoExecutor);
 motion::DisplayLinkCore displayLink(demo);
 String demoConfigJson;
@@ -428,6 +431,10 @@ void sendError(int code, const __FlashStringHelper* message) {
     sendJson(code, body);
 }
 
+motion::Result legacyResult(const motion::DeviceReceipt& receipt) {
+    return {receipt.code, receipt.message};
+}
+
 // Result messages come from trusted firmware code, but escaping them keeps the
 // JSON valid no matter what text an ack string carries.
 String jsonEscape(const char* text) {
@@ -449,7 +456,7 @@ String jsonEscape(const char* text) {
     return out;
 }
 
-// HTTP 202 from MotorControl only means "queued on this board", never that the
+// HTTP 202 from DeviceAPI only means "queued on this board", never that the
 // drive acknowledged or finished the command. The page is told the same thing.
 void sendResult(const char* action, int id, const motion::Result& result) {
     const bool ok = result.code < 300;
@@ -849,11 +856,11 @@ void handleEnable() {
         // Disabling is an authorised stop: it takes the node back from the queue
         // before the controller action and stays available while the UART or
         // Wi-Fi owns the bus.
-        queue.cancel("stopped");
+        deviceApi.cancelProgram("stopped");
     }
     if (!enabling) cancelUartForLocalDisable();
     const uint8_t target = static_cast<uint8_t>(id);
-    sendResult("enable", id, motor.enable(target, enabling));
+    sendResult("enable", id, legacyResult(deviceApi.requestEnable(target, enabling)));
 }
 
 void handleMove() {
@@ -920,7 +927,7 @@ void handleMove() {
     request.decelRpmS = static_cast<float>(decel);
     request.currentMa = static_cast<uint16_t>(currentMa);
 
-    sendResult("move", id, motor.move(request));
+    sendResult("move", id, legacyResult(deviceApi.requestMove(request)));
 }
 
 void handleStop() {
@@ -932,9 +939,9 @@ void handleStop() {
     // An authorised stop cancels a running queue first and always stays
     // available, even when the queue software already failed.
     if (stopDemoIfOwned()) return;
-    if (queue.active()) queue.cancel("stopped");
+    if (queue.active()) deviceApi.cancelProgram("stopped");
     const uint8_t target = static_cast<uint8_t>(id);
-    sendResult("stop", id, motor.stop(target));
+    sendResult("stop", id, legacyResult(deviceApi.requestStop(target)));
 }
 
 // Operator-requested software reset of the board's volatile control ownership.
@@ -973,7 +980,7 @@ void handleControlReset() {
     // One queue reset: it cancels the run (the existing cancel path sends the
     // abort/stop once), then clears queue and controller ownership whether or not
     // that stop could actually be transmitted.
-    const motion::Result stopped = queue.clearControlState();
+    const auto stopped = deviceApi.clearControlState();
     const bool stopSent = stopped.code < 300;
     debugLog.addf(millis(), stopSent ? "warn" : "error", "control.cleared",
                   "uart_cancelled=%u stop_code=%u stop_sent=%d stop_message=%s",
@@ -1007,15 +1014,15 @@ void handleEnableAll() {
     } else {
         babytech::v2::Frame event;
         for (uint8_t i = 0; i < 2 && endpoint.cancelPending(event); ++i) sendFrame(event);
-        queue.cancel("disabled_all");
+        deviceApi.cancelProgram("disabled_all");
     }
-    sendResult("enable-all", -1, motor.broadcastEnable(enabled == 1));
+    sendResult("enable-all", -1, legacyResult(deviceApi.requestBroadcastEnable(enabled == 1)));
 }
 
 void handleStopAll() {
     if (stopDemoIfOwned()) return;
-    const auto result = queue.cancel("stopped");
-    sendResult("stop-all", -1, result.code < 300 ? motion::Result{202,"queued"} : result);
+    const auto result = deviceApi.cancelProgram("stopped");
+    sendResult("stop-all", -1, result.code < 300 ? motion::Result{202,"queued"} : legacyResult(result));
 }
 
 void handleCommand() {
@@ -1034,7 +1041,8 @@ void handleCommand() {
     }
     const auto kind=motion::validateCommand(bytes,hex.length()/2,motor.debugLimits());
     if (kind == motion::CommandKind::Invalid) {
-        sendResult("command", bytes[0], motor.command(bytes, hex.length()/2));
+        sendResult("command", bytes[0], legacyResult(deviceApi.requestRawCommand(
+            bytes, static_cast<uint8_t>(hex.length() / 2))));
         return;
     }
     // Stop, interrupt and disable are authorised cancellations: they take the
@@ -1053,7 +1061,7 @@ void handleCommand() {
         if (kind == motion::CommandKind::Read) {
             // fall through to the dispatch below
         } else if (stopLike) {
-            queue.cancel("stopped");
+            deviceApi.cancelProgram("stopped");
         } else {
             sendError(409, F("queue_busy")); return;
         }
@@ -1067,7 +1075,8 @@ void handleCommand() {
         sendError(409, F("wifi_busy")); return;
     }
     if (kind == motion::CommandKind::Enable && bytes[3] == 0) cancelUartForLocalDisable();
-    sendResult("command", bytes[0], motor.command(bytes, hex.length()/2));
+    sendResult("command", bytes[0], legacyResult(deviceApi.requestRawCommand(
+        bytes, static_cast<uint8_t>(hex.length() / 2))));
 }
 
 String limitsJson() {
@@ -1229,8 +1238,8 @@ void handleQueueStart() {
         return;
     }
     const String program = server.arg("program");
-    const motion::Result started =
-        queue.start(program.c_str(), program.length(), repeat, boardRotation, millis());
+    const auto started = deviceApi.startProgram(
+        program.c_str(), program.length(), repeat, boardRotation, millis());
     if (started.code < 300) {
         // Only a started program takes the bus over: finish any pending UART
         // record so the two owners cannot interleave. An invalid program has no
@@ -1242,14 +1251,14 @@ void handleQueueStart() {
             ++cancelled;
         }
     }
-    sendQueueResult(started, true);
+    sendQueueResult(legacyResult(started), true);
 }
 
 void handleQueueCancel() {
     if (stopDemoIfOwned()) return;
     // Cancelling also stops everything, and it stays available even when the
     // queue itself already failed: an authorised stop must keep working.
-    sendQueueResult(queue.cancel("cancelled"), false);
+    sendQueueResult(legacyResult(deviceApi.cancelProgram("cancelled")), false);
 }
 
 

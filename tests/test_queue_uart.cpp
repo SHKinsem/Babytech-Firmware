@@ -14,7 +14,7 @@ static Frame exec(uint64_t boot, uint32_t seq, uint8_t cls, uint16_t id, uint16_
 }
 static void test_disable_preempts_queue_and_preserves_validation() {
     fakecan::fakeReset(); motion::MotorControl motor; assert(motor.begin(4,5,500000));
-    motion::CommandQueue queue(motor); QueueBoardMotion backend(motor,queue);
+    motion::CommandQueue queue(motor); motion::DeviceAPI api(motor,queue); QueueBoardMotion backend(motor,queue,api);
     Endpoint endpoint(backend); endpoint.begin(9); Rotation rotation;
     const char* program="wait 1000\nenable 1";
     assert(queue.start(program,strlen(program),1,rotation,0).code==202);
@@ -39,7 +39,7 @@ static void test_disable_preempts_queue_and_preserves_validation() {
 }
 static void test_disable_other_node_preserves_cancelled_owner() {
     fakecan::fakeReset(); motion::MotorControl motor; assert(motor.begin(4,5,500000));
-    motion::CommandQueue queue(motor); QueueBoardMotion backend(motor,queue);
+    motion::CommandQueue queue(motor); motion::DeviceAPI api(motor,queue); QueueBoardMotion backend(motor,queue,api);
     Endpoint endpoint(backend); endpoint.begin(9);
     fakecan::setMillis(10); assert(motor.enable(1,true).code==202);
     fakecan::injectRx(fakecan::makeAck(1,0xF3,2));
@@ -65,7 +65,7 @@ int main() {
     test_disable_preempts_queue_and_preserves_validation();
     test_disable_other_node_preserves_cancelled_owner();
     fakecan::fakeReset();motion::MotorControl motor;assert(motor.begin(4,5,500000));
-    motion::CommandQueue queue(motor);QueueBoardMotion backend(motor,queue);
+    motion::CommandQueue queue(motor);motion::DeviceAPI api(motor,queue);QueueBoardMotion backend(motor,queue,api);
     Endpoint endpoint(backend);const uint64_t boot=0x0102030405060708ULL;endpoint.begin(boot);
     Rotation rotation;const char* program="wait 1000";
     assert(queue.start(program,strlen(program),1,rotation,0).code==202);

@@ -5,8 +5,10 @@
 using namespace babytech::v2;
 using namespace fakecan;
 struct Rig {
-    motion::MotorControl motor; BoardMotion bridge; Endpoint endpoint;
-    Rig():bridge(motor),endpoint(bridge) { fakeReset();motor.begin(4,5,500000);endpoint.begin(9); }
+    motion::MotorControl motor; motion::CommandQueue queue; motion::DeviceAPI api; BoardMotion bridge; Endpoint endpoint;
+    Rig():queue(motor),api(motor,queue),bridge(motor,api),endpoint(bridge) {
+        fakeReset();motor.begin(4,5,500000);endpoint.begin(9);
+    }
     void feedback(uint32_t now,int32_t pos,int32_t speed=0) {
         setMillis(now);injectRx(makePosition(1,pos));injectRx(makeVelocity(1,speed));motor.poll();
     }

@@ -16,7 +16,7 @@ void feedback(MotorControl& motor, uint32_t now, int32_t position) {
 // Legacy integration fixture: protects the current wire-level behavior during
 // a no-behavior-change migration. It does not define the future DeviceAPI shape.
 static void test_demo_polling_does_not_starve_queue_await() {
-    fakeReset(); MotorControl motor; CommandQueue queue(motor);
+    fakeReset(); MotorControl motor; CommandQueue queue(motor); DeviceAPI api(motor,queue);
     struct Millimetres : QueueRotationSource {
         bool rotationMm(uint8_t, double& mm) const override { mm=10; return true; }
     } rotation;
@@ -25,7 +25,7 @@ static void test_demo_polling_does_not_starve_queue_await() {
     assert(motor.queries().configure(budget));
     DemoConfig config;
     for (uint8_t id=1;id<=5;++id) config.axes.push_back({id,10,10,false});
-    DemoMotorExecutor executor(motor,queue,rotation); executor.configure(config);
+    DemoMotorExecutor executor(motor,queue,api,rotation); executor.configure(config);
     motor.watch(6); // An open Page monitors another node while all five Demo axes poll.
     const char* program="enable 1\nmove 1 -5 mm 300 300 300 200 await\nhome 1 2\n";
     assert(queue.start(program,std::strlen(program),1,rotation,0).code==202);
@@ -88,10 +88,10 @@ static void test_demo_polling_does_not_starve_queue_await() {
 
 int main() {
     test_demo_polling_does_not_starve_queue_await();
-    fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
+    fakeReset(); MotorControl motor; CommandQueue queue(motor); DeviceAPI api(motor,queue); Rotation rotation;
     assert(motor.begin(4,5,500000));
     DemoConfig c; c.axes.push_back({1,10,0,true});
-    DemoMotorExecutor executor(motor,queue,rotation); executor.configure(c);
+    DemoMotorExecutor executor(motor,queue,api,rotation); executor.configure(c);
     c.axes[0].rotationMm = 10;
     assert(!executor.configurationValid() && executor.available());
     DemoFlowController flow(executor);
