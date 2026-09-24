@@ -86,7 +86,6 @@ bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
         for (const auto& a : config.axes) if (a.id == step.id) axis = &a;
         if (step.action != QueueAction::Wait && !axis) { error = "command_axis_not_declared"; return false; }
         if (step.action == QueueAction::Hex || step.action == QueueAction::Can ||
-            step.action == QueueAction::Disable ||
             ((step.action == QueueAction::Move || step.action == QueueAction::Home) && !step.awaitCompletion) ||
             ((step.action == QueueAction::Torque || step.action == QueueAction::Velocity) && !step.durationMs) ||
             (step.action == QueueAction::Home && (!initializing || step.mode != 2 || !axis->zero))) {
