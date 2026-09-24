@@ -99,7 +99,7 @@ const char* busStateName(CanControllerState state) {
 }  // namespace
 
 MotorControl::MotorControl()
-    : can_(kDefaultTxPin, kDefaultRxPin, kDefaultBitrate) {}
+    : bus_(kDefaultTxPin, kDefaultRxPin, kDefaultBitrate) {}
 
 bool MotorControl::begin(int tx, int rx, long bitrate) {
     // Reset software tracking only: no motor is enabled, moved or stopped here.
@@ -119,10 +119,10 @@ bool MotorControl::begin(int tx, int rx, long bitrate) {
     }
 
     experimentId_ = 0;
-    can_.setTraceSink(traceSink, this);
-    can_.end();
-    can_.configure(tx, rx, bitrate);
-    canReady_ = can_.begin();
+    bus_.setTraceSink(traceSink, this);
+    bus_.end();
+    bus_.configure(tx, rx, bitrate);
+    canReady_ = bus_.begin();
     refreshBusStatus();
     return canReady_;
 }
@@ -199,7 +199,7 @@ bool MotorControl::canReady() const {
 
 void MotorControl::refreshBusStatus() {
     CanBusStatus status;
-    if (!can_.getBusStatus(status)) {
+    if (!bus_.getBusStatus(status)) {
         busState_ = CanControllerState::Unavailable;
         txErrorCounter_ = 0;
         return;
@@ -219,7 +219,7 @@ void MotorControl::drainRx(uint32_t now) {
     if (!canReady()) return;
     CanRawFrame frame;
     for (uint32_t i = 0; i < kMaxFramesPerPoll; ++i) {
-        if (!can_.receive(frame, 0)) break;
+        if (!bus_.receive(frame, 0)) break;
         handleFrame(frame, now);
     }
 }
@@ -799,19 +799,19 @@ void MotorControl::serviceQueries(uint32_t now) {
 bool MotorControl::sendQuery(void* context,uint8_t id,uint8_t field) {
     auto& self=*static_cast<MotorControl*>(context);
     const uint8_t bytes[]={id,field,0x6B};
-    self.can_.clearTransmissionError();
+    self.bus_.clearTransmissionError();
     bool sent=false;
     switch (field) {
-        case 0x36: sent=self.can_.probeReadSysParams(id,X42sSysParam::Cpos); break;
-        case 0x35: sent=self.can_.probeReadSysParams(id,X42sSysParam::Vel); break;
-        case 0x33: sent=self.can_.probeReadSysParams(id,X42sSysParam::Tpos); break;
-        case 0x3A: sent=self.can_.probeReadSysParams(id,X42sSysParam::Flag); break;
-        case 0x3B: sent=self.can_.probeReadSysParams(id,X42sSysParam::Org); break;
-        case 0x27: sent=self.can_.probeReadSysParams(id,X42sSysParam::Cpha); break;
-        case 0x22: sent=self.can_.sendRawLogical(bytes,sizeof(bytes)); break;
+        case 0x36: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Cpos); break;
+        case 0x35: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Vel); break;
+        case 0x33: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Tpos); break;
+        case 0x3A: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Flag); break;
+        case 0x3B: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Org); break;
+        case 0x27: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Cpha); break;
+        case 0x22: sent=self.bus_.sendRawLogical(bytes,sizeof(bytes)); break;
         default: break;
     }
-    self.can_.clearTransmissionError();
+    self.bus_.clearTransmissionError();
     if (field==0x22 && self.config_.state==2) {
         self.config_.readIssued=true;self.config_.readAt=millis();
         if (!sent) self.config_.state=8;
@@ -922,10 +922,10 @@ bool MotorControl::sendHomeTrigger(uint8_t id, uint8_t mode) {
     // execution only: the cached form needs the FF trigger, which this board
     // does not supervise.
     const uint8_t frame[5] = {id, kFrameHome, mode, 0, kProtocolChecksum};
-    can_.clearTransmissionError();
-    const bool queued = can_.sendValidatedCommand(frame, sizeof(frame));
-    if (!queued || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    const bool queued = bus_.sendValidatedCommand(frame, sizeof(frame));
+    if (!queued || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -935,10 +935,10 @@ bool MotorControl::sendHomeInterrupt(uint8_t id) {
     if (!canReady()) return false;
     // [addr][0x9C][0x48][0x6B] (manual V1.0.5 p62): forced abort and exit.
     const uint8_t frame[4] = {id, kFrameHomeInterrupt, 0x48, kProtocolChecksum};
-    can_.clearTransmissionError();
-    const bool queued = can_.sendValidatedCommand(frame, sizeof(frame));
-    if (!queued || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    const bool queued = bus_.sendValidatedCommand(frame, sizeof(frame));
+    if (!queued || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -946,10 +946,10 @@ bool MotorControl::sendHomeInterrupt(uint8_t id) {
 
 bool MotorControl::sendStop(uint8_t id) {
     if (!canReady()) return false;
-    can_.clearTransmissionError();
-    can_.stopNow(id, false);
-    if (can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    bus_.stopNow(id, false);
+    if (bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -975,12 +975,12 @@ Result MotorControl::enable(uint8_t id, bool state) {
         // An explicit disable also ends a homing run: 9C aborts it, and the F3
         // disable below drops the enable on the wire.
         if (home_.active && homeId_ == id) cancelHome(true, false);
-        can_.clearTransmissionError();
-        can_.enableControl(id, false, false);
-        if (can_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
+        bus_.enableControl(id, false, false);
+        if (bus_.hasTransmissionError()) {
             // The disable never reached the wire. Do not silently drop the job:
             // stop best effort, latch and invalidate the enable instead.
-            can_.clearTransmissionError();
+            bus_.clearTransmissionError();
             node.stopRequested = true;
             node.stopRequestedMs = now;
             sendStop(id);
@@ -1025,11 +1025,11 @@ Result MotorControl::enable(uint8_t id, bool state) {
         clearFault(id);
     }
 
-    can_.clearTransmissionError();
-    can_.enableControl(id, true, false);
-    if (can_.hasTransmissionError()) {
+    bus_.clearTransmissionError();
+    bus_.enableControl(id, true, false);
+    if (bus_.hasTransmissionError()) {
         // A failed transmission can never mean enabled.
-        can_.clearTransmissionError();
+        bus_.clearTransmissionError();
         node.enableConfirmed = false;
         node.enablePending = false;
         return Result{kCodeUnavailable, "can_tx_failed"};
@@ -1088,8 +1088,8 @@ Result MotorControl::move(const MoveRequest& request) {
     const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
 
-    can_.clearTransmissionError();
-    can_.positionControlWithCurrentLimit(
+    bus_.clearTransmissionError();
+    bus_.positionControlWithCurrentLimit(
         id,
         plan.direction,
         plan.speedTenths,
@@ -1099,10 +1099,10 @@ Result MotorControl::move(const MoveRequest& request) {
         plan.motionMode,
         plan.sync,
         plan.currentMa);
-    if (can_.hasTransmissionError()) {
+    if (bus_.hasTransmissionError()) {
         // A partial transmission may have reached the motor. Stop it best
         // effort and latch instead of returning a bare 503 with a live motor.
-        can_.clearTransmissionError();
+        bus_.clearTransmissionError();
         sendStop(id);
         node.stopRequested = true;
         node.stopRequestedMs = now;
@@ -1206,9 +1206,9 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
         return Result{kCodeInvalid, error != nullptr ? error : "invalid_request"};
     }
 
-    can_.clearTransmissionError();
+    bus_.clearTransmissionError();
     if (plan.withCurrentLimit) {
-        can_.passthroughPositionControlWithCurrentLimit(
+        bus_.passthroughPositionControlWithCurrentLimit(
             id,
             plan.direction,
             plan.speedTenths,
@@ -1219,7 +1219,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     } else {
         // FB carries no current field at all: it cannot impose a per-command
         // current limit, and none is invented for it.
-        can_.passthroughPositionControl(
+        bus_.passthroughPositionControl(
             id,
             plan.direction,
             plan.speedTenths,
@@ -1227,10 +1227,10 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
             plan.motionMode,
             false);
     }
-    if (can_.hasTransmissionError()) {
+    if (bus_.hasTransmissionError()) {
         // A partial transmission may have reached the motor. Stop it best
         // effort and latch instead of returning a bare 503 with a live motor.
-        can_.clearTransmissionError();
+        bus_.clearTransmissionError();
         sendStop(id);
         node.stopRequested = true;
         node.stopRequestedMs = now;
@@ -1355,10 +1355,10 @@ bool MotorControl::rawLogical(const uint8_t* bytes, uint8_t length) {
     // A raw frame must never interleave with a supervised operation, and the
     // bus must be healthy: nothing here stops or enables anything to make room.
     if (!canReady() || operationBusy()) return false;
-    can_.clearTransmissionError();
-    const bool sent = can_.sendRawLogical(bytes, length);
-    if (!sent || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    const bool sent = bus_.sendRawLogical(bytes, length);
+    if (!sent || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     // Known configuration writes keep their exact bytes, but retain independent
@@ -1447,10 +1447,10 @@ String MotorControl::configJson() const {
 bool MotorControl::rawCanFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length) {
     if (length > kMaxCanDataBytes) return false;
     if (!canReady() || operationBusy()) return false;
-    can_.clearTransmissionError();
-    const bool sent = can_.sendRawFrame(id, extended, data, length);
-    if (!sent || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    const bool sent = bus_.sendRawFrame(id, extended, data, length);
+    if (!sent || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -1462,12 +1462,12 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
     // must not stop a program the operator asked to send.
     if (!bytes || length < 3 || length > 30) return false;
     if (!canReady()) return false;
-    can_.clearTransmissionError();
+    bus_.clearTransmissionError();
     queueTransport_=true;
-    const bool sent = can_.sendRawLogical(bytes, length);
+    const bool sent = bus_.sendRawLogical(bytes, length);
     queueTransport_=false;
-    if (!sent || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    if (!sent || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     // Track a successfully submitted immediate F3 without claiming hardware
@@ -1494,12 +1494,12 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
 bool MotorControl::queueSendFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length) {
     if (length > kMaxCanDataBytes) return false;
     if (!canReady()) return false;
-    can_.clearTransmissionError();
+    bus_.clearTransmissionError();
     queueTransport_=true;
-    const bool sent = can_.sendRawFrame(id, extended, data, length);
+    const bool sent = bus_.sendRawFrame(id, extended, data, length);
     queueTransport_=false;
-    if (!sent || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    if (!sent || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -1552,9 +1552,9 @@ bool MotorControl::broadcastAbortAll() {
     cancelHome(true, false);
     if (canReady()) {
         const uint8_t frame[4] = {0, kFrameHomeInterrupt, 0x48, kProtocolChecksum};
-        can_.clearTransmissionError();
-        can_.sendRawLogical(frame, sizeof(frame));
-        can_.clearTransmissionError();
+        bus_.clearTransmissionError();
+        bus_.sendRawLogical(frame, sizeof(frame));
+        bus_.clearTransmissionError();
     }
     const Result stopped = stopAll();
     return stopped.code < 300;
@@ -1641,10 +1641,10 @@ Result MotorControl::stopAll() {
     }
 
     // id 0 is the dedicated broadcast for stopAll.
-    can_.clearTransmissionError();
-    can_.stopNow(0, false);
-    if (can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    bus_.stopNow(0, false);
+    if (bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return Result{kCodeUnavailable, "can_tx_failed"};
     }
     // A broadcast stop can halt every node: no target sample survives it.
@@ -1984,8 +1984,8 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
             faultAppliesTo(id) || !node.enableConfirmed || !stationaryFeedback(id, millis(), 0))
             return Result{409, "enable_and_wait_for_stationary_feedback"};
     }
-    can_.clearTransmissionError();
-    const bool queued = can_.sendValidatedCommand(b, n);
+    bus_.clearTransmissionError();
+    const bool queued = bus_.sendValidatedCommand(b, n);
     if (kind == CommandKind::Interrupt) {
         // 0x9C aborts a homing run. The operator's own frame is already on the
         // wire, so the supervised run is cancelled without a second interrupt

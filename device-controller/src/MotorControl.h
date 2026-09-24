@@ -2,7 +2,7 @@
 // Bounded motion module for the X42S/X28S CAN motors on an ESP32-S3 (TWAI).
 //
 // Responsibilities:
-//   * own the CAN driver (X42sProtocol) and the polling of motor feedback
+//   * own MotorBus and the polling of motor feedback
 //   * keep exactly one supervised action at a time (move, trial or homing)
 //   * only confirm "enabled", "move done" or "home done" from real post-command
 //     feedback, never from a bare 0x02 ack or a single idle status byte
@@ -15,7 +15,7 @@
 #include <cstring>
 
 #include "MotionCore.h"
-#include "X42sProtocol.h"
+#include "MotorBus.h"
 #include "QueueDiagnostics.h"
 #include "CanQueryScheduler.h"
 
@@ -382,7 +382,7 @@ private:
     uint8_t diagnosticNext_ = 0, diagnosticCount_ = 0;
     uint32_t rxCount_ = 0;
 
-    X42sProtocol can_;
+    MotorBus bus_;
     bool canReady_ = false;
     CanControllerState busState_ = CanControllerState::Unavailable;
     uint32_t txErrorCounter_ = 0;
