@@ -1,5 +1,7 @@
 # Babytech Firmware
 
+协作整合请先阅读 [仓库整合与协作计划](docs/integration-plan.md)：分支现状、PR 依赖、整合顺序、负责人认领与验收清单。
+
 两块 ESP32-S3 N16R8 的最小固件仓库。每块板是独立、标准的 PlatformIO Arduino 工程。
 
 ```text
