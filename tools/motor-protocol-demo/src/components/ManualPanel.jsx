@@ -1,6 +1,7 @@
 import { formatBytes, hexByte, MANUAL_LIMITS } from '../protocol.js';
 import { formatPosition } from '../simulation.js';
 import { FrameList } from './FrameList.jsx';
+import { CompactPanel } from './CompactPanel.jsx';
 import { GlyphInfo, HelpTip } from './glyphs.jsx';
 
 function MoveField({ id, label, unit, value, error, help, range, onChange }) {
@@ -60,6 +61,7 @@ export function ManualPanel({
 
   return (
     <div className="manual">
+      <CompactPanel title="试动参数与操作" initiallyOpen className="compact-panel--manual-form">
       <section className="manual__form" aria-label="相对运动参数">
         <div className="command__head">
           <h2 className="panel__title">常规试动</h2>
@@ -219,7 +221,9 @@ export function ManualPanel({
           )}
         </div>
       </section>
+      </CompactPanel>
 
+      <CompactPanel title="发送预览" desktopInitiallyOpen={false} className="compact-panel--manual-preview">
       <section className="manual__preview" aria-label="CD 帧预览">
         <h3 className="section__title">发送预览</h3>
         <div className="preview">
@@ -252,6 +256,7 @@ export function ManualPanel({
             : '角度、速度与电流的取值区间沿用 MotionCore.h 的请求校验范围；越界直接报错，不做静默截断。'}
         </p>
       </section>
+      </CompactPanel>
     </div>
   );
 }

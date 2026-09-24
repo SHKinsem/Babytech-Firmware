@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { GlyphInfo } from './glyphs.jsx';
+import { CompactPanel } from './CompactPanel.jsx';
 import { LEVELS, MAX_EVENTS, MAX_TRACE_FRAMES, exportJson, exportMarkdown } from '../debug-log.js';
 
 // 调试日志: read-only view of what the page observed.
@@ -56,7 +57,7 @@ export function DebugLogPanel({ store, snapshot, context, onCopy, onClear, onRef
   });
 
   return <main className="workspace workspace--log">
-    <section className="panel panel--log" aria-label="调试日志">
+    <CompactPanel title="调试日志" initiallyOpen className="compact-panel--log"><section className="panel panel--log" aria-label="调试日志">
       <div className="log__head">
         <h2 className="panel__title">调试日志</h2>
         <span className="chip chip--soft">本机历史 {snapshot.events.length}/{MAX_EVENTS}</span>
@@ -137,6 +138,6 @@ export function DebugLogPanel({ store, snapshot, context, onCopy, onClear, onRef
           ? snapshot.trace.slice(-40).map((frame) => <li key={`${frame.at}-${frame.text}`}><span className="log__time">{frame.time}</span> {frame.text}</li>)
           : <li className="log__empty">尚未观察到控制帧（周期性查询帧不记录）。</li>}
       </ol>
-    </section>
+    </section></CompactPanel>
   </main>;
 }
