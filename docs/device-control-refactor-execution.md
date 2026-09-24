@@ -1,11 +1,12 @@
 # 设备板控制逻辑重构：执行路线
 
-起点：`main` 的 `2308aad`，工作分支 `codex/device-control-refactor`。本文把[目标架构](device-architecture-plan.md)拆成可审查的交付顺序；它是实施计划，不表示下列模块已存在或阶段已验收。当前设备板仍由 `device-controller/src/main.cpp` 协调 `MotorControl`、`CommandQueue`、`DemoFlowController`、称重及各输入入口。旧 DSL、HTTP/UART 行为和 2026-09-23 的 Sync 实机记录是迁移基线。
+起点：`main` 的 `2308aad`，工作分支 `codex/device-control-refactor`。本文把[目标架构](device-architecture-plan.md)拆成可审查的交付顺序；[新接口行为契约草案](device-control-contract-draft.md)另列待定的可观察语义。它们不表示下列模块已存在或阶段已验收。当前设备板仍由 `device-controller/src/main.cpp` 协调 `MotorControl`、`CommandQueue`、`DemoFlowController`、称重及各输入入口。旧 DSL、HTTP/UART 行为和 2026-09-23 的 Sync 实机记录是迁移基线。
 
 ## 完成定义与工作方式
 
 - 每个阶段有独立、可回退的变更和软件证据；完成软件检查只标记“软件通过”，涉及运动、停止、离线、负载或 OTA 的结论仍需记录实机结果。
-- 先为现有行为补回归，再搬迁实现。保留外部 API、旧 DSL 和板间协议；如确需改变语义，单列版本、迁移说明和调用方更新，不混入纯重构。
+- 测试分两层：旧代码的迁移基线只证明搬迁期间没有意外变化；新 `DeviceAPI` 的验收测试必须先按新契约编写，再实现新接口。旧基线不锁定未来的 C++ 类、函数签名或目录结构。
+- 现有 HTTP、UART、旧 DSL 和板间协议在适配器仍对外提供时接受兼容回归；是否长期保留由接口设计决定。刻意改变语义时单列版本、迁移说明和调用方更新，不混入声称“无行为变化”的提交。
 - 每次修改查询或发送路径，保留 Sync 的缓存、接受确认、单次广播触发、触发后目标读回、0.5° 窗口及新鲜到位证据。`Sent`、`Accepted`、`Reached` 分开报告；HTTP 202 仅表示接收。
 - 所有队列、对象池、请求、循环和日志容量有上限。停止通道不受普通队列满影响。默认上电不使能、不运动。
 
@@ -15,9 +16,9 @@
 | --- | --- | --- | --- |
 | **P1 行为基线** | 固定现有 DSL/API、帧顺序、完成证据及组合调度的测试夹具；记录可复现的构建与镜像。无运行时架构重写。 | 主机回归和两种 UART 配置编译通过；对照表标明旧行为与未解决问题。 | 复验同参数 Sync、move `await` 接 home、停止与失联；记录提交、配置、镜像 SHA-256 和 CAN/电机结果。未跑则标待验收。 |
 | **P2 总线与观测集中** | 建 `MotorBus`/电机注册与统一查询入口；HTTP、UART、Demo、原始调试帧逐一迁入。查询状态只读快照。 | 五电机 Demo + 页面读取不饿死 `await`；Sync 独占窗口和总线预算不回归；确认没有私有硬件查询。 | 测 CAN 发送顺序、查询年龄/积压、停止发送延迟和离线节点。 |
-| **P3 指令实例与 MotorService** | 有界指令池、句柄、结果历史；依次迁移 Enable、Move、Home、Stop，最后封装既有 `SyncPlanner`/`SyncRuntime`。旧入口先作为适配器。 | 旧 DSL 逐项等价；旧反馈不能完成新指令；池满明确拒绝；超时与“是否已停止”分开。 | 单轴、回零和 Sync 正常/失败路径复验；确认停止证据。 |
+| **P3 指令实例与 MotorService** | 先定新指令/结果契约，再建有界指令池、句柄、结果历史；依次迁移 Enable、Move、Home、Stop，最后封装既有 `SyncPlanner`/`SyncRuntime`。旧入口先作为适配器。 | 新契约测试通过；尚在服务的旧 DSL 适配器行为等价；旧反馈不能完成新指令；池满明确拒绝；超时与“是否已停止”分开。 | 单轴、回零和 Sync 正常/失败路径复验；确认停止证据。 |
 | **P4 ProgramRunner** | 把 `CommandQueue` 的顺序、等待、取消和失败行号迁入运行器；定义不可变程序与独立运行状态。先兼容原语法，再增加有界条件等待/重复。 | 整份程序先校验；取消后无新运动；非 `await` 的发送结束不误报静止；原始帧语义保持。 | 用实际 CAN 跑既有队列及 Sync 脚本，核对行号、超时和停止。 |
-| **P5 统一入口与执行权** | HTTP、UART、按钮（接入时）走 `DeviceAPI`/`ControlGate`；停止独立优先通道，维护/OTA 与运动互斥。 | 忙碌、重复请求、普通队列满、迟到 ACK、取消与跨入口 disable 覆盖；快照读取无副作用。 | 双板、DISPLAY、网页的同一操作和紧急停止；失联时不虚报 Idle。 |
+| **P5 统一入口与执行权** | 先发布 `DeviceAPI` 请求、回执、状态和停止契约，再让 HTTP、UART、按钮（接入时）分别接入；停止独立优先通道，维护/OTA 与运动互斥。 | 新 API 契约测试覆盖忙碌、重复请求、普通队列满、迟到 ACK、取消与跨入口 disable；快照读取无副作用。旧入口适配器另跑兼容测试。 | 双板、DISPLAY、网页的同一操作和紧急停止；失联时不虚报 Idle。 |
 | **P6 程序存储** | 静态校验、版本、原子保存、掉电保护；运行持有固定版本。保存不运行。 | 无效上传保留旧版；断电/写失败模拟不破坏已保存程序；重复写入和容量边界明确。 | 断电、重启、运行中编辑/写入与 OTA 时机验收。 |
 | **P7 业务与传感器迁移** | Demo 固定步骤改为默认程序；称重采样归 `SensorService`，等待条件读取带时间/有效性快照。 | 过期/无效重量不放行；去皮/校准与等待互斥；默认程序保持旧 Demo 顺序和安全门。 | 机构、配方、重量稳定性与 Sync 负载验收，记录完整配置和结果。 |
 
@@ -32,11 +33,11 @@ P1 是 P2–P7 的回归基线。P2 提供唯一总线与反馈来源，P3 才�
 3. 普通队列运行时的取消、停止、disable：后续步骤不再发送；ACK 或旧缓存不能伪造完成；发送失败和停止未确认各自可见。
 4. 无 `await` 的旧命令仍按发送语义前进；队列完成不等于电机已停。旧 DSL 的容量与拒绝行为列入兼容表。
 
-先复用现有 `tests/test_command_queue.cpp`、`tests/test_sync_runtime.cpp`、`tests/test_query_scheduler.cpp`、`tests/test_demo_motor.cpp`，仅为缺失的跨模块场景增量添加夹具。软件门槛：`python tools/test_protocol.py`、`python tools/test_motion.py`、`python tools/test_raw_can.py`、`python tools/test_demo.py`，前端 `npm test`/`npm run build:device`（若改动页面契约），以及设备板默认和 `MOTION_UART_PEER=2` 编译。仓库 CI 执行的完整命令见 [工作流](../.github/workflows/firmware-checks.yml)。PR 应附测试输出和已执行/未执行的实机项目；通过软件检查仅表示首批改动可供审查，不把 P1 硬件验收或 P2 全部能力标为完成，也不把旧 Sync 镜像的实测归到新镜像。
+本批复用现有 `tests/test_command_queue.cpp`、`tests/test_sync_runtime.cpp`、`tests/test_query_scheduler.cpp`、`tests/test_demo_motor.cpp`，仅为缺失的跨模块场景增量添加夹具。它们是**当前实现的迁移基线**，验证本批薄封装没有意外改变帧序、反馈和调度；不作为未来 `DeviceAPI` 的最终接口测试。软件门槛：`python tools/test_protocol.py`、`python tools/test_motion.py`、`python tools/test_raw_can.py`、`python tools/test_demo.py`，前端 `npm test`/`npm run build:device`（若改动页面契约），以及设备板默认和 `MOTION_UART_PEER=2` 编译。仓库 CI 执行的完整命令见 [工作流](../.github/workflows/firmware-checks.yml)。PR 应附测试输出和已执行/未执行的实机项目；通过软件检查仅表示首批改动可供审查，不把 P1 硬件验收或 P2 全部能力标为完成，也不把旧 Sync 镜像的实测归到新镜像。
 
 ## 迁移检查与回退
 
-每个后续 PR 先列出被替换的调用点，确认旧入口是否仍有直接发送/查询，再删除适配器；不能让新旧路径同时拥有同一电机状态。对每项旧 DSL 指令记录语法、默认值、发送/等待边界、失败码、JSON 字段与 UART 结果。保留直通能力时仍统一走总线并受执行权管理，不悄悄改变原字节。
+每个后续 PR 先定新接口的可观察契约和验收测试，再列出被替换的调用点，确认旧入口是否仍有直接发送/查询，最后删除适配器；不能让新旧路径同时拥有同一电机状态。对仍需兼容的旧 DSL 指令记录语法、默认值、发送/等待边界、失败码、JSON 字段与 UART 结果。旧适配器移除时，同步移除或迁移只依赖旧内部接口的测试，保留新契约的行为测试。保留直通能力时仍统一走总线并受执行权管理，不悄悄改变原字节。
 
 若出现帧序列变化、查询饥饿、Sync 证据退化、停止延迟超标、取消后再派发、旧接口不兼容或实机行为与基线不同，停止继续叠加阶段：将该 PR 恢复到上一已验收阶段，定位原因，补回归后重做。构建和主机测试不能解除硬件验收门槛；实机失败时保留 CAN trace、固件提交/配置/哈希和复现步骤，不把故障归为“重构成功”。
 

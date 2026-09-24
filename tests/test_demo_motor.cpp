@@ -13,6 +13,8 @@ void feedback(MotorControl& motor, uint32_t now, int32_t position) {
     setMillis(now); injectRx(makePosition(1, position)); injectRx(makeVelocity(1, 0)); motor.poll();
     const uint8_t flags[] = {0x3A, 0x83, 0x6B}; injectRx(makeFrame(1,flags,3)); motor.poll();
 }
+// Legacy integration fixture: protects the current wire-level behavior during
+// a no-behavior-change migration. It does not define the future DeviceAPI shape.
 static void test_demo_polling_does_not_starve_queue_await() {
     fakeReset(); MotorControl motor; CommandQueue queue(motor);
     struct Millimetres : QueueRotationSource {
