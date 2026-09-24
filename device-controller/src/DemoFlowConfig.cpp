@@ -1,5 +1,6 @@
 #include "DemoFlowConfig.h"
 #include <cJSON.h>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -56,6 +57,14 @@ public:
     }
     const DemoConfig& config;
 };
+bool syncDelimiter(const std::string& line, const char* delimiter) {
+    std::istringstream tokens(line);
+    std::string verb, kind;
+    tokens >> verb >> kind;
+    for (char& c : verb) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char& c : kind) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return verb == "sync" && kind == delimiter;
+}
 }
 bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
                       bool initializing, const std::array<int32_t, 256>& zeros,
@@ -64,6 +73,37 @@ bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
     ConfigRotation rotation(config);
     std::unique_ptr<QueueProgram> one(new QueueProgram);
     for (size_t i = 0; i < script.commands.size(); ++i) {
+        if (syncDelimiter(script.commands[i], "begin")) {
+            if (initializing) { error = "sync_not_allowed_during_initialization"; return false; }
+            std::string group;
+            size_t end = i;
+            for (; end < script.commands.size(); ++end) {
+                if (!group.empty()) group += '\n';
+                group += script.commands[end];
+                if (syncDelimiter(script.commands[end], "end")) break;
+            }
+            QueueError qe;
+            if (!parseQueueProgram(group.c_str(), group.size(), rotation, *one, qe)) {
+                error = "command_" + std::to_string(i + (qe.line ? qe.line : 1)) + ":" + qe.message;
+                return false;
+            }
+            if (out.count + one->count > kQueueMaxSteps) { error = "too_many_actions"; return false; }
+            for (uint8_t j = 0; j < one->count; ++j) {
+                auto step = one->steps[j];
+                if (step.action != QueueAction::SyncBegin && step.action != QueueAction::SyncEnd) {
+                    bool declared = false;
+                    for (const auto& axis : config.axes) if (axis.id == step.id) declared = true;
+                    if (step.action != QueueAction::Move || step.awaitCompletion) {
+                        error = "demo_requires_bounded_commands_and_collision_home_await"; return false;
+                    }
+                    if (!declared) { error = "command_axis_not_declared"; return false; }
+                }
+                step.line = static_cast<uint16_t>(i + step.line);
+                out.steps[out.count++] = step;
+            }
+            i = end;
+            continue;
+        }
         std::string line = script.commands[i];
         std::istringstream tokens(line);
         std::string verb;
@@ -86,7 +126,6 @@ bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
         for (const auto& a : config.axes) if (a.id == step.id) axis = &a;
         if (step.action != QueueAction::Wait && !axis) { error = "command_axis_not_declared"; return false; }
         if (step.action == QueueAction::Hex || step.action == QueueAction::Can ||
-            step.action == QueueAction::Disable ||
             ((step.action == QueueAction::Move || step.action == QueueAction::Home) && !step.awaitCompletion) ||
             ((step.action == QueueAction::Torque || step.action == QueueAction::Velocity) && !step.durationMs) ||
             (step.action == QueueAction::Home && (!initializing || step.mode != 2 || !axis->zero))) {
@@ -96,6 +135,7 @@ bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
             if (!axis->zero) { error = "zero_axis_not_configured"; return false; }
             step.absolute = true; step.distanceTenths = zeros[step.id];
         }
+        if (out.count >= kQueueMaxSteps) { error = "too_many_actions"; return false; }
         out.steps[out.count++] = step;
     }
     return true;

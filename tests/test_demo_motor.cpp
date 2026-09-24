@@ -65,6 +65,18 @@ int main() {
     test_demo_polling_does_not_starve_queue_await();
     fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
     assert(motor.begin(4,5,500000));
+    QueueProgram unconfiguredSync;
+    unconfiguredSync.count = 4;
+    unconfiguredSync.steps[0].action = QueueAction::SyncBegin;
+    unconfiguredSync.steps[0].groupSize = 2;
+    unconfiguredSync.steps[1].action = QueueAction::Move;
+    unconfiguredSync.steps[1].id = 1;
+    unconfiguredSync.steps[2].action = QueueAction::Move;
+    unconfiguredSync.steps[2].id = 2;
+    unconfiguredSync.steps[3].action = QueueAction::SyncEnd;
+    const auto sentBeforeSync = capturedTX.size();
+    const auto syncResult = queue.startDemo(unconfiguredSync, 0);
+    assert(syncResult.code == 400 && !queue.active() && capturedTX.size() == sentBeforeSync);
     DemoConfig c; c.axes.push_back({1,10,0,true});
     DemoMotorExecutor executor(motor,queue,rotation); executor.configure(c);
     c.axes[0].rotationMm = 10;
@@ -118,5 +130,5 @@ int main() {
     setMillis(1610); injectRx(makePosition(3,700)); injectRx(makeVelocity(3,0));
     const uint8_t flags3[]={0x3A,0x83,0x6B}; injectRx(makeFrame(3,flags3,3)); motor.poll();
     assert(executor.evidence(3).fresh && executor.evidence(3).position==700);
-    std::cout << "PASS real demo queue: absolute zero, preserved feedback, post-stop proof, strict home, rejected enable\n";
+    std::cout << "PASS real demo queue: sync preflight, absolute zero, preserved feedback, post-stop proof, strict home, rejected enable\n";
 }
