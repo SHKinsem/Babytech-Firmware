@@ -128,7 +128,8 @@ void WiFiSetup::begin() {
   // link fails, is forgotten, or the board reboots unconfigured.
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
-  if (!WiFi.softAP(kApSsid, kApPassword, kApChannel, 0, kApMaxClients)) {
+  apStarted_ = WiFi.softAP(kApSsid, kApPassword, kApChannel, 0, kApMaxClients);
+  if (!apStarted_) {
     Serial.println("[wifi] AP start failed");
   }
 

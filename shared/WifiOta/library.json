@@ -1,0 +1,7 @@
+{
+  "name": "WifiOta",
+  "version": "0.1.0",
+  "description": "Signed, board-bound browser firmware updates for Babytech ESP32-S3 controllers",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

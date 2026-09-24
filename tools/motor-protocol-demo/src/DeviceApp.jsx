@@ -787,7 +787,7 @@ export function DeviceApp() {
       </div>
     </header>
     <label className="device-mobile-mode">工作模式<select aria-label="工作模式" value={tab} onChange={event=>setTab(event.target.value)}>{DEVICE_TABS.map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label>
-    <nav className="tabs" role="tablist" aria-label="工作模式">{DEVICE_TABS.map(([id,label])=><button key={id} role="tab" aria-selected={tab===id} className={`tabs__item${tab===id?' is-active':''}`} onClick={()=>setTab(id)}>{label}</button>)}{tab!=='lab' ? <span className="device-network-note">板端真实接口 · 不自动重发操作</span> : null}</nav>
+    <nav className="tabs" role="tablist" aria-label="工作模式">{DEVICE_TABS.map(([id,label])=><button key={id} role="tab" aria-selected={tab===id} className={`tabs__item${tab===id?' is-active':''}`} onClick={()=>setTab(id)}>{label}</button>)}<a className="tabs__item" href="/ota">固件升级</a>{tab!=='lab' ? <span className="device-network-note">板端真实接口 · 不自动重发操作</span> : null}</nav>
     {tab==='lab' ? <LabStatusSummary connected={connected} status={current} triggerRef={feedbackTriggerRef} onOpen={()=>setLabFeedbackOpen(true)}/> : null}
     <ConfigResult/>
     {tab==='queue' ? <QueuePanel connected={connected && !resetPending} limits={limits} limitsReady={limitsReady}

@@ -49,6 +49,7 @@ class WiFiSetup {
 
   // True while connecting, scanning or waiting to apply a radio mutation.
   bool busy() const;
+  bool apReady() const { return apStarted_; }
 
  private:
   // Bounded cache of the strongest distinct scan results.
@@ -112,6 +113,7 @@ class WiFiSetup {
   uint32_t pendingAtMs_ = 0;        // when a deferred radio action may run
 
   bool hasSaved_ = false;
+  bool apStarted_ = false;
   String savedSsid_;   // shown to the UI; never the password
   String savedPass_;   // RAM only, never logged or returned
   String lastError_;   // human-readable last station error, "" when fine
