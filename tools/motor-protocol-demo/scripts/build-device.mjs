@@ -8,7 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 process.env.VITE_DEVICE = '1';
 const output = resolve(root, 'dist/device');
 await build({root, build:{outDir:output, emptyOutDir:true, sourcemap:false, assetsInlineLimit:1000000}});
-let html = await readFile(resolve(output,'index.html'),'utf8');
+let html = (await readFile(resolve(output,'index.html'),'utf8')).replace(/\r\n?/g, '\n');
 html = html.replace(' · 桌面预览',' · 实机调试');
 for (const match of [...html.matchAll(/<script\b[^>]*src="([^"]+)"[^>]*><\/script>/g)]) {
   const js = await readFile(resolve(output,match[1].replace(/^\//,'')),'utf8');
