@@ -1491,6 +1491,47 @@ static void test_broadcast_enable_frames() {
     CHECK(sawTxId(0, disable, sizeof(disable)));
 }
 
+static void test_cross_entry_enable_and_wait_preserve_observations() {
+    QueueRig rig; rig.begin();
+    enableAndFeed(rig, 1, 10);
+    CHECK(rig.motor.snapshot(1).enabled);
+    CHECK(startQueue(rig, "wait 10", 1, 40).code == 202);
+    CHECK(rig.motor.snapshot(1).enabled);
+    CHECK(rig.motor.snapshot(1).positionValid && rig.motor.snapshot(1).velocityValid);
+    tick(rig, 40); tick(rig, 60); tick(rig, 70);
+    CHECK(rig.motor.snapshot(1).enabled);
+
+    CHECK(startQueue(rig, "enable 2", 1, 80).code == 202);
+    tick(rig, 90); tick(rig, 100);
+    CHECK(!rig.motor.snapshot(2).enabled); // transmission is not confirmation
+    injectRx(makeAck(2, 0xF3, 0x02));
+    tick(rig, 110);
+    CHECK(!rig.motor.snapshot(2).enabled); // ACK alone is not confirmation
+    injectRx(driverFlags(2, true));
+    feedStationary(rig, 2, 120);
+    CHECK(rig.motor.snapshot(2).enabled);
+    MoveRequest move{2, 10, 30, 60, 60, 800};
+    CHECK(rig.motor.move(move).code == 202);
+}
+
+static void test_demo_absolute_await_from_nonzero_position() {
+    QueueRig rig; rig.begin(); rig.motor.watch(1);
+    feedStationary(rig, 1, 10, 500);
+    QueueProgram program;
+    program.count = 1;
+    auto& step = program.steps[0];
+    step.action = QueueAction::Move; step.id = 1; step.line = 1;
+    step.awaitCompletion = true; step.absolute = true;
+    step.distanceTenths = 900; step.speedTenths = 300;
+    step.accelRpmS = step.decelRpmS = 60; step.currentMa = 800;
+    CHECK(rig.queue.startDemo(program, 20).code == 202);
+    tick(rig, 30);
+    injectRx(makeAck(1, 0xCD, 0x02)); tick(rig, 40);
+    injectRx(makeTarget(1, 900)); feedStationary(rig, 1, 50, 900); rig.queue.poll(50);
+    feedStationary(rig, 1, 70, 900); rig.queue.poll(70); tick(rig, 90);
+    CHECK(rig.queue.state() == QueueState::Done);
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -1498,6 +1539,8 @@ struct TestCase {
 
 int main() {
     const TestCase tests[] = {
+        {"cross-entry enable and wait preserve observations", test_cross_entry_enable_and_wait_preserve_observations},
+        {"absolute demo await from nonzero position", test_demo_absolute_await_from_nonzero_position},
         {"fast home idle after grace without running sample", test_fast_home_without_running_sample},
         {"broadcast enable and disable wire frames", test_broadcast_enable_frames},
         {"home RX ordering, same tick and rejection", test_home_rx_order_and_same_tick},

@@ -796,8 +796,15 @@ void handleScaleConfig() {
     sendJson(200, scaleStatusJson());
 }
 
+void cancelUartForLocalDisable() {
+    if (!endpoint.busy()) return;
+    // Retain stop evidence before releasing the previous UART owner.
+    boardMotion.stop();
+    babytech::v2::Frame event;
+    for (uint8_t i = 0; i < 2 && endpoint.cancelPending(event); ++i) sendFrame(event);
+}
+
 void handleEnable() {
-    if (!demoManualMutation()) return;
     long id = 0;
     if (!argInteger("id", id) || id < 1 || id > 255) {
         sendError(400, F("id must be an integer 1..255"));
@@ -813,6 +820,8 @@ void handleEnable() {
         return;
     }
     const bool enabling = enabledRaw == "1";
+    if (enabling && !demoManualMutation()) return;
+    if (!enabling && stopDemoIfOwned()) return;
     if (enabling) {
         // Enabling while the queue runs would hand the same node to two owners.
         if (queue.active()) { sendError(409, F("queue_busy")); return; }
@@ -824,6 +833,7 @@ void handleEnable() {
         // Wi-Fi owns the bus.
         queue.cancel("stopped");
     }
+    if (!enabling) cancelUartForLocalDisable();
     const uint8_t target = static_cast<uint8_t>(id);
     sendResult("enable", id, motor.enable(target, enabling));
 }
@@ -1023,7 +1033,7 @@ void handleCommand() {
             sendError(409, F("queue_busy")); return;
         }
     }
-    if (endpoint.busy() && kind!=motion::CommandKind::Stop && kind!=motion::CommandKind::Interrupt) {
+    if (endpoint.busy() && !stopLike) {
         sendError(409,F("uart_operation_active")); return;
     }
     // Stops and disable remain accessible while the radio is occupied.
@@ -1031,6 +1041,7 @@ void handleCommand() {
         !(bytes[1] == 0xF3 && hex.length() == 12 && bytes[3] == 0)) {
         sendError(409, F("wifi_busy")); return;
     }
+    if (kind == motion::CommandKind::Enable && bytes[3] == 0) cancelUartForLocalDisable();
     sendResult("command", bytes[0], motor.command(bytes, hex.length()/2));
 }
 

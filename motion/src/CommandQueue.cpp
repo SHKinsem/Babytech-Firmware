@@ -731,14 +731,14 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
 
     // The plan is a fixed-size copy and stays immutable until the run ends. Only
     // now - after a fully successful parse - take the board over from a stale
-    // software supervisor: this clears MotorControl's volatile tracking and
-    // sends nothing on CAN.
+    // software supervisor without discarding observed hardware state or
+    // sending anything on CAN.
     program_ = scratch;
     strictHome_ = false;
     programHash_=2166136261u;
     for(size_t i=0;i<length;++i) programHash_=(programHash_^uint8_t(text[i]))*16777619u;
     sync_.reset();
-    motor_.clearControlState();
+    motor_.takeQueueControl();
     repeat_ = static_cast<uint32_t>(repeat);
     runId_++;
     motor_.queueDiagnostics_.beginRun(runId_);

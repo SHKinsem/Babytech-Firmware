@@ -92,6 +92,9 @@ public:
     // and attempted broadcast stop. No CAN re-init, NVS write, enable or motion.
     // Clears stale ownership; it is NOT evidence of physical stop.
     void clearControlState();
+    // Relinquish manual supervisors without CAN traffic or erasing observed
+    // feedback, confirmed enables, or still-pending hardware evidence.
+    void takeQueueControl();
 
     // Complete JSON object for one address. Fields without fresh data are null.
     String statusJson(uint8_t id) const;

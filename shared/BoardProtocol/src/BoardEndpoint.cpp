@@ -124,10 +124,17 @@ bool Endpoint::handle(const Frame& q,uint32_t now,Frame& out) {
     else if (q.cmd==Cmd::Exec) {
         const uint8_t cls=r.get(1); const uint16_t instance=r.get(2),op=r.get(2);
         const uint32_t expected=r.get(4);
+        const bool disable=cls==kMotor && instance>=1 && instance<=255 && op==kDisable;
         if (!r.done()) out=reject(q,Reason::InvalidParam);
         else if (expected!=revision_) out=reject(q,Reason::ConfigMismatch);
-        else if (busy() || backend_.busy()) out=reject(q,Reason::Busy);
+        else if (!disable && (busy() || backend_.busy())) out=reject(q,Reason::Busy);
         else {
+            // Disabling may preempt a live UART owner. Stop its other motors
+            // before transferring ownership, and retain the cancelled result.
+            if (disable && exec_.valid) {
+                backend_.stop();
+                finish(exec_,Outcome::Cancelled,Reason::None);
+            }
             Reason reason=Reason::Unsupported;
             if (cls==kStage && instance==kMoveStage && op==kRun) reason=backend_.startMove(params_);
             else if (cls==kMotor && instance>=1 && instance<=255 && (op==kEnable || op==kDisable))

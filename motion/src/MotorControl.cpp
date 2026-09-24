@@ -380,7 +380,7 @@ void MotorControl::handleAck(
 
     if (ack == AckStatus::Received || ack == AckStatus::Completed) {
         if (function == kFrameEnable) {
-            // An F3 ack may only confirm a run of enableControl. A late ack
+            // An F3 ack may only confirm a tracked enable request. A late ack
             // arriving after a stop (enablePending cleared) must not re-enable.
             if (!node.enablePending) return;
             node.enableAck = true; node.enableTimedOut = false;
@@ -535,7 +535,6 @@ bool MotorControl::nodeOfInterest(uint8_t id) const {
 }
 
 bool MotorControl::anyStopPending() const {
-    if (job_.active) return true;
     for (uint16_t id = 1; id < kNodeCount; ++id) {
         if (nodes_[id].stopRequested) return true;
     }
@@ -1471,6 +1470,24 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
         can_.clearTransmissionError();
         return false;
     }
+    // Track a successfully submitted immediate F3 without claiming hardware
+    // success. The existing RX path requires both its ACK and fresh 3A flags.
+    if (length == 6 && bytes[1] == kFrameEnable && bytes[2] == 0xAB &&
+        bytes[3] <= 1 && bytes[4] == 0 && bytes[5] == 0x6B) {
+        const uint8_t id = bytes[0];
+        const bool enabled = bytes[3] != 0;
+        for (uint16_t target = 1; target < kNodeCount; ++target) {
+            if (id && target != id) continue;
+            NodeState& node = nodes_[target];
+            node.enableConfirmed = false;
+            node.enableDesired = id ? enabled : false;
+            node.enablePending = id != 0;
+            node.enableAck = false;
+            node.enableTimedOut = false;
+            node.enablePendingMs = millis();
+            if (!enabled) invalidateTarget(static_cast<uint8_t>(target));
+        }
+    }
     return true;
 }
 
@@ -1643,7 +1660,7 @@ Result MotorControl::broadcastEnable(bool enabled) {
     return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
 }
 
-void MotorControl::clearControlState() {
+void MotorControl::takeQueueControl() {
     job_ = MoveJob{};
     moveOutcome_ = MoveOutcome::None;
     home_ = HomeJob{};
@@ -1660,6 +1677,10 @@ void MotorControl::clearControlState() {
     targetPollArmedMs_ = 0;
     queries_.release(CanQueryScheduler::Controller);
     queries_.release(CanQueryScheduler::Await);
+}
+
+void MotorControl::clearControlState() {
+    takeQueueControl();
     for (uint16_t id = 0; id < kNodeCount; ++id) nodes_[id] = NodeState{};
     // limits_, trace_, config evidence, and lastMoveFailure remain available.
     // A real bus fault will be observed again by the next poll.
