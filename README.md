@@ -1,8 +1,28 @@
 # Babytech Firmware
 
-本轮执行情况见 [整合进度与待验收项](docs/integration-progress-20260924.md)，工程路径与兼容标识见 [控制板命名](docs/controller-naming.md)。
+## 当前主线（2026-09-24）
 
-协作整合请先阅读 [仓库整合与协作计划](docs/integration-plan.md)：分支现状、PR 依赖、整合顺序、负责人认领与验收清单。
+[PR #12](https://github.com/SHKinsem/Babytech-Firmware/pull/12) 已合入 `main`，包含同步运动、命令反馈、紧凑工作台、Wi-Fi OTA 和控制器目录统一。主线现作为协作者共同调试的基线。
+
+**sync 优先级最高，尤其要保留 9 月 23 日实机验证过的行为。** 已记录双轴反向三圈完成、触发后目标确认及查询反馈结果；完整工况与边界见 [同步实机记录](docs/motion-sync-development.md#2026-09-23-同步实机补充)。整合后的镜像仍需复验，不能把历史实测或软件测试等同于最终机械验收。
+
+- 已接入：同步组与查询预算、真实命令反馈、单位输入修复、部分跨入口 disable 修复、OTA 软件实现。
+- 待跟进：[控制状态问题 #6](https://github.com/SHKinsem/Babytech-Firmware/issues/6) 的剩余策略与实测、[OTA #3](https://github.com/SHKinsem/Babytech-Firmware/issues/3) 的签名/健康确认/回滚验收。
+- **mDNS 尚未实现**，由 [#4](https://github.com/SHKinsem/Babytech-Firmware/issues/4) 跟踪；目前通过热点地址或路由器分配的 IP 访问。
+
+具体交接见 [整合进度与待验收项](docs/integration-progress-20260924.md)，兼容标识见 [控制板命名](docs/controller-naming.md)。[原始整合计划](docs/integration-plan.md) 保留整合前快照，不代表当前分支和 PR 状态。
+
+## 协作者开始调试
+
+确认工作区干净后更新主线，再建立自己的调试分支：
+
+```bash
+git switch main
+git pull --ff-only origin main
+git switch -c codex/your-task
+```
+
+如果本地 main 已分叉，先保留独有工作再整合，不要强制覆盖。优先复验昨晚相同的 sync 程序与参数；修改反馈轮询、目标确认、查询预算或停止判定时，记录提交 SHA、构建配置、镜像哈希与实测结果。其他功能的整合不得静默改变这些行为。
 
 两块 ESP32-S3 N16R8 的最小固件仓库。每块板是独立、标准的 PlatformIO Arduino 工程。
 
@@ -16,7 +36,7 @@
 
 ## 当前可运行的内容
 
-当前提供两条调试路径：brain 的 UART 状态页，以及 motion 独立热点的 CAN 电机调试页。
+当前提供两条调试路径：主控板的 UART 状态页，以及设备控制板独立热点的 CAN 电机调试页。
 
 - `main-controller/`：`Babytech-Debug` 热点与中文状态页，使用 v2 四指令查询状态、修改 RAM 参数、显式使能、执行单电机阶段和停止。
 - `device-controller/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。下板默认从 GPIO1/2 采样 HX711，网页可修改并持久化 DOUT/SCK，同时提供称重状态、去皮和标定 API。
@@ -27,18 +47,18 @@
 
 详细操作和接口见 [下板网页调试](docs/motion-debug.md)。
 
-直发队列、执行诊断、全局查询预算及同步/螺旋动作见 [电机编排队列](docs/motor-queue.md)。软件验证和待实测项目见 [同步开发与验收记录](docs/motion-sync-development.md)；尚未完成同步实机验收。
+直发队列、执行诊断、全局查询预算及同步/螺旋动作见 [电机编排队列](docs/motor-queue.md)。软件验证和待实测项目见 [同步开发与验收记录](docs/motion-sync-development.md)；已完成部分低速、小幅及多圈同步实测，完整负载与机械验收仍待完成。
 
 新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
 
-可选 DISPLAY 分支已接入产品显示板 UART v3、非阻塞流程、阶段调试和 JSON 配置。采用“调试用内存、演示用内置 JSON”，默认脚本未配置，上电不运动。见 [演示操作说明](docs/motion-display-demo.md) 与 [开发验收计划](docs/motion-display-demo-plan.md)。默认 BRAIN 构建仍使用 Brain/Motion v2；机械与双板实机验收尚未完成。
+可选 DISPLAY 构建配置已接入产品显示板 UART v3、非阻塞流程、阶段调试和 JSON 配置。采用“调试用内存、演示用内置 JSON”，默认脚本未配置，上电不运动。见 [演示操作说明](docs/motion-display-demo.md) 与 [开发验收计划](docs/motion-display-demo-plan.md)。默认 BRAIN 构建仍使用 Brain/Motion v2；机械与双板实机验收尚未完成。
 
 ## 目录
 
 ```text
 main-controller/       platformio.ini、src/、include/、lib/、test/、data/
 device-controller/      platformio.ini、src/、include/、lib/、data/
-shared/      两块板共同依赖的 BoardProtocol 库
+shared/                BoardProtocol、BabytechDisplayCore、WifiOta
 docs/        板间协议和范围
 tools/       主机验证工具
 ```
@@ -52,8 +72,8 @@ Windows 保留源码，编译在 WSL 的 Linux 文件系统进行：
 
 ```powershell
 ./tools/build-wsl.ps1
-./tools/build-wsl.ps1 -Target motion
-./tools/build-wsl.ps1 -Target brain
+./tools/build-wsl.ps1 -Target device-controller
+./tools/build-wsl.ps1 -Target main-controller
 ```
 
 产物自动写回 `out/wsl/`，WSL 保留增量编译缓存。首次环境和路径说明见 [WSL 编译](docs/wsl-build.md)。
@@ -61,7 +81,7 @@ Windows 保留源码，编译在 WSL 的 Linux 文件系统进行：
 
 ## 编译与验证
 
-工具链固定为 `espressif32@6.4.0`，对应当前电脑已安装的 Arduino-ESP32 2.0.11。
+工具链固定为 `espressif32@6.4.0`，对应 Arduino-ESP32 2.0.11。
 使用 PlatformIO 标准 `esp32-s3-devkitc-1` 板型，并覆盖为 16 MB Flash / 8 MB OPI PSRAM。
 这不是 ESP-IDF 工程；目前无需为了 FreeRTOS 改换框架。
 
@@ -72,9 +92,24 @@ pio run -d device-controller
 pio run -d main-controller
 python tools/test_protocol.py
 python tools/test_motion.py
+python tools/test_raw_can.py
+python tools/test_demo.py
 ```
 
-主机测试需要 `g++` 在 PATH 中，也可通过 `CXX` 指定兼容编译器。
+主机测试需要 `g++` 在 PATH 中，也可通过 `CXX` 指定兼容编译器。目录已改名，但 PlatformIO 环境仍为 `brain` / `motion`，OTA board ID 和 WSL 导出目录也保留这些兼容标识。
+
+修改工作台后，先重建内嵌页面，再编译设备固件：
+
+```bash
+cd tools/motor-protocol-demo
+npm ci
+npm test
+npm run build:device
+cd ../..
+pio run -d device-controller
+```
+
+GitHub Actions 执行前端与主机回归，并编译主控、设备 BRAIN 和 DISPLAY 配置，见 [CI 配置](.github/workflows/firmware-checks.yml)。浏览器 mock 测试与编译通过不代表实机验收完成。
 
 ## 接线
 
@@ -108,9 +143,9 @@ pio run -d main-controller -t upload --upload-port COM_BRAIN
 
 上面是 brain 状态页。调试电机时改连 `Babytech-Motion`（同一开发密码），访问 `http://192.168.4.1/`，输入驱动器 CAN ID，读取反馈后显式使能并试动。HTTP 202 只代表板卡已提交指令，不代表电机已执行。
 
-## 接下来只做这些
+## 后续工作优先级
 
-1. 对当前 CAN 网页调试完成实机验收，再接入机构动作 Runtime。
+1. 优先复验主线 sync，保住昨晚验证的触发后目标确认、查询预算、目标窗口和真实完成判定，再扩展负载与机构流程。
 2. 实机验收已实现的 UART「改 RAM 参数 → 单电机阶段 → 返回结果 → 停止」闭环，见 [v2 指令表](docs/protocol-v2.md)。
 3. 将下板称重状态加入板间协议；下板调试页已接入称重、漂移诊断、去皮和标定。
 4. 迁入已验证的屏幕/触摸驱动，在大脑上显示同一份小脑状态。
@@ -130,7 +165,13 @@ Wi-Fi OTA 的设计与操作见 [实施计划](docs/wifi-ota-plan.md) 和 [使�
 
 详见 [当前板间协议 v2](docs/protocol-v2.md)；[v1 文档](docs/protocol.md) 仅供历史参考。
 
-## 验证记录（2026-09-21）
+## 验证记录
+
+2026-09-24 整合：协议、运动、raw CAN、demo 主机回归通过；前端 92/92、Sites 4/4、OTA 页面 3/3、刷写工具模拟测试 8/8、设备浏览器 QA 14/14 通过。主控与设备 BRAIN/DISPLAY 固件编译通过，最终页面嵌入校验通过；代码提交 `754e893` 的远端 push/PR CI 均通过。实机证据另见上述同步记录，本轮整合未烧录设备。
+
+### 历史记录（2026-09-21）
+
+以下是当日结果，体积和检查数量不代表当前固件：
 
 - UART v2 最小闭环：READ / WRITE / EXEC / STOP 已接通上下板，包括单电机阶段 RAM 参数、显式使能/失能、执行结果与优先停止。
 - 21:20（香港时间）WSL 双板编译通过：motion Flash 1075561 bytes、RAM 72368 bytes；brain Flash 735717 bytes、RAM 45392 bytes。motion 构建已包含 HX711、NVS 标定和称重 API；产物位于 `out/wsl/motion/` 与 `out/wsl/brain/`，两板须一起更新到 v2。
