@@ -232,6 +232,9 @@ bool X42sProtocol::probeReadSysParams(uint8_t addr, X42sSysParam param) {
     rec.addr = addr;
     rec.param = param;
     fakecan::emit(addr, data, length, rec);
+    // Real query transmission invokes the trace sink, including bus-budget
+    // accounting. Omitting it hides starvation by out-of-band pollers.
+    if (traceSink_) traceSink_(traceContext_, fakecan::capturedTX.back(), true);
     return true;
 }
 

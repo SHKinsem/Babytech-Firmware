@@ -1846,10 +1846,12 @@ String MotorControl::statusJson(uint8_t id) const {
 
 void MotorControl::demoProbe(uint8_t id, uint8_t field) {
     if (!id || !canReady()) return;
-    const X42sSysParam fields[] = {X42sSysParam::Cpos, X42sSysParam::Vel,
-        X42sSysParam::Flag, X42sSysParam::Org};
-    can_.probeReadSysParams(id, fields[field % 4]);
-    can_.clearTransmissionError();
+    // Demo refresh shares the same budget as await and sync. Direct 20 ms
+    // probes reset lastTraffic continually and starve the awaited 0x33 target
+    // query whenever the configured gap exceeds 20 ms.
+    const uint8_t fields[] = {0x36, 0x35, 0x3A, 0x3B};
+    queries_.demand(id, fields[field % 4], CanQueryScheduler::Demo,
+                    400, 1000, 0, millis());
 }
 
 bool MotorControl::demoDriverFault(uint8_t id) const {

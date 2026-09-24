@@ -2,6 +2,7 @@
 #include "fake_x42s.h"
 #include <cassert>
 #include <iostream>
+#include <cstring>
 using namespace motion;
 using namespace fakecan;
 struct Rotation : QueueRotationSource {
@@ -11,7 +12,57 @@ void feedback(MotorControl& motor, uint32_t now, int32_t position) {
     setMillis(now); injectRx(makePosition(1, position)); injectRx(makeVelocity(1, 0)); motor.poll();
     const uint8_t flags[] = {0x3A, 0x83, 0x6B}; injectRx(makeFrame(1,flags,3)); motor.poll();
 }
+static void test_demo_polling_does_not_starve_queue_await() {
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
+    struct Millimetres : QueueRotationSource {
+        bool rotationMm(uint8_t, double& mm) const override { mm=10; return true; }
+    } rotation;
+    assert(motor.begin(4,5,500000)); motor.setAutoQueriesEnabled(false);
+    CanQueryScheduler::Config budget; budget.queriesPerSecond=30; budget.gapMs=33;
+    assert(motor.queries().configure(budget));
+    DemoConfig config;
+    for (uint8_t id=1;id<=5;++id) config.axes.push_back({id,10,10,false});
+    DemoMotorExecutor executor(motor,queue,rotation); executor.configure(config);
+    const char* program="enable 1\nmove 1 -5 mm 300 300 300 200 await\nhome 1 2\n";
+    assert(queue.start(program,std::strlen(program),1,rotation,0).code==202);
+    bool moved=false, targetRead=false, homeSent=false;
+    size_t seen=0;
+    for (uint32_t now=1;now<5000;++now) {
+        setMillis(now); motor.poll(false); executor.poll(now); queue.poll(now);
+        motor.dispatchQueries();
+        while (seen<capturedTX.size()) {
+            const auto frame=capturedTX[seen++];
+            const uint8_t id=uint8_t(frame.identifier>>8), op=frame.data[0];
+            if (op==0xCD && (frame.identifier&0xFF)==0) {
+                moved=true; injectRx(makeAck(id,op,2));
+            } else if (op==0x9A) {
+                assert(frame.length==4 && frame.data[1]==2 && frame.data[2]==0);
+                homeSent=true;
+            } else if (op==0xF3) injectRx(makeAck(id,op,2));
+            else if (op==0x36) injectRx(makePosition(id,id==1 && moved ? -1800 : 0));
+            else if (op==0x35) injectRx(makeVelocity(id,0));
+            else if (op==0x33) { targetRead=true; injectRx(makeTarget(id,-1800)); }
+            else if (op==0x3A || op==0x3B) {
+                const uint8_t reply[]={op,3,0x6B}; injectRx(makeFrame(id,reply,3));
+            }
+        }
+    }
+    if (!targetRead || !homeSent || queue.state()!=QueueState::Done)
+        std::cerr << "demo/await: targetRead=" << targetRead << " homeSent=" << homeSent
+                  << " " << queue.statusJson().str() << '\n';
+    assert(targetRead && homeSent && queue.state()==QueueState::Done);
+    // Demo polling must also respect the sync owner's exclusive window.
+    motor.queries().exclusiveSync(true);
+    const size_t before=capturedTX.size();
+    for (uint32_t now=5000;now<5500;++now) {
+        setMillis(now); motor.poll(false); executor.poll(now); motor.dispatchQueries();
+    }
+    assert(capturedTX.size()==before);
+    std::cout << "PASS demo polling shares budget: move await reaches home, sync excludes demo queries\n";
+}
+
 int main() {
+    test_demo_polling_does_not_starve_queue_await();
     fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
     assert(motor.begin(4,5,500000));
     DemoConfig c; c.axes.push_back({1,10,0,true});

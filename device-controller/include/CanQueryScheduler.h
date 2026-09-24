@@ -9,7 +9,7 @@ namespace motion {
 // defers optional queries. All durations must be < 2^31 ms.
 class CanQueryScheduler {
 public:
-    enum Owner : uint8_t { Controller, Await, Sync, Page, OwnerCount };
+    enum Owner : uint8_t { Controller, Await, Sync, Page, Demo, OwnerCount };
     struct Config {
         uint16_t queriesPerSecond=10, gapMs=100, timeoutMs=500, cooldownMs=500;
         uint8_t maxInflight=2;
