@@ -23,9 +23,11 @@
 #include <esp_efuse_table.h>
 #include <esp_system.h>
 #include <MotorControl.h>
+#include <WifiOta.h>
 #include "WiFiSetup.h"
 
 #include "board_config.h"
+#include "ota_identity.h"
 
 // Single self-contained page embedded by the build (board_build.embed_txtfiles).
 // The blob is NUL terminated; subtract that byte when sending.
@@ -44,10 +46,20 @@ motion::CommandQueue queue(motor);
 QueueBoardMotion boardMotion(motor, queue);
 babytech::v2::Endpoint endpoint(boardMotion);
 WebServer server(kHttpPort);
+bool safeForOta();
+bool otaHealthy();
+babytech::WifiOta ota(server, BABYTECH_OTA_BOARD, BABYTECH_OTA_HARDWARE,
+                      BABYTECH_OTA_VERSION, BABYTECH_OTA_BUILD, BABYTECH_OTA_IMAGE_ID,
+                      safeForOta, otaHealthy);
 // The queue is a board operation like any other: while it runs, Wi-Fi scanning
 // and the scale/config endpoints stay blocked.
-bool motionBusy() { return endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
+bool controlBusy() { return endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
+bool motionBusy() { return controlBusy() || ota.maintenanceActive(); }
 WiFiSetup wifiSetup(server, motionBusy);
+bool canStarted = false;
+bool safeForOta() { return !controlBusy() && !motor.operationBusy() && !wifiSetup.busy(); }
+bool otaHealthy() { return canStarted && wifiSetup.apReady() &&
+                           WiFi.softAPIP() != IPAddress(0,0,0,0); }
 uint32_t lastMainControllerByteAt = 0;
 int scaleDoutPin = kScaleDoutPin;
 int scaleSckPin = kScaleSckPin;
@@ -537,7 +549,7 @@ void sendFrame(const babytech::v2::Frame& frame) {
 void serviceMainControllerLink() {
     using namespace babytech::v2;
     if (millis()-lastMainControllerByteAt>kByteTimeoutMs) parser.reset();
-    boardMotion.setRadioBusy(wifiSetup.busy() || queue.active());
+    boardMotion.setRadioBusy(wifiSetup.busy() || queue.active() || ota.maintenanceActive());
     for (size_t count=0;count<kLinkBytesPerPass && mainController.available()>0;++count) {
         lastMainControllerByteAt=millis(); Frame request,response;
         if (parser.push(uint8_t(mainController.read()),request)) {
@@ -1086,6 +1098,12 @@ void handleQueueCancel() {
     sendQueueResult(queue.cancel("cancelled"), false);
 }
 
+bool rejectDuringOta() {
+    if (!ota.maintenanceActive()) return false;
+    sendError(409, F("ota_active"));
+    return true;
+}
+
 
 }  // namespace
 
@@ -1113,7 +1131,8 @@ void setup() {
                       powderScale.calibrationPersisted() ? "stored" : "required");
     }
 
-    if (!motor.begin(kCanTxPin, kCanRxPin, kCanBitrate)) {
+    canStarted = motor.begin(kCanTxPin, kCanRxPin, kCanBitrate);
+    if (!canStarted) {
         Serial.println("[can] init failed; HTTP stays up, motor commands will be rejected");
         debugLog.addf(millis(), "error", "can.init", "ready=0 tx=%d rx=%d", kCanTxPin, kCanRxPin);
     } else {
@@ -1125,14 +1144,16 @@ void setup() {
     loadDebugLimits();
     loadRotationDistances();
     wifiSetup.begin();
+    ota.begin();
 
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/api/limits", HTTP_GET, []() { sendJson(200, limitsJson()); });
-    server.on("/api/limits", HTTP_POST, handleLimits);
+    server.on("/api/limits", HTTP_POST, []() { if (!rejectDuringOta()) handleLimits(); });
     server.on("/api/can-debug", HTTP_GET, []() { sendJson(200, motor.canDebugJson()); });
     server.on("/api/config-result", HTTP_GET, []() { sendJson(200, motor.configJson()); });
     server.on("/api/polling", HTTP_POST, []() {
+        if (rejectDuringOta()) return;
         long enabled = 0;
         if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
             sendError(400, F("enabled must be 0 or 1"));
@@ -1154,13 +1175,13 @@ void setup() {
         sendJson(200, String(logJson, length));
     });
     server.on("/api/scale", HTTP_GET, []() { sendJson(200, scaleStatusJson()); });
-    server.on("/api/scale/config", HTTP_POST, handleScaleConfig);
-    server.on("/api/scale/tare", HTTP_POST, handleScaleTare);
-    server.on("/api/scale/calibrate", HTTP_POST, handleScaleCalibrate);
-    server.on("/api/command", HTTP_POST, handleCommand);
-    server.on("/api/enable", HTTP_POST, handleEnable);
-    server.on("/api/enable-all", HTTP_POST, handleEnableAll);
-    server.on("/api/move", HTTP_POST, handleMove);
+    server.on("/api/scale/config", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleConfig(); });
+    server.on("/api/scale/tare", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleTare(); });
+    server.on("/api/scale/calibrate", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleCalibrate(); });
+    server.on("/api/command", HTTP_POST, []() { if (!rejectDuringOta()) handleCommand(); });
+    server.on("/api/enable", HTTP_POST, []() { if (!rejectDuringOta()) handleEnable(); });
+    server.on("/api/enable-all", HTTP_POST, []() { if (!rejectDuringOta()) handleEnableAll(); });
+    server.on("/api/move", HTTP_POST, []() { if (!rejectDuringOta()) handleMove(); });
     server.on("/api/stop", HTTP_POST, handleStop);
     server.on("/api/stop-all", HTTP_POST, handleStopAll);
     // Operator reset of volatile control ownership: POST only, available while
@@ -1169,10 +1190,10 @@ void setup() {
     // Board queue: GET never executes anything, start validates the whole
     // program before the first CAN frame, cancel also stops everything.
     server.on("/api/queue", HTTP_GET, []() { sendJson(200, queue.statusJson()); });
-    server.on("/api/queue/start", HTTP_POST, handleQueueStart);
+    server.on("/api/queue/start", HTTP_POST, []() { if (!rejectDuringOta()) handleQueueStart(); });
     server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
     server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);
-    server.on("/api/motor-distance", HTTP_POST, handleMotorDistance);
+    server.on("/api/motor-distance", HTTP_POST, []() { if (!rejectDuringOta()) handleMotorDistance(); });
     server.onNotFound(handleNotFound);
     server.begin();
     debugLog.add(millis(), "info", "http.ready", "port=80 no_motion_on_boot");
@@ -1192,6 +1213,7 @@ void loop() {
     queue.poll(millis());
     serviceMainControllerLink();
     server.handleClient();
+    ota.poll();
     wifiSetup.poll();
     powderScale.poll(millis());
     motor.poll();

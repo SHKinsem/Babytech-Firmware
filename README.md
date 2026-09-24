@@ -112,11 +112,14 @@ pio run -d main-controller -t upload --upload-port COM_MAIN
 
 | 文档 | 内容 |
 | --- | --- |
+| [仓库整合与协作计划](docs/integration-plan.md) | 分支现状、PR 依赖、整合顺序、协作者分工与验收清单 |
 | [设备控制板网页调试](docs/motion-debug.md) | 基础 API、接线与问题排查 |
 | [电机编排队列](docs/motor-queue.md) | 已实现的指令、参数与执行语义 |
 | [板间协议 v2](docs/protocol-v2.md) | UART 指令与主控板与设备控制板接口 |
 | [工作台交付说明](docs/motion-workbench-release.md) | 网页构建、烧录与交付边界 |
 | [WSL 编译](docs/wsl-build.md) | 编译环境与构建步骤 |
+| [Wi-Fi 固件升级计划](docs/wifi-ota-plan.md) | 双板 OTA 可行性、实施步骤与验收条件 |
+| [Wi-Fi 固件升级使用说明](docs/wifi-ota-implementation.md) | 首次安装、签名打包与台架验收边界 |
 | [电机修复与同步计划](docs/motor-sync-plan.md) | 待实现方案与验收标准 |
 | [开发与验证记录](docs/development-notes.md) | 阶段安排及历史验证结果 |
 | [控制板命名与迁移](docs/controller-naming.md) | 新旧工程名、构建入口与兼容边界 |

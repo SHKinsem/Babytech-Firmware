@@ -106,6 +106,7 @@ export function CommandPanel({
   address,
   addressError,
   gateReason,
+  response,
   onSend,
   onCopy,
 }) {
@@ -358,6 +359,18 @@ export function CommandPanel({
             <span>指令提交后等待电机应答；收到应答不等于机械动作完成。</span>
           </p>
         )}
+        {device && response ? <div className="command-result" role="status" aria-label="本次指令反馈">
+          <div className="command-result__head"><strong>最近发送 · 电机 {response.address} · 0x{hexByte(response.opcode)}</strong>
+            <span>{response.phase === 'sending' ? '正在提交' : response.phase === 'queued' ? '请求已入队' : response.phase === 'unknown' ? '请求结果未知' : response.phase === 'restarted' ? '板端已重启' : '板端拒绝'}</span></div>
+          {response.phase === 'rejected' ? <p>板端拒绝：{response.detail}</p> : response.phase === 'restarted' ? <p>{response.detail}</p> : <>
+            {response.phase === 'unknown' && response.detail ? <p>{response.detail}</p> : null}
+            <p>{response.txSeen ? 'CAN TX 已在板端记录' : '尚未在板端记录看到 CAN TX'} · {response.rxCount ? `收到 ${response.rxCount} 包同地址/功能码 RX` : '尚未收到同地址/功能码 RX'}</p>
+            {response.reply?.decoded ? <><strong>{response.reply.decoded.title}</strong><pre>{response.reply.decoded.text}</pre></>
+              : response.reply ? <p>已收到原始回包：{formatBytes(response.reply.data)}{[0x42,0x43].includes(response.opcode) ? '（多包参数等待完整读回）' : '（布局未确认，保留原始字节）'}</p>
+              : <p>等待总线回包；部分命令可能不返回应答。</p>}
+            <small>按接收顺序关联，协议没有事务序号；同功能码的自动查询或其他发送也可能出现于此。</small>
+          </>}
+        </div> : null}
       </div>
 
       <p className="panel__foot">
