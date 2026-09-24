@@ -9,6 +9,7 @@
 // come from an explicit HTTP or UART request; the driver may already be enabled.
 
 #include <Arduino.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -1451,6 +1452,20 @@ void setup() {
     server.begin();
     debugLog.add(millis(), "info", "http.ready", "port=80 no_motion_on_boot");
     Serial.println("[http] listening on port 80; no enable or movement command sent on boot");
+    if (wifiSetup.apReady() && WiFi.softAPIP() != IPAddress(0,0,0,0)) {
+        if (MDNS.begin("babytech-device")) {
+            MDNS.setInstanceName("Babytech Device");
+            if (MDNS.addService("http", "tcp", kHttpPort)) {
+                Serial.println("[mdns] ready: http://babytech-device.local/ (_http._tcp:80)");
+            } else {
+                Serial.println("[mdns] HTTP service registration failed");
+            }
+        } else {
+            Serial.println("[mdns] responder start failed");
+        }
+    } else {
+        Serial.println("[mdns] skipped: AP has no IP address");
+    }
     // Establish the state baseline without reporting anything: the first poll
     // must not invent transitions for states that were never observed changing.
     debugLogPoll(millis());

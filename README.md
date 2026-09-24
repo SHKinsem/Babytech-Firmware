@@ -8,7 +8,7 @@
 
 - 已接入：同步组与查询预算、真实命令反馈、单位输入修复、部分跨入口 disable 修复、OTA 软件实现。
 - 待跟进：[控制状态问题 #6](https://github.com/SHKinsem/Babytech-Firmware/issues/6) 的剩余策略与实测、[OTA #3](https://github.com/SHKinsem/Babytech-Firmware/issues/3) 的签名/健康确认/回滚验收。
-- **mDNS 尚未实现**，由 [#4](https://github.com/SHKinsem/Babytech-Firmware/issues/4) 跟踪；目前通过热点地址或路由器分配的 IP 访问。
+- **mDNS 已接入固件**：主控板使用 `babytech-main.local`，设备控制板使用 `babytech-device.local`；实机热点、路由器重连及服务发现仍待验收，见 [#4](https://github.com/SHKinsem/Babytech-Firmware/issues/4)。
 
 具体交接见 [整合进度与待验收项](docs/integration-progress-20260924.md)，兼容标识见 [控制板命名](docs/controller-naming.md)。[原始整合计划](docs/integration-plan.md) 保留整合前快照，不代表当前分支和 PR 状态。
 
@@ -136,12 +136,12 @@ pio run -d main-controller -t upload --upload-port COM_BRAIN
 `COM_MOTION` / `COM_BRAIN` 是占位符，替换为实际端口。
 
 1. 连接 Wi-Fi `Babytech-Debug`，开发热点密码为 `babytech-demo`。
-2. 浏览器打开 `http://192.168.4.1/`。
+2. 浏览器打开 `http://babytech-main.local/`；若当前网络不支持 mDNS，改用 `http://192.168.4.1/`。
 3. 点击「查询小脑状态」，应看到小脑在线、运行时间和响应计数更新。
 4. 拔掉小脑 USB，约 1.5 秒后页面应显示小脑未连接，运行时间变为 `—`。
 5. 恢复供电，应自动恢复在线，运行时间从新启动开始计数。
 
-上面是 brain 状态页。调试电机时改连 `Babytech-Motion`（同一开发密码），访问 `http://192.168.4.1/`，输入驱动器 CAN ID，读取反馈后显式使能并试动。HTTP 202 只代表板卡已提交指令，不代表电机已执行。
+上面是主控板状态页。调试电机时改连 `Babytech-Motion`（同一开发密码），访问 `http://babytech-device.local/`，输入驱动器 CAN ID，读取反馈后显式使能并试动。设备板加入路由器后，同一局域网内应可使用相同名称，仍待实机验收。mDNS 不可用时，通过热点访问 `http://192.168.4.1/`，或使用路由器分配的 IP。两个固定名称各只支持同一局域网内一块对应板卡。HTTP 202 只代表板卡已提交指令，不代表电机已执行。
 
 ## 后续工作优先级
 
