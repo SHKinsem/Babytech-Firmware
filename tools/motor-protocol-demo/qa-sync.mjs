@@ -1,14 +1,17 @@
 // Real built device page, mocked board only. Start a localhost static server
-// for dist/device first. PLAYWRIGHT_MODULE / CHROME_PATH are machine-specific.
+// for dist/device first. Supply PLAYWRIGHT_MODULE and BROWSER_EXECUTABLE (or
+// CHROME_PATH) through the process environment when the local defaults differ.
 import {createRequire} from 'node:module';
 import assert from 'node:assert/strict';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 const require=createRequire(import.meta.url);
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const playwright=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const {chromium}=playwright;
 const base=process.env.QA_BASE_URL || 'http://127.0.0.1:4173';
 assert.ok(['localhost','127.0.0.1'].includes(new URL(base).hostname),'QA may only load a local fixture');
-const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
+const browserExecutable=process.env.BROWSER_EXECUTABLE || process.env.CHROME_PATH;
+const browser=await chromium.launch({headless:true,...(browserExecutable ? {executablePath:browserExecutable} : {})});
 const hash=text=>{let h=2166136261;for(const b of new TextEncoder().encode(text))h=Math.imul(h^b,16777619)>>>0;return h;};
 try {
   const page=await browser.newPage();const errors=[],posts=[];
@@ -40,6 +43,14 @@ try {
   });
   await page.goto(base);assert.equal(new URL(page.url()).hostname,new URL(base).hostname);assert.ok(await page.title());
   await page.getByRole('tab',{name:'编排队列',exact:true}).click();
+  const queueSide=page.locator('.compact-panel--queue-side');
+  const queueSideToggle=queueSide.getByRole('button',{name:/板端进度与设置/});
+  if(await queueSideToggle.getAttribute('aria-expanded')!=='true')await queueSideToggle.click();
+  assert.equal(await queueSideToggle.getAttribute('aria-expanded'),'true','queue status and sync settings must be reachable by opening their panel');
+  const queueBuilder=page.locator('.compact-panel--queue-builder');
+  const queueBuilderToggle=queueBuilder.getByRole('button',{name:/动作插入（可选）/});
+  if(await queueBuilderToggle.getAttribute('aria-expanded')!=='true')await queueBuilderToggle.click();
+  assert.equal(await queueBuilderToggle.getAttribute('aria-expanded'),'true','action insertion controls must be reachable by opening their panel');
   const editor=page.locator('#queue-program');await editor.fill(source);
   const alert=page.locator('.queue-diagnostics [role="alert"]').first();
   await alert.getByText('驱动拒绝',{exact:true}).waitFor();
@@ -73,11 +84,13 @@ try {
   await page.getByRole('button',{name:'保存全局查询预算'}).click();
   await page.getByText('板端已确认保存；未发送运动指令。',{exact:true}).waitFor();
   assert.equal(posts.length,1);assert.equal(posts[0].values.queriesPerSecond,'8');
-  await page.getByText(/启动许可（最后读取）/).click();
-  assert.equal(await page.getByRole('button',{name:'记录本次人工隔离确认'}).isDisabled(),true);
-  for(const checkbox of await page.locator('.sync-settings input[type="checkbox"]').all())await checkbox.check();
-  await page.getByRole('button',{name:'记录本次人工隔离确认'}).click();
-  await page.getByText(/启动许可（最后读取）：人工已确认隔离/).waitFor();assert.equal(posts.length,2);
+  await page.getByRole('textbox',{name:'进度容差 0..0.25',exact:true}).fill('0.15');
+  await page.getByRole('button',{name:'保存同步容差与期限',exact:true}).click();
+  await page.getByText('板端已确认保存；未发送运动指令。',{exact:true}).waitFor();
+  assert.equal(posts.length,2);assert.equal(posts[1].path,'/api/sync-settings');assert.equal(posts[1].values.progressTolerance,'0.15');
+  assert.equal(await page.locator('.sync-settings input[type="checkbox"]').count(),0,'current firmware must not expose the removed manual cache-isolation checklist');
+  assert.equal(await page.getByRole('button',{name:'记录本次人工隔离确认'}).count(),0,'legacy manual isolation attestation is no longer part of the current sync contract');
+  assert.equal(await page.getByRole('button',{name:'开始执行',exact:true}).isDisabled(),false,'the removed legacy isolation gate must not block a valid direct-send queue');
   queue={...queue,state:'cancelled',active:true,sync:{phase:'stop_requested',error:'sync_feedback_lost',members:[{id:1,line:2,stopSent:true,stopped:false}]}};
   await page.getByRole('button',{name:'刷新状态',exact:true}).click();
   await page.getByText(/同步异常：/).waitFor();assert.equal(await page.getByRole('button',{name:'开始执行',exact:true}).isDisabled(),true);
@@ -86,5 +99,5 @@ try {
   await page.getByRole('button',{name:'刷新状态',exact:true}).click();
   await page.locator('.queue-col__head').first().getByText(/运动完成/).waitFor();
   assert.deepEqual(errors,[]);assert.equal(posts.length,2);
-  console.log('PASS built device UI: two desktop viewports, sticky errors, safe source matching, helix builder, explicit budget/isolation writes, stop-pending lock, honest completion, no automatic POSTs or console errors');
+  console.log('PASS built device UI: two desktop viewports, sticky errors, safe source matching, helix builder, explicit budget/sync writes without legacy isolation attestation, stop-pending lock, honest completion, no automatic POSTs or console errors');
 } finally {await browser.close();}

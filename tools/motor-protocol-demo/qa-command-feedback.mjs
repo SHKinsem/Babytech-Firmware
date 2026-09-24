@@ -3,10 +3,12 @@ import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 
 const require = createRequire(import.meta.url);
-const { chromium } = require('C:/Users/xusen/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
-const browser = await chromium.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe'});
+const playwright=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { chromium } = playwright;
+const browserExecutable=process.env.BROWSER_EXECUTABLE || process.env.CHROME_PATH;
+const browser = await chromium.launch({headless:true,...(browserExecutable ? {executablePath:browserExecutable} : {})});
 const page = await browser.newPage({viewport:{width:1280,height:800}});
-const html = await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const html = await readFile(new URL('../../device-controller/data/index.html',import.meta.url),'utf8');
 const errors = [];
 const frames = [];
 let sequence = 0;
