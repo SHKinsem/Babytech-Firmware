@@ -2,6 +2,7 @@
 // No React, no network, no hardware: node --test runs this file directly.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   QUEUE_LIMITS,
@@ -25,11 +26,46 @@ import {
   readMotorDistance,
   readQueueStatus,
   supportReason,
+  errorLabels,
 } from '../src/device-api.js';
+
+test('old firmware isolation refusal points to the new firmware',()=>{
+  assert.match(errorLabels.sync_cache_isolation_unverified,/更新控制板固件/);
+});
 
 const errorsOf = (text, options) => validateProgram(text, options).errors.map((entry) => entry.message);
 const linesOf = (text, options) => validateProgram(text, options).errors.map((entry) => entry.line);
 const enabledIn = (text) => knownEnabledIds(parseProgram(text).actions);
+
+test('sync groups validate whole structure and preserve ordinary move semantics',()=>{
+  assert.equal(validateProgram('sync begin\nmove 1 360\nmove 2 -180\nsync end').ok,true);
+  const fast=validateProgram('sync begin trigger\nmove 1 -1080 deg 100 300 300 800\nmove 2 5400 deg 500 1500 1500 500\nsync end');
+  assert.equal(fast.ok,true);
+  assert.match(fast.preview[0].summary,/不验证运行中 2% 进度/);
+  for(const program of ['sync begin\nmove 1 90','sync end','sync begin\nmove 1 90\nsync end',
+    'sync begin\nmove 1 90\nmove 1 90\nsync end','sync begin\nmove 1 90 await\nmove 2 90\nsync end',
+    'sync begin\nsync begin\nmove 1 90\nmove 2 90\nsync end\nsync end',
+    'sync begin\nhex 01 CD 6B\nmove 2 90\nsync end']) assert.equal(validateProgram(program).ok,false,program);
+  assert.equal(buildActionLine('sync',{boundary:'end'}).line,'sync end');
+  assert.equal(buildActionLine('sync',{boundary:'begin trigger'}).line,'sync begin trigger');
+});
+test('helix requires explicit geometry and limits, counts expanded steps, and uses board linear conversion',()=>{
+  const line='helix 1 2 3 2 1 1 -1 1 60 60 800 0.1';
+  const result=validateProgram(line,{distances:{2:8}});
+  assert.equal(result.ok,true);assert.equal(result.stats.actions,4);assert.deepEqual(result.stats.usedIds,[1,2]);
+  assert.match(result.preview[0].summary,/6 mm/);
+  assert.equal(validateProgram(line,{distances:{2:null}}).ok,false);
+  assert.equal(buildActionLine('helix',builderDefaults('helix')).ok,false);
+  assert.equal(validateProgram(Array(17).fill(line).join('\n')).ok,false);
+  for(const bad of [line.replace('1 2 3','1 1 3'),line.replace('1 -1','0 -1'),line.replace('3 2 1','3 0 1'),line+' extra'])
+    assert.equal(validateProgram(bad).ok,false,bad);
+});
+test('sync stop tracking remains active after queue cancellation; ordinary done never claims arrival',()=>{
+  const stopped=readQueueStatus({state:'cancelled',active:true,sync:{phase:'stop_requested'}}).status;
+  assert.equal(stopped.active,true);assert.match(queueProgressText(stopped),/待确认/);
+  assert.match(queueProgressText(readQueueStatus({state:'done',motionComplete:true}).status),/运动完成/);
+  assert.match(queueProgressText(readQueueStatus({state:'done'}).status),/发送结束/);
+});
 
 test('sample program is short, valid and needs explicit enables', () => {
   const result = validateProgram(SAMPLE_PROGRAM, { distances: { 1: 40 } });
@@ -62,6 +98,17 @@ test('sample program is short, valid and needs explicit enables', () => {
   const torquePreview = result.preview.find((row) => row.line === 9);
   assert.doesNotMatch(`${torquePreview.summary} ${torquePreview.detail}`, /\d\s*Nm/);
   assert.match(torquePreview.summary, /800 mA · 1500 ms/);
+});
+
+test('bottle cap cycle preset parses with the recorded linear leads', () => {
+  const program = readFileSync(new URL('../src/examples/bottle-cap-cycle.queue', import.meta.url), 'utf8');
+  const result = validateProgram(program, { distances: { 1: 2, 3: 40 } });
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.stats.actions, 35);
+  assert.deepEqual(result.stats.usedIds, [1, 2, 3, 5]);
+  assert.equal(result.actions.filter(action => action.verb === 'sync').length, 4);
+  assert.equal(result.actions.filter(action => action.verb === 'hex').length, 0);
+  assert.equal(actionAngleDegrees(result.actions.find(action => action.verb === 'move' && action.id === 5), {}).deg, 180000);
 });
 
 test('units, defaults and mm conversion follow the contract', () => {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { CommandLibrary } from './components/CommandLibrary.jsx';
+import { CompactPanel } from './components/CompactPanel.jsx';
 import { CommandPanel } from './components/CommandPanel.jsx';
 import { LimitsPanel } from './components/LimitsPanel.jsx';
 import { ManualPanel } from './components/ManualPanel.jsx';
@@ -15,7 +16,7 @@ import { ScaleWorkbench } from './components/ScaleWorkbench.jsx';
 import { GlyphInfo } from './components/glyphs.jsx';
 import { COMMAND_GROUPS, getCommandItem, getFields, encodeCommand, buildFrames, frameAnnotation, formatBytes, formatCanId, hexByte, parseLogicalHex, identifyCommandBytes, validateAddress } from './protocol.js';
 import { planManualMove, MANUAL_DEFAULTS } from './simulation.js';
-import { decodeCanReply } from './manual-reference.js';
+import { decodeCanReply, decodeBulkCanReply } from './manual-reference.js';
 import { deviceDefaults, experimentWindowText, limitsEqual, limitsToManualLimits, readLimitsPayload } from './device-limits.js';
 import { readDrafts, writeDrafts, safeStorage, getForm, putForm, lastVariantFor, getManual, putManual, putSelection, pickFields } from './device-drafts.js';
 import { request, supportReason, directPositionBoardNote, isMotionOpcode, isLimitDependentOpcode, stateLabels, errorLabels, readQueueStatus, queueProgressText, homeStatusText, queueConflictReason } from './device-api.js';
@@ -118,7 +119,8 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
           <p className="device-decoded__text">{query.decoded.text}</p>
           <p className="capabilities__note">只读历史回包：不改变使能、位置读数或发送许可。</p>
         </>
-        : [0x1a,0x21,0x42,0x43].includes(opcode) ? <p className="device-notice">此查询暂不解码，请在底部收发记录查看原始回包。</p>
+        : [0x1a,0x21].includes(opcode) ? <p className="device-notice">此查询的返回布局未确认，请在底部收发记录查看原始回包。</p>
+        : [0x42,0x43].includes(opcode) ? <p className="device-notice">等待完整的五包参数回读；缺包时请在底部收发记录查看原始帧。</p>
         : <p className="device-notice">尚未收到此查询的有效回包</p>}
     </> : null}
     <div className="divider"/><h3 className="section__title">控制状态</h3>
@@ -154,9 +156,10 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
     <div className="divider"/><h3 className="section__title">请求结果</h3><p className="device-notice" role="status">{notice || '尚未提交操作'}</p>
     {draftNote ? <p className="capabilities__note">{draftNote}</p> : null}
     <p className="capabilities__note">只有收到 202 才表示指令已入队；超时或断线时请求结果未知，本页不会自动重发。使能及停止仍以真实应答／反馈确认，未知应答仅保留原始字节。</p>
-    <div className="divider"/><h3 className="section__title">试验边界</h3><p className="capabilities__note">{experiment ? `速度／力矩试验：${experiment}；反馈超时提前停止。` : '速度／力矩试验的时长由板端策略决定（未读取到限制）。'}回零（9A）已接入板端监督：等待应答、3B 回零标志与新鲜静止反馈；直通位置（FB/CB）也已接入：保留原功能码与字节，等待匹配的 FB/CB 应答、驱动器目标位置读值（0x33，手册 p70）与两对新鲜静止反馈；同步缓存与 FD 仍只可预览。参数写入需要驱动关闭使能且静止。</p>
+    <div className="divider"/><details className="device-compat device-boundaries"><summary>试验边界与协议说明</summary><p className="capabilities__note">{experiment ? `速度／力矩试验：${experiment}；反馈超时提前停止。` : '速度／力矩试验的时长由板端策略决定（未读取到限制）。'}回零（9A）已接入板端监督：等待应答、3B 回零标志与新鲜静止反馈；直通位置（FB/CB）也已接入：保留原功能码与字节，等待匹配的 FB/CB 应答、驱动器目标位置读值（0x33，手册 p70）与两对新鲜静止反馈；同步缓存与 FD 仍只可预览。参数写入需要驱动关闭使能且静止。</p>
     <p className="capabilities__note">{limitsReady ? '运动数值按「调试限制」中已确认的板端策略校验。' : '尚未确认板端限制（/api/limits）：运动指令保持禁用，读取、停止与失能不受影响。'}</p>
     {directNote ? <p className="capabilities__note">直通位置（FB/CB）由板端解析：{directNote}</p> : null}
+    </details>
     <div className="divider"/>
     <details className="device-compat">
       <summary>X 固件 · 默认 0.1°位置输入 · 固定校验 6B</summary>
@@ -167,6 +170,24 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
     </details>
   </section>;
 }
+
+function LabStatusSummary({ connected, status, onOpen, triggerRef }) {
+  const fresh = connected && status.online;
+  const fault = fresh
+    ? [status.fault, status.control?.fault].find(value => value && value !== 'none')
+    : null;
+  return <div className="lab-status-summary" role="group" aria-label="当前电机状态">
+    <span className="lab-status-summary__identity">电机 {status.id || '—'} · {connected ? fresh ? '反馈新鲜' : '等待新鲜反馈' : '设备未连接'}</span>
+    <div className="lab-status-summary__signals">
+      <span>{fresh ? status.enabled ? '使能已确认' : '使能未确认' : '使能未知'}</span>
+      <span className={fault ? 'lab-status-summary__fault' : ''}>{fresh ? fault ? `故障：${errorLabels[fault] || fault}` : '未报告故障' : '故障未知'}</span>
+      <span className="lab-status-summary__ack">应答：{fresh && status.lastAck ? oneLine(status.lastAck) : '—'}</span>
+    </div>
+    <button type="button" className="lab-status-summary__details" ref={triggerRef} onClick={onOpen}>详细反馈</button>
+  </div>;
+}
+
+const DEVICE_TABS = [['manual','常规试动'],['queue','编排队列'],['demo','屏幕流程'],['scale','称重传感器'],['lab','指令实验室'],['limits','调试限制'],['log','调试日志'],['wifi','Wi-Fi 设置']];
 
 export function DeviceApp() {
   useEffect(() => {document.body.classList.add('device-body');return () => document.body.classList.remove('device-body');},[]);
@@ -186,9 +207,36 @@ export function DeviceApp() {
   const [values,setValues] = useState(boot.values);
   const [mode,setMode] = useState(boot.mode), [raw,setRaw] = useState(boot.raw), [dirty,setDirty] = useState(boot.dirty);
   const [query,setQuery] = useState(''), [groups,setGroups] = useState(() => Object.fromEntries(COMMAND_GROUPS.map(g => [g.id,!!g.open])));
+  const [labPickerOpen,setLabPickerOpen] = useState(false), [labFeedbackOpen,setLabFeedbackOpen] = useState(false);
+  const labHeadingRef = useRef(null), labPickerRef = useRef(null), feedbackTriggerRef = useRef(null), feedbackCloseRef = useRef(null);
+  useEffect(() => {
+    if (!labFeedbackOpen) return undefined;
+    feedbackCloseRef.current?.focus();
+    const onEscape = event => {
+      if (event.key === 'Escape') {
+        setLabFeedbackOpen(false);
+        feedbackTriggerRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onEscape);
+    return () => window.removeEventListener('keydown', onEscape);
+  }, [labFeedbackOpen]);
+  useEffect(() => { if (tab !== 'lab') setLabFeedbackOpen(false); }, [tab]);
+  useEffect(() => { window.scrollTo(0,0); }, [tab]);
+  useEffect(() => {
+    if (!labPickerOpen) return;
+    requestAnimationFrame(() => {
+      labPickerRef.current?.scrollIntoView({block:'start'});
+      labPickerRef.current?.querySelector('input[type="search"]')?.focus({preventScroll:true});
+    });
+  }, [labPickerOpen]);
   const [manual,setManual] = useState(boot.manual);
   const [pollingBusy, setPollingBusy] = useState(false);
   const [records,setRecords] = useState([]), [filter,setFilter] = useState('all'), [traceQuery,setTraceQuery] = useState(''), [frozen,setFrozen] = useState(null);
+  const [labRequest,setLabRequest] = useState(null);
+  const labRequestIdRef = useRef(0);
+  const traceCursorRef = useRef({generation:0,seq:0});
+  const bulkPacketsRef = useRef(new Map());
   // Board motion policy. `limits` stays null until /api/limits answered: the
   // page never assumes 120/240 were loaded, it keeps motion disabled instead.
   const [limits,setLimits] = useState(null), [limitsState,setLimitsState] = useState('loading'), [limitsError,setLimitsError] = useState(null);
@@ -219,7 +267,7 @@ export function DeviceApp() {
   // Poll cadence, shared with the mutation path so a start/cancel answer also
   // speeds the next read up instead of waiting for the slow (idle) interval.
   const queueIntervalRef = useRef(2500);
-  const queueRunning = queue?.state === 'running';
+  const queueRunning = queue?.active === true || queue?.state === 'running';
   const queueStale = queueState === 'error';
   const queueBusy = queueRunning || queueLock.pending || queueLock.unconfirmed;
   const queueUnknown = queueLock.unconfirmed && !queueRunning;
@@ -371,26 +419,45 @@ export function DeviceApp() {
         if (disposed) return;
         if (data.uptimeMs < uptime || data.sequence < seq) {
           seq=0;generation++;
+          bulkPacketsRef.current.clear();
           // The board restarted: drop every retained record so decoded replies
           // and diagnostics from the previous run cannot survive the reboot.
           setRecords([]); setFrozen(prev => prev ? [] : null); setTraceWarning('');
+          setLabRequest(previous => previous ? {...previous,phase:'restarted',detail:'板端已重启，无法继续确认此前请求'} : previous);
           logStore.noteTraceRestart();
         }
         uptime = data.uptimeMs;
         const incoming = data.frames.filter(f => f.seq > seq);
         const lost = incoming.length && seq && incoming[0].seq > seq+1;
         if (lost) {
+          bulkPacketsRef.current.clear();
           setTraceWarning('部分总线记录已被环形缓冲区覆盖；以下仅为保留记录，较早的收发与解析已丢失。');
           logStore.noteTraceGap('总线记录缺口：较早的帧已被板端环形缓冲覆盖，无法补齐');
         }
         const rows = incoming.map(f => {
           // Only the pure manual decoder decides what a reply means; TX frames
           // and anything the manual does not describe stay undecoded.
-          const decoded = decodeCanReply({dir:f.dir,id:f.id,extended:f.extended,remote:f.remote,data:f.data});
+          let decoded = decodeCanReply({dir:f.dir,id:f.id,extended:f.extended,remote:f.remote,data:f.data});
+          if (f.dir === 'RX' && f.extended && !f.remote && f.id >= 0x100 && f.id <= 0xffff && [0x42,0x43].includes(f.data?.[0])) {
+            const key = `${f.id >> 8}-${f.data[0]}`;
+            const packetIndex = f.id & 0xff;
+            if (packetIndex === 0) bulkPacketsRef.current.set(key,[f]);
+            else {
+              const packets = bulkPacketsRef.current.get(key);
+              if (packets?.length === packetIndex && f.atMs >= packets.at(-1).atMs && f.atMs - packets.at(-1).atMs <= 1000) packets.push(f);
+              else bulkPacketsRef.current.delete(key);
+            }
+            const packets = bulkPacketsRef.current.get(key);
+            if (packets?.length === 5) {
+              decoded = decodeBulkCanReply(packets);
+              bulkPacketsRef.current.delete(key);
+            }
+          }
           const base = `${f.extended ? '扩展帧' : '标准帧'}${f.remote ? ' · 远程帧' : ''} · ${f.dir === 'TX' ? 'TWAI 已入队' : '总线实际接收'}`;
-          return {id:`${generation}-${f.seq}`,at:Date.now()-(data.uptimeMs-f.atMs),dir:f.dir,canId:f.id,dlc:f.data.length,data:f.data,decoded:decoded || null,note:decoded ? `${base} · ${decoded.title}：${oneLine(decoded.text)}` : base};
+          return {id:`${generation}-${f.seq}`,generation,seq:f.seq,at:Date.now()-(data.uptimeMs-f.atMs),dir:f.dir,canId:f.id,extended:f.extended,remote:f.remote,dlc:f.data.length,data:f.data,decoded:decoded || null,note:decoded ? `${base} · ${decoded.title}：${oneLine(decoded.text)}` : base};
         });
         seq=data.sequence;
+        traceCursorRef.current={generation,seq};
         if (rows.length) {
           setRecords(prev => [...prev,...rows].slice(-400));
           // The diagnostic log reuses these already-accepted rows instead of
@@ -442,23 +509,36 @@ export function DeviceApp() {
     const announce = (text) => { if (resetGenerationRef.current === generation) setNotice(text); };
     try {
       const result = await request(path,data);
-      if (path === '/api/enable-all') { announce(`全部${Number(data.enabled) ? '使能' : '失能'}广播已发送，未逐台确认`); return; }
+      if (path === '/api/enable-all') { announce(`全部${Number(data.enabled) ? '使能' : '失能'}广播已发送，未逐台确认`); return {ok:true}; }
       // The trial window is whatever the board is configured with — never a
       // hardcoded number in the page.
       const queued = result?.message === 'queued_experiment' || result?.message === 'queued_auto_stop_5s';
       announce(`电机 ${target}：${queued
         ? `已入队，${experiment || '时长由板端策略决定'}`
         : '请求已入队，等待真实反馈'}`);
+      return {ok:true};
     } catch (e) {
       const detail = errorLabels[e.message] || e.message;
       announce(e.uncertain
         ? `${detail}：请求结果未知，超时或断线不代表设备未执行；本页不会自动重发。`
         : `板端拒绝：${detail}（HTTP ${e.status}）`);
+      return {ok:false,uncertain:Boolean(e.uncertain),detail};
     }
     // Stop and 全部停止 cancel a running queue on the board (that is the only
     // way the board can guarantee no interleaving), so the queue status is
     // re-read right away instead of waiting for the next poll.
     finally {if (!stop) {busyRef.current=false;setBusy(false);} else setQueueNonce(n=>n+1);}
+  }
+
+  async function sendLabCommand() {
+    if (gate) return;
+    const cursor = traceCursorRef.current;
+    const requestId = ++labRequestIdRef.current;
+    setLabRequest({requestId,address,opcode:selectedOpcode,generation:cursor.generation,seq:cursor.seq,phase:'sending'});
+    const outcome = await submit('/api/command',{hex:formatBytes(model.bytes).replaceAll(' ','')});
+    setLabRequest(previous => previous?.requestId === requestId && previous.phase !== 'restarted'
+      ? {...previous,phase:outcome?.ok ? 'queued' : outcome?.uncertain ? 'unknown' : 'rejected',detail:outcome?.detail}
+      : previous);
   }
 
   // One immediate status read for paths that changed the board outside the poll
@@ -594,6 +674,14 @@ export function DeviceApp() {
   }
 
   function choose(id) { applyContext(activeMotorRef.current, id); }
+  function chooseFromPicker(id) {
+    choose(id);
+    setLabPickerOpen(false);
+    requestAnimationFrame(() => {
+      labHeadingRef.current?.scrollIntoView({block:'start'});
+      labHeadingRef.current?.focus({preventScroll:true});
+    });
+  }
   function changeVariant(key) { applyContext(activeMotorRef.current, selected, key); }
 
   // The CAN ID field keeps whatever is typed, but only a VALID address switches
@@ -660,10 +748,19 @@ export function DeviceApp() {
       const result = await request('/api/polling', {enabled: pollingPaused ? 1 : 0});
       if (typeof result.autoQueriesEnabled !== 'boolean') throw new Error('板端未返回轮询状态');
       setStatus(previous => ({...previous, autoQueriesEnabled: result.autoQueriesEnabled}));
-    } catch (error) { setNotice(`设置自动查询失败：${error.message}，请刷新确认板端状态`); }
+    } catch (error) { setNotice(`设置空闲刷新失败：${error.message}，请刷新确认板端状态`); }
     finally { setPollingBusy(false); }
   }
   const shown=(frozen ?? records).filter(r => (filter==='all'||r.dir===filter) && `${formatBytes(r.data)} ${formatCanId(r.canId)} ${r.note}`.toLowerCase().includes(traceQuery.toLowerCase()));
+  const labFrames = labRequest ? records.filter(r => r.generation === labRequest.generation && r.seq > labRequest.seq &&
+    r.extended && !r.remote && (r.canId >> 8) === labRequest.address && r.data?.[0] === labRequest.opcode) : [];
+  const labRx = labFrames.filter(r => r.dir === 'RX');
+  const labResponse = labRequest ? {
+    ...labRequest,
+    txSeen:labFrames.some(r => r.dir === 'TX'),
+    rxCount:labRx.length,
+    reply:[...labRx].reverse().find(r => r.decoded) || labRx.at(-1) || null,
+  } : null;
   // Configuration pages keep their panels; the banner says why a save would be
   // refused instead of letting the board answer with a lost-looking error.
   const queueBanner = queueBusy ? <p className="device-lock-banner" role="status"><GlyphInfo /><span>{queueRunning
@@ -671,10 +768,27 @@ export function DeviceApp() {
     : '队列提交结果未知：配置改动可能被板端拒绝，请先「取消队列」核对状态。'}</span></p> : null;
 
   const renderGeneration = resetGenerationRef.current;
+  const feedbackContent = <DeviceFeedback status={current} connected={connected} live={connected && status.id === address} notice={notice} lab={tab==='lab'} address={address} opcode={selectedOpcode} records={records} experiment={experiment} limitsReady={limitsReady} queue={queue} queueRunning={queueRunning} queueStale={queueStale} directNote={tab==='lab' ? directPositionBoardNote(model.bytes) : null} draftNote={tab==='lab'||tab==='manual' ? DRAFT_NOTE : null}/>;
   return <div className="app device-app">
-    <header className="toolbar"><div className="toolbar__brand"><span className="toolbar__logo">Babytech</span><span className="toolbar__divider">/</span><h1 className="toolbar__title">电机协议工作台</h1></div>
-      <div className="toolbar__right"><span className="chip chip--soft">实机 · X 协议</span><label className="toolbar__field">CAN ID <input aria-label="CAN ID" className="input input--mono toolbar__address" value={draft} onChange={e=>changeMotor(e.target.value)} inputMode="numeric" aria-invalid={!check.ok}/></label><span>CAN 500 kbit/s</span><span className={`chip ${connected?'chip--ok':'chip--muted'}`}>{connected?'设备在线':'设备未连接'}</span><button type="button" className="button button--outline" disabled={resetPending} title="取消编排队列并尝试停止一次，然后清除板端易失的忙／故障／应答状态；不改配置、不改草稿、不重启。停止帧发送成功也不代表电机已物理停止，之后需要显式重新使能。" onClick={resetControlState}>{resetPending ? '正在清除…' : '清除板端状态'}</button><button type="button" className="button button--outline" disabled={!connected || busy || resetPending || queueBusy} title="广播使能总线上所有电机；不自动开始运动" onClick={()=>submit('/api/enable-all',{enabled:1})}>全部使能</button><button type="button" className="button button--danger" title="取消队列并广播失能，总线上所有电机释放保持力" onClick={()=>submit('/api/enable-all',{enabled:0},{stop:true})}>全部失能</button><button className="button button--danger" onClick={()=>submit('/api/stop-all',{}, {stop:true})}>全部停止</button></div></header>
-    <nav className="tabs" role="tablist" aria-label="工作模式">{[['manual','常规试动'],['queue','编排队列'],['demo','屏幕流程'],['scale','称重传感器'],['lab','指令实验室'],['limits','调试限制'],['log','调试日志'],['wifi','Wi-Fi 设置']].map(([id,label])=><button key={id} role="tab" aria-selected={tab===id} className={`tabs__item${tab===id?' is-active':''}`} onClick={()=>setTab(id)}>{label}</button>)}<span className="device-network-note">板端真实接口 · 不自动重发操作</span></nav>
+    <header className="toolbar">
+      <div className="toolbar__brand"><span className="toolbar__logo">Babytech</span><span className="toolbar__divider">/</span><h1 className="toolbar__title">电机协议工作台</h1></div>
+      <div className="device-toolbar__context">
+        <span className="chip chip--soft">实机 · X 协议</span>
+        <label className="toolbar__field">CAN ID <input aria-label="CAN ID" className="input input--mono toolbar__address" value={draft} onChange={e=>changeMotor(e.target.value)} inputMode="numeric" aria-invalid={!check.ok}/></label>
+        <span className="device-toolbar__bitrate">CAN 500 kbit/s</span>
+        <span className={`chip ${connected?'chip--ok':'chip--muted'}`}>{connected?'设备在线':'设备未连接'}</span>
+      </div>
+      <div className="device-toolbar__actions" role="group" aria-label="全局控制">
+        <span className="device-toolbar__actions-label">全局控制</span>
+        <button type="button" className="button button--outline" disabled={resetPending} title="取消编排队列并尝试停止一次，然后清除板端易失的忙／故障／应答状态；不改配置、不改草稿、不重启。停止帧发送成功也不代表电机已物理停止，之后需要显式重新使能。" onClick={resetControlState}>{resetPending ? '正在清除…' : '清除板端状态'}</button>
+        <button type="button" className="button button--outline" disabled={!connected || busy || resetPending || queueBusy} title="广播使能总线上所有电机；不自动开始运动" onClick={()=>submit('/api/enable-all',{enabled:1})}>全部使能</button>
+        <button type="button" className="button button--danger" title="取消队列并广播失能，总线上所有电机释放保持力" onClick={()=>submit('/api/enable-all',{enabled:0},{stop:true})}>全部失能</button>
+        <button type="button" className="button button--danger device-toolbar__stop" onClick={()=>submit('/api/stop-all',{}, {stop:true})}>全部停止</button>
+      </div>
+    </header>
+    <label className="device-mobile-mode">工作模式<select aria-label="工作模式" value={tab} onChange={event=>setTab(event.target.value)}>{DEVICE_TABS.map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label>
+    <nav className="tabs" role="tablist" aria-label="工作模式">{DEVICE_TABS.map(([id,label])=><button key={id} role="tab" aria-selected={tab===id} className={`tabs__item${tab===id?' is-active':''}`} onClick={()=>setTab(id)}>{label}</button>)}<a className="tabs__item" href="/ota">固件升级</a>{tab!=='lab' ? <span className="device-network-note">板端真实接口 · 不自动重发操作</span> : null}</nav>
+    {tab==='lab' ? <LabStatusSummary connected={connected} status={current} triggerRef={feedbackTriggerRef} onOpen={()=>setLabFeedbackOpen(true)}/> : null}
     <ConfigResult/>
     {tab==='queue' ? <QueuePanel connected={connected && !resetPending} limits={limits} limitsReady={limitsReady}
       queue={queue} queueState={queueState} queueError={queueError} queueUnknown={queueUnknown}
@@ -697,14 +811,26 @@ export function DeviceApp() {
       limits={limits} state={limitsState} loadError={limitsError} connected={connected}
       saving={limitsSaving} saveError={limitsSaveError} saveNotice={limitsSaveNotice}
       onSave={saveLimits} onReload={()=>{setLimitsState('loading');setLimitsError(null);setLimitsNonce(n=>n+1);}} onDraftEdit={()=>{setLimitsSaveError(null);setLimitsSaveNotice(null);}}/></div> : <main className={`workspace workspace--${tab}`}>
-      {tab==='lab' ? <><CommandLibrary query={query} onQueryChange={setQuery} openGroups={groups} onToggleGroup={id=>setGroups(g=>({...g,[id]:!g[id]}))} selectedId={selected} onSelect={choose}/>
-      <CommandPanel device item={item} variantKey={variant} onVariantChange={changeVariant} values={values} onValueChange={(key,value)=>editValues({...values,[key]:value})} editorMode={mode} onEditorModeChange={changeEditorMode} rawText={dirty?raw:formatBytes(form.bytes || [])} onRawTextChange={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} onRawTextReplace={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} rawDirty={dirty} onResetRaw={()=>{setDirty(false);saveForm({dirty:false});}} identifiedItem={model.identified?model.item:null} model={model} frames={frames} annotations={annotations} address={address || 1} addressError={check.ok?null:check.error} gateReason={gate} onSend={()=>{if(!gate)submit('/api/command',{hex:formatBytes(model.bytes).replaceAll(' ','')});}} onCopy={copy}/></> : <ManualPanel device values={manual} errors={prediction.errors} onChange={(key,value)=>editManual({...manual,[key]:value})} motor={{enabled:current.enabled,positionTenths:current.positionDeg==null?null:current.positionDeg*10}} address={address || 1} prediction={prediction} limits={manualLimits} limitsConfirmed={limitsReady} bytes={moveEncoded.bytes || []} frames={moveFrames} annotations={moveFrames.map(f=>frameAnnotation(moveEncoded.bytes,moveEncoded.labels,f))} gateReason={manualGate} onSend={()=>{if(!manualGate)submit('/api/move',{id:address,angle:Number(manual.angle)*(Number(manual.dir)===1?-1:1),speed:manual.speed,accel:manual.accel,decel:manual.decel,current:manual.current});}} onStop={()=>{if(address)submit('/api/stop',{id:address},{stop:true});}} onCopy={copy} onGoToEnable={()=>{setTab('lab');choose('enable');}}/>}
-      <DeviceFeedback status={current} connected={connected} live={connected && status.id === address} notice={notice} lab={tab==='lab'} address={address} opcode={selectedOpcode} records={records} experiment={experiment} limitsReady={limitsReady} queue={queue} queueRunning={queueRunning} queueStale={queueStale} directNote={tab==='lab' ? directPositionBoardNote(model.bytes) : null} draftNote={tab==='lab'||tab==='manual' ? DRAFT_NOTE : null}/>
+      {tab==='lab' ? <>
+      <CompactPanel title="指令库" className="compact-panel--library lab-library-desktop"><CommandLibrary query={query} onQueryChange={setQuery} openGroups={groups} onToggleGroup={id=>setGroups(g=>({...g,[id]:!g[id]}))} selectedId={selected} onSelect={choose}/></CompactPanel>
+      <div className="lab-command-picker" ref={labPickerRef}>
+        <button type="button" className="lab-command-picker__toggle" aria-expanded={labPickerOpen} aria-controls="lab-command-picker-list" onClick={()=>setLabPickerOpen(open=>!open)}>
+          <span>当前指令：<strong>{item.name}</strong></span><span>{labPickerOpen ? '收起列表' : '更换指令'}</span>
+        </button>
+        {labPickerOpen ? <div id="lab-command-picker-list" className="lab-command-picker__list"><CommandLibrary query={query} onQueryChange={setQuery} openGroups={groups} onToggleGroup={id=>setGroups(g=>({...g,[id]:!g[id]}))} selectedId={selected} onSelect={chooseFromPicker}/></div> : null}
+      </div>
+      <CompactPanel title="指令编辑与发送" initiallyOpen className="compact-panel--command"><CommandPanel device item={item} variantKey={variant} onVariantChange={changeVariant} values={values} onValueChange={(key,value)=>editValues({...values,[key]:value})} editorMode={mode} onEditorModeChange={changeEditorMode} rawText={dirty?raw:formatBytes(form.bytes || [])} onRawTextChange={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} onRawTextReplace={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} rawDirty={dirty} onResetRaw={()=>{setDirty(false);saveForm({dirty:false});}} identifiedItem={model.identified?model.item:null} model={model} frames={frames} annotations={annotations} address={address || 1} addressError={check.ok?null:check.error} gateReason={gate} response={labResponse} requestNotice={notice} headingRef={labHeadingRef} onChooseCommand={()=>setLabPickerOpen(true)} onSend={sendLabCommand} onCopy={copy}/></CompactPanel>
+      {labFeedbackOpen ? <aside className="lab-feedback-drawer" aria-label="详细电机反馈">
+        <div className="lab-feedback-drawer__head"><strong>详细电机反馈</strong><button type="button" ref={feedbackCloseRef} onClick={()=>{setLabFeedbackOpen(false);feedbackTriggerRef.current?.focus();}}>关闭</button></div>
+        {feedbackContent}
+      </aside> : null}
+      </> : <ManualPanel device values={manual} errors={prediction.errors} onChange={(key,value)=>editManual({...manual,[key]:value})} motor={{enabled:current.enabled,positionTenths:current.positionDeg==null?null:current.positionDeg*10}} address={address || 1} prediction={prediction} limits={manualLimits} limitsConfirmed={limitsReady} bytes={moveEncoded.bytes || []} frames={moveFrames} annotations={moveFrames.map(f=>frameAnnotation(moveEncoded.bytes,moveEncoded.labels,f))} gateReason={manualGate} onSend={()=>{if(!manualGate)submit('/api/move',{id:address,angle:Number(manual.angle)*(Number(manual.dir)===1?-1:1),speed:manual.speed,accel:manual.accel,decel:manual.decel,current:manual.current});}} onStop={()=>{if(address)submit('/api/stop',{id:address},{stop:true});}} onCopy={copy} onGoToEnable={()=>{setTab('lab');choose('enable');}}/>}
+      {tab==='manual' ? <CompactPanel title="电机反馈与状态" preferenceKey="feedback-manual-layout" className="compact-panel--feedback">{feedbackContent}</CompactPanel> : null}
     </main>}
     {tab!=='scale' && <div className="device-trace">
-      {pollingPaused && <p className="device-trace-warning" role="status">板端自动查询已暂停；接收、记录和手动查询继续。await 可能等待新的完成反馈，恢复查询后继续判断。</p>}
+      {pollingPaused && <p className="device-trace-warning" role="status">空闲页面刷新已暂停；正在执行的指令、await 和同步组仍会主动查询所需反馈。</p>}
       {traceWarning ? <p className="device-trace-warning" role="status"><GlyphInfo /><span>{traceWarning}</span><button type="button" className="link-button" onClick={()=>setTraceWarning('')}>知道了</button></p> : null}
-      <TracePanel device pollingPaused={pollingPaused} pollingBusy={pollingBusy} onTogglePolling={togglePolling} records={shown} totalCount={records.length} hiddenCount={0} filter={filter} onFilterChange={setFilter} query={traceQuery} onQueryChange={setTraceQuery} paused={frozen!==null} onTogglePause={()=>setFrozen(frozen?null:[...records])} onClear={()=>{setRecords([]);if(frozen)setFrozen([]);setTraceWarning('');}} onCopy={copy}/>
+      <CompactPanel title="收发记录" desktopInitiallyOpen={false} className="compact-panel--trace"><TracePanel device pollingPaused={pollingPaused} pollingBusy={pollingBusy} onTogglePolling={togglePolling} records={shown} totalCount={records.length} hiddenCount={0} filter={filter} onFilterChange={setFilter} query={traceQuery} onQueryChange={setTraceQuery} paused={frozen!==null} onTogglePause={()=>setFrozen(frozen?null:[...records])} onClear={()=>{setRecords([]);if(frozen)setFrozen([]);setTraceWarning('');}} onCopy={copy}/></CompactPanel>
     </div>}
     {!['manual','lab'].includes(tab) && notice && <div className="toast" role="status">{notice}</div>}
   </div>;

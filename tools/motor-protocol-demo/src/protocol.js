@@ -171,7 +171,8 @@ const V = (key, label, opcode, layout, extra = {}) => ({ key, label, opcode, lay
 // Most reads are three-byte logical requests: [addr][opcode][0x6B]. The reply
 // layouts and units below come from the manual V1.0.5 "5.5 读取系统参数命令"
 // section (p67-p75) for the X firmware. Bulk 0x42/0x43 replies are documented
-// separately in section 5.8, but are kept raw until multi-frame reassembly exists.
+// separately in section 5.8; the device trace reassembles complete X-firmware
+// replies while incomplete or other-firmware replies stay raw.
 //
 // `simulated` marks the four opcodes src/simulation.js actually has a reply
 // layout for (0x27 / 0x35 / 0x36 / 0x3A). Everything else only sends TX.
@@ -325,8 +326,8 @@ const READ_ITEMS = [
     certainty: 'manual',
     meaning: '0x3D 引脚 IO 电平帧：[3D][电平状态][0x6B]（手册 V1.0.5 p75）：bit0 使能引脚电平、bit2 脉冲引脚电平、bit4 方向引脚电平（0 低电平 / 1 高电平）、bit5 方向引脚模式（0 输入 / 1 输出）、bit1 与 bit3 恒为 0、bit6/bit7 保留。',
   },
-  { key: 'readConf', opcodes: [0x42, 0x6c], name: '配置读取 Conf', en: 'Conf config', certainty: 'manual', meaning: '读取所有驱动参数：[addr][42][6C][6B]。手册 V1.0.5 第 5.8 节；X 与 Emm 返回布局不同，当前保留多包原始记录，暂不解码。' },
-  { key: 'readState', opcodes: [0x43, 0x7a], name: '状态读取 State', en: 'State status', certainty: 'manual', meaning: '读取系统状态参数：[addr][43][7A][6B]。手册 V1.0.5 第 5.8 节；X 与 Emm 返回布局不同，当前保留多包原始记录，暂不解码。' },
+  { key: 'readConf', opcodes: [0x42, 0x6c], name: '配置读取 Conf', en: 'Conf config', certainty: 'manual', meaning: '读取所有驱动参数：[addr][42][6C][6B]。手册 V1.0.5 第 5.8 节；完整五包 X 固件读回会显示主要配置值，其余字段和缺包记录保留原始帧；页面按 X 固件解释，不自动识别 Emm。' },
+  { key: 'readState', opcodes: [0x43, 0x7a], name: '状态读取 State', en: 'State status', certainty: 'manual', meaning: '读取系统状态参数：[addr][43][7A][6B]。手册 V1.0.5 第 5.8 节；完整五包 X 固件读回会显示主要状态值，缺包记录保留原始帧；页面按 X 固件解释，不自动识别 Emm。' },
 ];
 
 const readVariant = (entry) => {
@@ -527,7 +528,7 @@ export const COMMAND_GROUPS = [
       // which is independent of how well the manual documents the field.
       integrated: entry.simulated === true,
       readParam: entry,
-      summary: `读取 ${entry.name}。${['readOptions','readConf','readState','readPid'].includes(entry.key) ? '返回保留原始帧，暂不解码。' : '实机有效回包在右侧查询结果中解释。'}`,
+      summary: `读取 ${entry.name}。${['readOptions','readPid'].includes(entry.key) ? '返回布局未确认，保留原始帧。' : ['readConf','readState'].includes(entry.key) ? '完整五包 X 固件读回会展示主要参数，缺包保留原始帧。' : '实机有效回包在发送区和右侧查询结果中解释。'}`,
       variants: [readVariant(entry)],
       note: entry.meaning,
     })),

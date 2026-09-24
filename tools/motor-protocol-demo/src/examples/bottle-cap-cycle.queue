@@ -1,0 +1,87 @@
+# 瓶盖完整流程。载入后请先核对机构、方向、行程和限流；载入不会自动执行。
+enable 1
+enable 2
+enable 3
+
+# 复位
+
+move 1 -5 mm 300 300 300 200 await
+home 1 2 await
+move 1 -2 mm 300 300 300 200 await
+home 3 2 await
+move 3 2 mm 300 300 300 650 await
+
+# 移动到中央
+
+move 3 76.7 mm 60 60 60 650 await
+
+# 上升
+
+move 1 -70 mm 300 300 300 200 await
+
+# 拧开瓶盖
+
+move 2 1000 deg 200 60 60 500 await
+move 1 2 mm 300 300 300 200 await
+move 2 1400 deg 200 60 60 500 await
+move 1 15 mm 300 300 300 200 await
+
+# 移开瓶盖
+
+move 3 -76.7 mm 60 60 60 650 await
+
+# 继续上升
+
+move 1 -48 mm 300 300 300 200 await
+
+# 接奶接水
+
+move 5 500 rev 1000 1000 1000 800 await
+
+# 下移
+
+move 1 48 mm 300 300 300 200 await
+
+# 复位瓶盖
+
+move 3 76.7 mm 60 60 60 650 await
+
+# 怼上去
+
+move 1 -12 mm 300 300 300 200 await
+
+# 新功能 螺旋上升
+
+sync begin trigger
+move 1 -1.2 mm 100 300 300 200
+move 2 1000 deg 400 1500 1500 500
+sync end
+
+sync begin trigger
+move 1 -2 mm 100 300 300 200
+move 2 -2400 deg 500 1500 1500 500
+sync end
+
+# 继续拧紧
+
+torque 2 -500 2000 300 1000
+
+# 回转错开磁铁
+
+move 2 300 deg 500 1500 1500 500 await
+
+# 回到初始位置
+
+move 1 67 mm 300 300 300 200 await
+move 3 -76.7 mm 60 60 60 650 await
+
+disable 1
+disable 2
+disable 3
+
+# ID1 和 ID3 的换算需预先在板端设置：ID1 = 2 mm/rev，ID3 = 40 mm/rev。
+# 下列 4C / 45 配置仅供记录，不会随本程序自动下发。
+# 01 4C AE 01 02 00 00 C8 00 00 9C 40 00 C8 00 64 00 14 00 6B
+# 01 45 66 01 00 96 6B
+# 03 4C AE 01 02 01 00 64 00 00 13 88 00 05 01 F4 00 3C 00 6B
+# 03 45 66 00 02 8A 6B

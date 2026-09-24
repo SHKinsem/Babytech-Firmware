@@ -114,7 +114,7 @@ export function DemoPanel() {
       <div className="demo-actions"><label className="button button--outline">Load JSON<input type="file" accept=".json,application/json" hidden onChange={load}/></label><button className="button button--outline" disabled={!config} onClick={exportJson}>Export JSON</button><button className="button button--primary" disabled={locked || !config} onClick={()=>post('/api/demo/config',{json:draft},draft)}>Apply</button></div>
       <textarea aria-label="演示 JSON" spellCheck={false} value={draft} onChange={e=>edit(e.target.value)} disabled={pending}/>
       <p>{dirty ? '本机草稿，尚未应用。' : '当前编辑内容与本页最近确认的 RAM 配置一致。'} 轮询不覆盖草稿。</p>
-      <p>Apply 不触发运动。RAM 配置断电丢失；最终导出到 motion/data/demo_flow.json 后重新编译烧录。</p>
+      <p>Apply 不触发运动。RAM 配置断电丢失；最终导出到 device-controller/data/demo_flow.json 后重新编译烧录。</p>
     </section>
   </main>;
 }

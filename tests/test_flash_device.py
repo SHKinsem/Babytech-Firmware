@@ -45,11 +45,19 @@ class FlashTests(unittest.TestCase):
 
     def fake_run(self, cmd, **kwargs):
         self.calls.append(cmd)
-        if 'read-flash' in cmd:
-            index = cmd.index('read-flash')
+        # esptool command names/options use underscores in the current CLI;
+        # older versions also accept the hyphenated spellings. Normalize both
+        # forms so the fake models the operation rather than one CLI spelling.
+        normalized = [str(part).replace('_', '-') for part in cmd]
+        if 'read-flash' in normalized:
+            index = normalized.index('read-flash')
             offset, size = int(cmd[index + 1], 0), int(cmd[index + 2], 0)
             Path(cmd[index + 3]).write_bytes(self.old[offset:offset + size])
         return types.SimpleNamespace(returncode=0, stdout='MAC: 3c:0f:02:c5:fe:64\nDetected flash size: 16MB\n')
+
+    @staticmethod
+    def has_command(calls, command):
+        return any(command in [str(part).replace('_', '-') for part in call] for call in calls)
 
     def execute(self):
         return flash.main(['--package', str(self.package), '--execute', '--port', 'COM3', '--expected-mac',
@@ -75,10 +83,10 @@ class FlashTests(unittest.TestCase):
     def test_full_workflow_uses_snapshot_preserves_nvs_and_verifies(self):
         with patch.object(flash, 'ROOT', self.root), patch.object(flash.subprocess, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.execute(), 0)
-        write = next(c for c in self.calls if 'write-flash' in c)
+        write = next(c for c in self.calls if 'write-flash' in [str(part).replace('_', '-') for part in c])
         self.assertNotIn('--erase-all', write)
         self.assertNotIn(str(self.package / 'firmware.bin'), write)
-        self.assertTrue(any('verify-flash' in c for c in self.calls))
+        self.assertTrue(self.has_command(self.calls, 'verify-flash'))
         result = json.loads(next(self.root.glob('out/flash-runs/*/result.json')).read_text())
         self.assertEqual(result['status'], 'flash-verified')
         self.assertTrue(result['nvsUnchanged'])
@@ -89,7 +97,7 @@ class FlashTests(unittest.TestCase):
         with patch.object(flash, 'ROOT', self.root), patch.object(flash.subprocess, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(ValueError, 'layout differs'):
                 self.execute()
-        self.assertFalse(any('write-flash' in c for c in self.calls))
+        self.assertFalse(self.has_command(self.calls, 'write-flash'))
 
     def test_mac_mismatch_aborts_before_backup_or_write(self):
         with patch.object(flash, 'ROOT', self.root), patch.object(flash.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0, stdout='MAC: 00:00:00:00:00:01')) as run, contextlib.redirect_stdout(io.StringIO()):
@@ -100,14 +108,14 @@ class FlashTests(unittest.TestCase):
     def test_write_failure_does_not_retry(self):
         def failure(cmd, **kwargs):
             result = self.fake_run(cmd, **kwargs)
-            if 'write-flash' in cmd:
+            if 'write-flash' in [str(part).replace('_', '-') for part in cmd]:
                 result.returncode = 2
             return result
         with patch.object(flash, 'ROOT', self.root), patch.object(flash.subprocess, 'run', side_effect=failure), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError, 'write failed'):
                 self.execute()
-        self.assertEqual(sum('write-flash' in c for c in self.calls), 1)
-        self.assertFalse(any('verify-flash' in c for c in self.calls))
+        self.assertEqual(sum(self.has_command([c], 'write-flash') for c in self.calls), 1)
+        self.assertFalse(self.has_command(self.calls, 'verify-flash'))
         result = json.loads(next(self.root.glob('out/flash-runs/*/result.json')).read_text())
         self.assertEqual(result['status'], 'failed')
         self.assertTrue(result['writeStarted'])
@@ -115,7 +123,8 @@ class FlashTests(unittest.TestCase):
     def test_nvs_mismatch_is_not_reported_as_success(self):
         def corrupted(cmd, **kwargs):
             result = self.fake_run(cmd, **kwargs)
-            if 'read-flash' in cmd and '0x9000' in cmd:
+            normalized = [str(part).replace('_', '-') for part in cmd]
+            if 'read-flash' in normalized and '0x9000' in cmd:
                 Path(cmd[-1]).write_bytes(b'X' * 0x5000)
             return result
         with patch.object(flash, 'ROOT', self.root), patch.object(flash.subprocess, 'run', side_effect=corrupted), contextlib.redirect_stdout(io.StringIO()):

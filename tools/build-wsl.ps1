@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'brain', 'motion', 'test')]
+    [ValidateSet('all', 'main-controller', 'device-controller', 'brain', 'motion', 'test')]
     [string]$Target = 'all',
     [string]$Distro = 'Ubuntu',
     [ValidateRange(1, 32)]

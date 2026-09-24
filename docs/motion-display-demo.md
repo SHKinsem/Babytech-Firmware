@@ -4,10 +4,10 @@
 
 ## 构建与接线
 
-默认 `pio run -d motion` 仍构建 BRAIN/v2。需要演示时，在 `motion/platformio.ini` 的 `build_flags` 增加 `-DMOTION_UART_PEER=2` 后构建同一个 `motion` environment。也可使用临时环境变量（须保留既有编译参数）：
+默认 `pio run -d device-controller` 仍构建 BRAIN/v2。需要演示时，在 `device-controller/platformio.ini` 的 `build_flags` 增加 `-DMOTION_UART_PEER=2` 后构建同一个 `motion` environment。也可使用临时环境变量（须保留既有编译参数）：
 
 ```sh
-PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DMOTION_UART_PEER=2' pio run -d motion
+PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DMOTION_UART_PEER=2' pio run -d device-controller
 ```
 
 启动日志 `peer=display-v3` 表示显示分支；`peer=brain-v2` 表示原协议。非法宏值不能编译。DISPLAY 分支不消费 Brain 协议或向屏幕发送 Brain 帧。
@@ -19,20 +19,20 @@ Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，�
 ## 配置与操作
 
 1. 连接 Motion 热点，进入网页“屏幕流程”。BRAIN 构建会明确显示功能不可用。
-2. 内置 `motion/data/demo_flow.json` 当前保存最新台架草稿，但其中的 `sync` 尚未被本分支识别；上电会拒绝内置配置，不会自动运动，也不能进入 Ready。网页 Load 与编辑只改变本机草稿。
+2. 内置 `device-controller/data/demo_flow.json` 保存台架配置；上电只校验并载入，不自动运动。网页 Load 与编辑只改变本机草稿。配置可解析不代表机构已验收或已经 Ready。
 3. Apply 校验后整份替换 RAM 配置，不运动；失败保留旧配置。配置替换撤销旧软件参考。Export 导出编辑器中的配置，可保存到上述工程路径后重新编译烧录。没有文件系统上传、永久保存按钮或自动恢复中断流程。
 4. 在 Apply 可接受配置后，确认机构可运动、电机反馈新鲜且静止，点击网页“复位 / 初始化”，或配套新版显示板圆环右侧的 `Initialize`。两者共用 Motion 初始化入口；屏幕找零中仍显示 NotReady，不增加 initializing 状态。初始化成功才显示 Ready；若缺反馈、驱动拒绝、配置不匹配，不能进入 Ready。
 5. 先逐个调试业务阶段。单阶段结束停在 NotReady，不自动执行其他阶段；需回零时运行包含回程动作的混合阶段，再点复位重新检查。软件参考仍有效时复位不会重新碰撞找零。
 6. Ready 时用屏幕 Start 或网页“完整流程运行”：开盖 → 加水 → 加粉 → 关盖 → 混合（脚本内升降回软件零点）→ Complete 保持 3 秒 → Ready。没有额外回起始位置阶段；展示计时不发送运动指令。下次 Start 前操作者自行换瓶。
 7. 任何阶段可用顶部“全部停止”。取消剩余脚本并发送广播回零中断/停止；新鲜静止反馈才证明停止，超过 3 秒仍未确认则 Error。Error 由显式复位解除，参考失效时重新初始化，不续跑旧动作。
 
-当前内置配置含 `main` 尚不识别的 `sync` 指令，暂不能整份 Apply；轴 1 的 68.2 mm 回程仅为位移账面平衡，尚未实机验证。
+当前内置配置在关盖阶段使用 `sync begin trigger` 同步组；轴 1 的 68.2 mm 回程仅为位移账面平衡，两者均尚未完成这套演示流程的实机验收。
 
 屏幕只保留原 Start 和状态显示。Motion `startEnabled` 由 Ready 派生，Cloud offline 提示允许保留。宝宝、品牌、水量、温度为演示数据，`thermalSimulated=true`，两个条件字段均为 None；产物不用于喂养。
 
 ## JSON 与脚本契约
 
-字段布局见 [demo_flow.json](../motion/data/demo_flow.json)，但此文件当前不是可 Apply 的完整示例。总 JSON 最大 **16384 bytes**；最多 5 个轴，每段最多 64 条命令、8192 bytes、超时 100–3600000 ms。stage ID 固定为 `open_cap`、`water`、`powder`、`close_cap`、`mix`；JSON 顺序不改变执行顺序。重复/缺失/未知阶段、重复键、非法枚举与数值、过深嵌套、多行注入均被拒绝。
+格式基线见 [demo_flow.json](../device-controller/data/demo_flow.json)。总 JSON 最大 **16384 bytes**；最多 5 个轴，每段最多 64 条命令、8192 bytes、超时 100–3600000 ms。stage ID 固定为 `open_cap`、`water`、`powder`、`close_cap`、`mix`；JSON 顺序不改变执行顺序。重复/缺失/未知阶段、重复键、非法枚举与数值、过深嵌套、多行注入均被拒绝。
 
 新增 `axes` 是全部参与执行与停稳检查的轴清单，例如：
 
@@ -51,11 +51,11 @@ Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，�
 zero ID RPM ACCEL DECEL CURRENT
 ```
 
-它按初始化完成时记录的驱动坐标发送同一 CD 定位指令的绝对模式，并等待目标位置、新鲜静止反馈；不触发碰撞，也不把 `move ID 0` 当作归零。只能用于声明为 zero_axes 的轴，不能放在初始化脚本中。当前台架草稿暂不使用 `zero`，以相对位移回程。
+它按初始化完成时记录的驱动坐标发送同一 CD 定位指令的绝对模式，并等待目标位置、新鲜静止反馈；不触发碰撞，也不把 `move ID 0` 当作归零。只能用于声明为 zero_axes 的轴，不能放在初始化脚本中。当前台架配置暂不使用 `zero`，以相对位移回程。
 
-演示脚本要求 `move/home` 显式带 `await`。初始化碰撞找零必须为 `home ID 2 await`，每个 zero_axis 都需覆盖。碰撞速度、电流、返回角度等参数必须提前由现有工具配置并实机确认。Ready 不证明这些参数已验收。
+演示脚本要求普通 `move/home` 显式带 `await`；仅业务阶段 `sync begin [trigger]` 与 `sync end` 之间的相对 `move` 不带 `await`。同步组必须完整，且只包含 2–8 个不同轴的相对运动。运行前须按[队列说明](motor-queue.md)保存同步参数；默认全零时，关盖阶段会在首个动作前被拒绝。初始化碰撞找零必须为 `home ID 2 await`，每个 zero_axis 都需覆盖；初始化不接受同步组。碰撞速度、电流、返回角度等参数必须提前由现有工具配置并实机确认。Ready 不证明这些参数已验收。
 
-允许 `enable`、`disable`、`move … await`、`stop`、`wait`、有持续时间的 torque/velocity；home 只用于初始化。演示不接受 raw hex/CAN、无限持续输出；这些能力仍留在原调试队列中。`disable` 会释放电机保持力，当前队列发送后不等待失能确认，Ready 也不检查使能状态；承重轴失能须先完成实机风险确认。加水/加粉可显式填写 `wait 毫秒数`，对应定时模拟，不代表真实出料检测。
+允许 `enable`、`disable`、`move … await`、完整 `sync` 组、`stop`、`wait`、有持续时间的 torque/velocity；home 只用于初始化。演示不接受 raw hex/CAN、无限持续输出；这些能力仍留在原调试队列中。`disable` 会释放电机保持力，当前队列发送后不等待失能确认，Ready 也不检查使能状态；承重轴失能须先完成实机风险确认。加水/加粉可显式填写 `wait 毫秒数`，对应定时模拟，不代表真实出料检测。
 
 普通队列的直接发送语义保持不变。演示队列增加严格回零证据：仅 ACK + 空闲状态不算找零完成；需要本次运行→完成状态或明确 `9F` 完成应答，再确认静止。`12/22` 未运动应答不建立零点。
 

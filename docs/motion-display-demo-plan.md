@@ -164,7 +164,7 @@ loop: Web/Stop -> UART -> CAN feedback / queue poll -> flow tick -> State heartb
 
 ```text
 调试：Load/edit JSON -> explicit Apply -> Motion RAM -> stage/full run -> Export
-演示：Export -> motion/data/demo_flow.json -> build embedding -> flash -> boot parse
+演示：Export -> device-controller/data/demo_flow.json -> build embedding -> flash -> boot parse
 ```
 
 - RAM 调试配置断电丢失；重启读取本次固件内置版本，不自动恢复网页草稿。
@@ -241,7 +241,7 @@ commands 中每项就是一行原工具指令，例如：
 | 4 | 阶段编辑/运行、独立找零、完整运行、Load/Apply/Export | 上次 JSON 可继续调试；导入不运动；忙碌不能替换配置；无需新增停止按钮 |
 | 5 | 双板实机与文档交付 | 逐轴、单阶段、完整流程通过；断线/重启/故障可恢复；内置版本可脱离电脑演示 |
 
-建议文件：motion 中新增 DisplayLink、DemoFlowController、DemoFlowConfig；main.cpp 只接轮询；platformio.ini 增加宏/嵌入资源；motion/data/demo_flow.json 提供内置配置；网页源文件增加最小流程控件并重建内嵌页面。已有队列只补必要接口。文档同步 motor-queue、motion-debug、构建说明，不能把新功能写成旧功能已具备。
+建议文件：motion 中新增 DisplayLink、DemoFlowController、DemoFlowConfig；main.cpp 只接轮询；platformio.ini 增加宏/嵌入资源；device-controller/data/demo_flow.json 提供内置配置；网页源文件增加最小流程控件并重建内嵌页面。已有队列只补必要接口。文档同步 motor-queue、motion-debug、构建说明，不能把新功能写成旧功能已具备。
 
 初始内置配置应明确未配置或禁止运动，不能附带未经验收的通用机械脚本。每个子任务验证完成后按一笔逻辑提交组织，实际提交需授权。
 

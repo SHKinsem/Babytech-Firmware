@@ -1,27 +1,33 @@
 # Babytech Firmware
 
+本轮执行情况见 [整合进度与待验收项](docs/integration-progress-20260924.md)，工程路径与兼容标识见 [控制板命名](docs/controller-naming.md)。
+
+协作整合请先阅读 [仓库整合与协作计划](docs/integration-plan.md)：分支现状、PR 依赖、整合顺序、负责人认领与验收清单。
+
 两块 ESP32-S3 N16R8 的最小固件仓库。每块板是独立、标准的 PlatformIO Arduino 工程。
 
 ```text
 浏览器 / 后续 App 与云端
           │ Wi-Fi
- brain：显示与网络 MCU
+ main-controller：显示与网络 MCU
           │ 3.3 V UART
- motion：传感器与电机 MCU
+ device-controller：传感器与电机 MCU
 ```
 
 ## 当前可运行的内容
 
 当前提供两条调试路径：brain 的 UART 状态页，以及 motion 独立热点的 CAN 电机调试页。
 
-- `brain/`：`Babytech-Debug` 热点与中文状态页，使用 v2 四指令查询状态、修改 RAM 参数、显式使能、执行单电机阶段和停止。
-- `motion/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。下板默认从 GPIO1/2 采样 HX711，网页可修改并持久化 DOUT/SCK，同时提供称重状态、去皮和标定 API。
+- `main-controller/`：`Babytech-Debug` 热点与中文状态页，使用 v2 四指令查询状态、修改 RAM 参数、显式使能、执行单电机阶段和停止。
+- `device-controller/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。下板默认从 GPIO1/2 采样 HX711，网页可修改并持久化 DOUT/SCK，同时提供称重状态、去皮和标定 API。
 - `shared/BoardProtocol/`：板间 UART v2 四指令协议、客户端与执行入口。完成状态来自真实电机反馈；机构尚未接入，称重数据暂未加入板间载荷。
 - `tools/test_protocol.py`、`tools/test_motion.py`：主机协议、参数与反馈解析检查。
 
-调试热点暂放下板，便于独立台架调试；未来网络和显示由 brain 承担。当前只接入 HX711 称重，尚未接入其他传感器、LCD/触摸、云端、机构动作或多电机联动。上电不发送使能或运动指令。
+调试热点暂放下板，便于独立台架调试；未来网络和显示由 brain 承担。当前只接入 HX711 称重，尚未接入其他传感器、LCD/触摸或云端；同步组与 DISPLAY 演示已有软件实现，完整机械流程仍待实机验收。上电不发送使能或运动指令。
 
 详细操作和接口见 [下板网页调试](docs/motion-debug.md)。
+
+直发队列、执行诊断、全局查询预算及同步/螺旋动作见 [电机编排队列](docs/motor-queue.md)。软件验证和待实测项目见 [同步开发与验收记录](docs/motion-sync-development.md)；尚未完成同步实机验收。
 
 新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
 
@@ -30,14 +36,14 @@
 ## 目录
 
 ```text
-brain/       platformio.ini、src/、include/、lib/、test/、data/
-motion/      platformio.ini、src/、include/、lib/、data/
+main-controller/       platformio.ini、src/、include/、lib/、test/、data/
+device-controller/      platformio.ini、src/、include/、lib/、data/
 shared/      两块板共同依赖的 BoardProtocol 库
 docs/        板间协议和范围
 tools/       主机验证工具
 ```
 
-用 PlatformIO 打开 `brain` 或 `motion` 文件夹，分别编译。顶层没有第三个固件工程。
+用 PlatformIO 打开 `main-controller` 或 `device-controller` 文件夹，分别编译。顶层没有第三个固件工程。
 库通过相对路径引用，新仓库不依赖旧仓库路径。网页分别嵌入对应固件，不需要单独烧录文件系统。
 
 ## WSL 编译（推荐）
@@ -62,8 +68,8 @@ Windows 保留源码，编译在 WSL 的 Linux 文件系统进行：
 在仓库根目录执行：
 
 ```text
-pio run -d motion
-pio run -d brain
+pio run -d device-controller
+pio run -d main-controller
 python tools/test_protocol.py
 python tools/test_motion.py
 ```
@@ -88,8 +94,8 @@ UART 为 115200、8N1、3.3 V TTL。按实际 GPIO 连接；旧屏幕排针的 T
 确认端口对应的板子后分别烧录，例如：
 
 ```text
-pio run -d motion -t upload --upload-port COM_MOTION
-pio run -d brain -t upload --upload-port COM_BRAIN
+pio run -d device-controller -t upload --upload-port COM_MOTION
+pio run -d main-controller -t upload --upload-port COM_BRAIN
 ```
 
 `COM_MOTION` / `COM_BRAIN` 是占位符，替换为实际端口。
@@ -117,8 +123,10 @@ App、Cloud、多家庭权限、复杂恢复和全量测试平台不进入本阶
 
 - 原项目：`hellowenshenghui/Babytech_Formula_Device`，参考本地 `V1-device` 的 `2ffcde2`。
 - 网页交互参考：`SHKinsem/Project-Tenny`。
-- CAN 传输库和 HX711 称重核心分别从旧工程 BabytechActuatorHal、BabytechSensorHal 按需迁入 `motion/lib/`；新工程不依赖旧仓库路径，旧仓库未修改。
+- CAN 传输库和 HX711 称重核心分别从旧工程 BabytechActuatorHal、BabytechSensorHal 按需迁入 `device-controller/lib/`；新工程不依赖旧仓库路径，旧仓库未修改。
 - 新 UART v2 四指令协议要求上下板一起更新；不能与旧 v1 或 DisplayController/Product 协议混用。
+
+Wi-Fi OTA 的设计与操作见 [实施计划](docs/wifi-ota-plan.md) 和 [使用说明](docs/wifi-ota-implementation.md)。
 
 详见 [当前板间协议 v2](docs/protocol-v2.md)；[v1 文档](docs/protocol.md) 仅供历史参考。
 

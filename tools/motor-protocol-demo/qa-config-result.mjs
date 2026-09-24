@@ -5,7 +5,7 @@ const require=createRequire(import.meta.url);
 const {chromium}=require('C:/Users/xusen/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
 const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe'});
 const page=await browser.newPage({viewport:{width:1280,height:800}});
-const html=await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const html=await readFile(new URL('../../device-controller/data/index.html',import.meta.url),'utf8');
 const errors=[],posts=[];
 let sequence=0,state='none',ack=0,actual=[],offline=false,traceSeq=0;
 const expected=[2,0,0,100,0,0,39,16,0,5,0,120,0,60,0];
