@@ -6,7 +6,7 @@ namespace motion {
 namespace {
 
 // --- Limits of the sender ---------------------------------------------------
-// The only pacing left is the documented gap between the packets of raw frames.
+// Raw frames retain the documented minimum gap; sync has its own state machine.
 constexpr uint32_t kRawSpacingMs = 2;
 // Default arguments of the readable DSL.
 constexpr double kDefaultMoveRpm = 30.0;
@@ -166,6 +166,7 @@ QueueAction actionFromToken(const char* text, size_t length) {
     if (tokenEquals(text, length, "wait")) return QueueAction::Wait;
     if (tokenEquals(text, length, "hex")) return QueueAction::Hex;
     if (tokenEquals(text, length, "can")) return QueueAction::Can;
+    if (tokenEquals(text, length, "sync")) return QueueAction::SyncBegin;
     return QueueAction::None;
 }
 
@@ -198,6 +199,8 @@ const char* queueActionName(QueueAction action) {
         case QueueAction::Wait: return "wait";
         case QueueAction::Hex: return "hex";
         case QueueAction::Can: return "can";
+        case QueueAction::SyncBegin: return "sync";
+        case QueueAction::SyncEnd: return "sync_end";
         case QueueAction::None: break;
     }
     return "none";
@@ -446,6 +449,16 @@ bool parseStep(const Tokens& tokens,
     step.action = action;
 
     switch (action) {
+        case QueueAction::SyncBegin:
+        case QueueAction::SyncEnd:
+            if(tokens.count==3 && tokenEquals(tokens.text[1],tokens.length[1],"begin") &&
+               tokenEquals(tokens.text[2],tokens.length[2],"trigger")) {
+                step.action=QueueAction::SyncBegin;step.syncTriggerOnly=true;return true;
+            }
+            if(tokens.count!=2) return failAt(error,step.line,"argument_count");
+            if(tokenEquals(tokens.text[1],tokens.length[1],"begin")) {step.action=QueueAction::SyncBegin;return true;}
+            if(tokenEquals(tokens.text[1],tokens.length[1],"end")) {step.action=QueueAction::SyncEnd;return true;}
+            return failAt(error,step.line,"sync_invalid_delimiter");
         case QueueAction::Enable:
         case QueueAction::Disable:
         case QueueAction::Stop: {
@@ -543,7 +556,7 @@ bool parseStep(const Tokens& tokens,
 bool parseQueueProgram(const char* text, size_t length,
                        const QueueRotationSource& rotation, QueueProgram& program,
                        QueueError& error) {
-    // Cheap reset: assigning a QueueProgram temporary would put the whole ~6 KB
+    // Cheap reset: assigning a QueueProgram temporary would put the whole plan
     // plan on the caller's stack, which the ESP32 loop task cannot afford.
     program.count = 0;
     program.hasRaw = false;
@@ -551,6 +564,10 @@ bool parseQueueProgram(const char* text, size_t length,
     if (text == nullptr) return failAt(error, 0, "empty_program");
     if (length > kQueueMaxTextBytes) return failAt(error, 0, "program_too_long");
 
+    int groupStart=-1;
+    const auto invalidGroup=[&](uint16_t sourceLine,const char* reason) {
+        program.count=0;program.hasRaw=false;return failAt(error,sourceLine,reason);
+    };
     uint16_t line = 0;
     size_t offset = 0;
     while (offset < length) {
@@ -576,6 +593,50 @@ bool parseQueueProgram(const char* text, size_t length,
         }
         if (program.count >= kQueueMaxSteps) return failAt(error, line, "too_many_actions");
 
+        if(tokenEquals(tokens.text[0],tokens.length[0],"helix")) {
+            if(groupStart>=0) return invalidGroup(line,"sync_nested");
+            if(tokens.count!=13) return invalidGroup(line,"helix_argument_count");
+            if(program.count+4>kQueueMaxSteps) return invalidGroup(line,"too_many_actions");
+            uint8_t rotaryId=0,linearId=0;
+            if(!parseId(tokens,1,rotaryId,error,line) || !parseId(tokens,2,linearId,error,line)) {
+                program.count=0;return false;
+            }
+            double values[10]={};
+            for(uint8_t i=0;i<10;++i)
+                if(!parseSignedDecimal(tokens.text[i+3],tokens.length[i+3],values[i])) return invalidGroup(line,"invalid_number");
+            // turns, lead, ratio, rotary sign, linear sign, RPM, accel, decel, current, axial tolerance
+            if((values[3]!=-1 && values[3]!=1) || (values[4]!=-1 && values[4]!=1) ||
+               values[5]<0.1 || values[5]>3000 || values[6]<1 || values[6]>65535 || floor(values[6])!=values[6] ||
+               values[7]<1 || values[7]>65535 || floor(values[7])!=values[7] ||
+               values[8]<0 || values[8]>5000 || floor(values[8])!=values[8] || values[9]<=0)
+                return invalidGroup(line,"helix_parameters_invalid");
+            HelixGeometry geometry;
+            geometry.leadMmPerCapRev=values[1];geometry.motorRevPerCapRev=values[2];
+            geometry.rotaryDirection=int8_t(values[3]);geometry.linearDirection=int8_t(values[4]);
+            if(!rotation.rotationMm(linearId,geometry.linearMmPerMotorRev)) return invalidGroup(line,"rotation_distance_missing");
+            QueueStep& begin=program.steps[program.count];begin=QueueStep{};begin.action=QueueAction::SyncBegin;
+            begin.line=line;begin.groupSize=2;begin.helixTravelMm=fabs(values[0]*values[1]);
+            if(!isfinite(begin.helixTravelMm) || begin.helixTravelMm<=0) return invalidGroup(line,"helix_parameters_invalid");
+            begin.syncToleranceProgress=values[9]/begin.helixTravelMm;
+            for(uint8_t i=1;i<=2;++i) {
+                auto& axis=program.steps[program.count+i];axis=QueueStep{};axis.line=line;
+                axis.id=i==1?rotaryId:linearId;axis.speedTenths=uint16_t(values[5]*10+0.5);
+                axis.accelRpmS=uint16_t(values[6]);axis.decelRpmS=uint16_t(values[7]);axis.currentMa=uint16_t(values[8]);
+            }
+            const char* reason=resolveHelix(values[0],geometry,program.steps[program.count+1],program.steps[program.count+2]);
+            if(reason) return invalidGroup(line,reason);
+            const double rotaryTravel=program.steps[program.count+1].distanceTenths/3600.0/values[2]*values[3]*values[1];
+            const double linearTravel=program.steps[program.count+2].distanceTenths/3600.0*geometry.linearMmPerMotorRev*values[4];
+            // Reserve twice the displacement-rounding error for progress up to
+            // 2 (the runtime rejects travel beyond the much tighter envelope).
+            begin.helixGeometryErrorMm=2*(fabs(rotaryTravel-values[0]*values[1])+fabs(linearTravel-values[0]*values[1]));
+            if(begin.helixGeometryErrorMm>=values[9])
+                return invalidGroup(line,"helix_geometry_quantization_tolerance");
+            begin.syncToleranceProgress=(values[9]-begin.helixGeometryErrorMm)/begin.helixTravelMm;
+            auto& endStep=program.steps[program.count+3];endStep=QueueStep{};endStep.action=QueueAction::SyncEnd;endStep.line=line;
+            program.count+=4;continue;
+        }
+
         QueueStep& step = program.steps[program.count];
         step = QueueStep();
         step.line = line;
@@ -596,12 +657,27 @@ bool parseQueueProgram(const char* text, size_t length,
             program.hasRaw = false;
             return false;
         }
+        if(step.action==QueueAction::SyncBegin) {
+            if(groupStart>=0) return invalidGroup(line,"sync_nested");
+            groupStart=program.count;
+        } else if(step.action==QueueAction::SyncEnd) {
+            if(groupStart<0) return invalidGroup(line,"sync_unmatched_end");
+            const uint8_t members=program.count-groupStart-1;
+            if(members<2 || members>8) return invalidGroup(line,"sync_member_count");
+            program.steps[groupStart].groupSize=members;groupStart=-1;
+        } else if(groupStart>=0) {
+            if(step.action!=QueueAction::Move || step.awaitCompletion) return invalidGroup(line,"sync_only_relative_move");
+            if(program.count-groupStart>8) return invalidGroup(line,"sync_member_count");
+            for(uint8_t i=groupStart+1;i<program.count;++i)
+                if(program.steps[i].id==step.id) return invalidGroup(line,"sync_duplicate_id");
+        }
         if (step.action == QueueAction::Hex || step.action == QueueAction::Can) {
             program.hasRaw = true;
         }
         ++program.count;
     }
 
+    if(groupStart>=0) return invalidGroup(program.steps[groupStart].line,"sync_missing_end");
     if (program.count == 0) return failAt(error, 0, "empty_program");
     return true;
 }
@@ -624,7 +700,7 @@ void CommandQueue::setMessage(const char* text) {
 
 Result CommandQueue::start(const char* text, size_t length, long repeat,
                            const QueueRotationSource& rotation, uint32_t now) {
-    if (state_ == QueueState::Running) return Result{409, "queue_busy"};
+    if (active()) return Result{409, "queue_busy"};
     if (repeat < 1 || repeat > long(kQueueMaxRepeat)) return Result{400, "repeat_out_of_range"};
     // Nothing else may refuse a start: a fault, a pending stop, a busy manual
     // operation or unloaded board limits are not this sender's business. Only a
@@ -632,7 +708,7 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     // sent and pretending otherwise would be a lie.
     if (!motor_.ready()) return Result{503, "can_unavailable"};
 
-    // The parsed plan is ~6 KB: it lives in one fixed scratch buffer instead of
+    // The parsed plan lives in one fixed scratch buffer instead of
     // the HTTP task stack, and is copied into program_ only when it is valid.
     // Nothing is allocated and the running plan is untouched by a refusal.
     static QueueProgram scratch;
@@ -644,6 +720,14 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
         setMessage(error.message);
         return Result{400, error.message};
     }
+    for(uint8_t i=0;i<scratch.count;++i) {
+        const auto& step=scratch.steps[i];
+        if(step.action!=QueueAction::SyncBegin) continue;
+        SyncSettings settings=syncSettings_;
+        if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
+        const char* reason=sync_.validate(scratch.steps+i+1,step.groupSize,settings,nullptr,step.syncTriggerOnly);
+        if(reason) {errorLine_=step.line;setMessage(reason);return Result{400,reason};}
+    }
 
     // The plan is a fixed-size copy and stays immutable until the run ends. Only
     // now - after a fully successful parse - take the board over from a stale
@@ -651,9 +735,13 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     // sends nothing on CAN.
     program_ = scratch;
     strictHome_ = false;
+    programHash_=2166136261u;
+    for(size_t i=0;i<length;++i) programHash_=(programHash_^uint8_t(text[i]))*16777619u;
+    sync_.reset();
     motor_.clearControlState();
     repeat_ = static_cast<uint32_t>(repeat);
     runId_++;
+    motor_.queueDiagnostics_.beginRun(runId_);
     state_ = QueueState::Running;
     phase_ = kPhaseIdle;
     phaseAt_ = now;
@@ -663,6 +751,8 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     lastRawAt_ = 0;
     errorLine_ = 0;
     setMessage("running");
+    motionComplete_=false;
+    unconfirmedMotion_=false;
     return Result{202, "queue_started"};
 }
 
@@ -672,6 +762,12 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
     if (!program.count || program.hasRaw) return Result{400, "invalid_demo_program"};
     program_ = program;
     strictHome_ = true;
+    sync_.reset();
+    programHash_ = 0;  // Demo programs have no DSL source text.
+    motionComplete_ = false;
+    unconfirmedMotion_ = false;
+    helixTravelMm_ = helixGeometryErrorMm_ = 0;
+    motor_.queueDiagnostics_.beginRun(runId_ + 1);
     repeat_ = 1; ++runId_; state_ = QueueState::Running;
     phase_ = kPhaseIdle; phaseAt_ = now; deadlineAt_ = 0;
     stepIndex_ = 0; iteration_ = 0; lastRawAt_ = 0; errorLine_ = 0;
@@ -681,11 +777,19 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
 
 Result CommandQueue::cancel(const char* reason) {
     motor_.queueObserveId_ = 0;
+    motor_.queries_.release(CanQueryScheduler::Await);
     const bool wasRunning = state_ == QueueState::Running;
     if (wasRunning) {
         state_ = QueueState::Cancelled;
         setMessage(reason != nullptr ? reason : "cancelled");
         phase_ = kPhaseIdle;
+    }
+    if(sync_.active()) {
+        sync_.abort(reason ? reason : "cancelled",millis());
+        // A prior direct move or raw command may still be running outside the
+        // sync group. The user-facing all-stop must cover those nodes too.
+        if (!stopEverything()) return Result{503,"can_tx_failed"};
+        return Result{202,"sync_stop_requested"};
     }
     // Stop everything unconditionally: an authorised stop must keep working even
     // when the queue software already failed.
@@ -716,6 +820,7 @@ Result CommandQueue::clearControlState() {
 
 void CommandQueue::finish(QueueState state, const char* message) {
     motor_.queueObserveId_ = 0;
+    motor_.queries_.release(CanQueryScheduler::Await);
     state_ = state;
     setMessage(message);
     phase_ = kPhaseIdle;
@@ -733,13 +838,14 @@ void CommandQueue::fail(uint32_t now, const char* reason, uint16_t line) {
 
 void CommandQueue::advance(uint32_t now) {
     motor_.queueObserveId_ = 0;
+    motor_.queries_.release(CanQueryScheduler::Await);
     ++stepIndex_;
     phase_ = kPhaseIdle;
     phaseAt_ = now;
 }
 
-// One FE frame for one address, used by the legacy timed forms and by nothing
-// else here: the queue never stops the motor on its own initiative.
+// One FE frame for one address: explicit/timed stops, or an opt-in sync fault.
+// Ordinary direct actions never add fault-generated stops.
 bool CommandQueue::sendStopFrame(uint8_t id) {
     const uint8_t frame[5] = {id, 0xFE, 0x98, 0, 0x6B};
     return motor_.queueSendLogical(frame, sizeof(frame));
@@ -750,9 +856,29 @@ bool CommandQueue::sendStopFrame(uint8_t id) {
 // supervised controller call is ever made from here, so no hidden enable, job,
 // fault or config transaction can come back to life.
 void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
+    if(step.action!=QueueAction::Wait) motionComplete_=false;
+    if((!step.awaitCompletion && (step.action==QueueAction::Move || step.action==QueueAction::Home ||
+       step.action==QueueAction::Torque || step.action==QueueAction::Velocity)) ||
+       step.action==QueueAction::Hex || step.action==QueueAction::Can) unconfirmedMotion_=true;
+    if(step.action==QueueAction::SyncBegin) {
+        SyncSettings settings=syncSettings_;
+        if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
+        helixTravelMm_=step.helixTravelMm;
+        helixGeometryErrorMm_=step.helixGeometryErrorMm;
+        const char* reason=sync_.start(program_.steps+stepIndex_+1,step.groupSize,settings,now,step.syncTriggerOnly);
+        if(reason) {fail(now,reason,step.line);return;}
+        phase_=kPhaseSync;setMessage("sync_checking");return;
+    }
     if (step.awaitCompletion) {
         motor_.queueObserveId_ = step.id;
         auto& node = motor_.nodes_[step.id];
+        int32_t startPosition = 0;
+        expectedMoveTargetValid_ = step.action == QueueAction::Move &&
+            (step.absolute || motor_.freshPosition(step.id, now, startPosition));
+        if (expectedMoveTargetValid_) {
+            expectedMoveTargetTenths_ = step.absolute ? step.distanceTenths :
+                int64_t(startPosition) + step.distanceTenths;
+        }
         node.queueAckFunction = node.queueAckStatus = 0;
         node.queueExpectedFunction = step.action == QueueAction::Home ? 0x9A : 0xCD;
         node.queueAckPending = false;
@@ -760,12 +886,30 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
         node.queueHomeProofMs = 0;
         node.targetValid = node.homeFlagsValid = false;
         accepted_ = homeSeenRunning_ = homeComplete_ = false;
-        doneSamples_ = queryIndex_ = 0;
+        doneSamples_ = 0;
         observedAckAt_ = donePosAt_ = doneVelAt_ = now;
         homeProofAt_ = 0;
-        queryAt_ = phaseAt_ = now;
+        phaseAt_ = now;
     }
     const bool sent = encodeAndSend(step);
+    uint8_t function = 0;
+    switch (step.action) {
+        case QueueAction::Enable: case QueueAction::Disable: function=0xF3; break;
+        case QueueAction::Move: function=0xCD; break;
+        case QueueAction::Home: function=0x9A; break;
+        case QueueAction::Torque: function=0xC5; break;
+        case QueueAction::Velocity: function=0xC6; break;
+        case QueueAction::Stop: function=0xFE; break;
+        default: break;
+    }
+    const bool raw=step.action==QueueAction::Hex || step.action==QueueAction::Can;
+    const uint8_t diagnosticId=step.action==QueueAction::Hex?step.raw[0]:
+        step.action==QueueAction::Can?uint8_t(step.canId>>8):step.id;
+    if(raw) function=step.action==QueueAction::Hex?step.raw[1]:step.canLength?step.canData[0]:0;
+    motor_.queueDiagnostics_.submit(runId_, iteration_+1, step.line, diagnosticId,
+                                    function, now, sent,raw);
+    if (step.action == QueueAction::Hex || step.action == QueueAction::Can)
+        motor_.queueDiagnostics_.invalidate(0);
     if (!sent) {
         // A real transmission failure ends the run here, with the source line. No
         // extra CAN frame is broadcast and the step is not retried.
@@ -794,7 +938,7 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
     advance(now);
 }
 
-bool CommandQueue::encodeAndSend(const QueueStep& step) {
+bool CommandQueue::encodeAndSend(const QueueStep& step,bool synchronized) {
     uint8_t frame[20] = {};
     uint8_t length = 0;
     switch (step.action) {
@@ -830,7 +974,7 @@ bool CommandQueue::encodeAndSend(const QueueStep& step) {
             frame[length++] = static_cast<uint8_t>((magnitude >> 8) & 0xFF);
             frame[length++] = static_cast<uint8_t>(magnitude & 0xFF);
             frame[length++] = step.absolute ? 1 : 2;
-            frame[length++] = 0;
+            frame[length++] = synchronized ? 1 : 0;
             frame[length++] = static_cast<uint8_t>((step.currentMa >> 8) & 0xFF);
             frame[length++] = static_cast<uint8_t>(step.currentMa & 0xFF);
             frame[length++] = 0x6B;
@@ -891,6 +1035,9 @@ bool CommandQueue::encodeAndSend(const QueueStep& step) {
             return motor_.queueSendFrame(step.canId, step.extended, step.canData, step.canLength);
         case QueueAction::Wait:
             return true;   // a timer needs no frame
+        case QueueAction::SyncBegin:
+        case QueueAction::SyncEnd:
+            return false;
         case QueueAction::None:
             break;
     }
@@ -908,7 +1055,7 @@ void CommandQueue::beginStep(uint32_t now) {
         if (iteration_ >= repeat_) {
             // Raw steps only ever mean "frames submitted": the run must not
             // report a mechanical completion it cannot know about.
-            finish(QueueState::Done, program_.hasRaw ? "raw_frames_submitted" : "done");
+            finish(QueueState::Done,motionComplete_ ? "sync_motion_complete" : program_.hasRaw ? "raw_frames_submitted" : "done");
             return;
         }
         stepIndex_ = 0;
@@ -920,10 +1067,26 @@ void CommandQueue::beginStep(uint32_t now) {
         uint32_t(now - lastRawAt_) < kRawSpacingMs) {
         return;  // keep raw frames apart
     }
+    if (step.action == QueueAction::Move && step.awaitCompletion) {
+        // An awaited relative move needs a fresh starting position. Otherwise
+        // an unchanged old target and old position could masquerade as arrival.
+        motor_.queueObserveId_ = step.id;
+        int32_t position = 0, velocity = 0;
+        const bool positionFresh = motor_.freshPosition(step.id, now, position);
+        const bool velocityFresh = motor_.freshVelocity(step.id, now, velocity);
+        if (!positionFresh || !velocityFresh || velocity < -5 || velocity > 5) {
+            motor_.queries_.demand(step.id, 0x36, CanQueryScheduler::Await, 150, 1000, 2, now);
+            motor_.queries_.demand(step.id, 0x35, CanQueryScheduler::Await, 150, 1000, 2, now);
+            setMessage(positionFresh && velocityFresh ? "waiting_move_stationary" :
+                       "waiting_move_start_feedback");
+            return;
+        }
+    }
     dispatchStep(now, step);
 }
 
 void CommandQueue::poll(uint32_t now) {
+    if(sync_.active() || phase_==kPhaseSync) {pollSync(now);return;}
     if (state_ != QueueState::Running) return;
 
     // No board state is consulted here: no fault, no pending stop, no feedback
@@ -931,6 +1094,8 @@ void CommandQueue::poll(uint32_t now) {
     // that the bus can transmit at all - otherwise nothing could be sent and the
     // run must say so instead of pretending.
     switch (phase_) {
+        case kPhaseSync:
+            pollSync(now);return;
         case kPhaseMotion:
             observeMotion(now);
             return;
@@ -948,12 +1113,81 @@ void CommandQueue::poll(uint32_t now) {
             // a stop confirmation and nothing waits for one.
             const QueueStep* step = currentStep();
             const uint8_t id = step != nullptr ? step->id : 0;
-            if (!sendStopFrame(id)) { fail(now, "tx_failed", step != nullptr ? step->line : 0); return; }
+            const bool sent=sendStopFrame(id);
+            motor_.queueDiagnostics_.submit(runId_,iteration_+1,step ? step->line : 0,id,0xFE,now,sent);
+            if (!sent) { fail(now, "tx_failed", step != nullptr ? step->line : 0); return; }
             advance(now);
             return;
         }
     }
     fail(now, "internal_phase", 0);
+}
+
+SyncFeedback CommandQueue::syncFeedback(uint8_t id) const {
+    const auto& n=motor_.nodes_[id];SyncFeedback f;
+    f.position=n.positionTenths;f.velocity=n.velocityTenths;f.target=n.targetTenths;
+    f.positionAt=n.positionMs;f.velocityAt=n.velocityMs;f.targetAt=n.targetMs;
+    f.flagsAt=n.flagsMs;f.homeAt=n.homeFlagsMs;f.flags=n.flags;f.homeFlags=n.homeFlags;
+    f.positionValid=n.positionValid;f.velocityValid=n.velocityValid;f.targetValid=n.targetValid;
+    f.flagsValid=n.flagsValid;f.homeValid=n.homeFlagsValid;
+    const auto match=[&](uint8_t field,uint32_t at,uint32_t& requested) {
+        const auto evidence=motor_.queries_.evidence(id,field);requested=evidence.sampleRequestAt;
+        return evidence.receivedAt==at && at-requested<=syncSettings_.responseBudgetMs;
+    };
+    f.positionValid=f.positionValid && match(0x36,f.positionAt,f.positionRequestedAt);
+    f.velocityValid=f.velocityValid && match(0x35,f.velocityAt,f.velocityRequestedAt);
+    f.flagsValid=f.flagsValid && match(0x3A,f.flagsAt,f.flagsRequestedAt);
+    f.homeValid=f.homeValid && match(0x3B,f.homeAt,f.homeRequestedAt);
+    f.targetValid=f.targetValid && match(0x33,f.targetAt,f.targetRequestedAt);
+    f.ackSequence=n.syncAckSequence;f.ackAt=n.syncAckMs;f.ack=n.syncAck;return f;
+}
+bool CommandQueue::syncSendMove(const QueueStep& step) {
+    auto& n=motor_.nodes_[step.id];n.syncAck=0;n.targetValid=false;
+    const uint32_t now=millis();
+    const bool sent=encodeAndSend(step,true);
+    motor_.queueDiagnostics_.submit(runId_,iteration_+1,step.line,step.id,0xCD,now,sent);
+    return sent;
+}
+bool CommandQueue::syncTrigger() {
+    const uint8_t bytes[]={0,0xFF,0x66,0x6B};
+    return motor_.queueSendLogical(bytes,sizeof(bytes));
+}
+bool CommandQueue::syncStop(uint8_t id) {
+    const bool sent=sendStopFrame(id);
+    uint16_t line=currentStep()?currentStep()->line:0;
+    for(uint8_t i=0;i<sync_.plan().count;++i) if(sync_.plan().axes[i].id==id) line=sync_.plan().axes[i].line;
+    motor_.queueDiagnostics_.submit(runId_,iteration_+1,line,id,0xFE,millis(),sent);
+    return sent;
+}
+void CommandQueue::syncObserve(uint8_t id,bool value) {motor_.syncObserve_[id]=value;}
+void CommandQueue::pollSync(uint32_t now) {
+    if(sync_.active() && !motor_.ready()) sync_.abort("can_unavailable",now);
+    sync_.poll(now);
+    if(sync_.phase()==SyncRuntime::Phase::Failed) {
+        if(state_==QueueState::Running) fail(now,sync_.error(),currentStep()?currentStep()->line:0);
+        else phase_=kPhaseIdle;
+    } else if(sync_.phase()==SyncRuntime::Phase::Complete) {
+        if(state_!=QueueState::Running) {phase_=kPhaseIdle;return;}
+        const QueueStep* step=currentStep();
+        if(!step || step->action!=QueueAction::SyncBegin) {fail(now,"sync_internal_step",0);return;}
+        stepIndex_+=step->groupSize+1; // advance() then skips the closing delimiter
+        advance(now);motionComplete_=!unconfirmedMotion_;setMessage("sync_motion_complete");
+    } else {
+        setMessage(sync_.error()?sync_.error():SyncRuntime::phaseName(sync_.phase()));
+    }
+}
+
+String CommandQueue::syncSettingsJson() const {
+    const auto& s=syncSettings_;
+    String j("{\"configured\":");j+=s.valid()?"true":"false";
+    j+=",\"progressTolerance\":";j+=String(s.tolerance.progress,8);
+    j+=",\"timeToleranceMs\":";j+=static_cast<unsigned long>(s.tolerance.timeMs);
+    j+=",\"feedbackTimeoutMs\":";j+=static_cast<unsigned long>(s.feedbackTimeoutMs);
+    j+=",\"prepareTimeoutMs\":";j+=static_cast<unsigned long>(s.prepareTimeoutMs);
+    j+=",\"stopTimeoutMs\":";j+=static_cast<unsigned long>(s.stopTimeoutMs);
+    j+=",\"responseBudgetMs\":";j+=static_cast<unsigned long>(s.responseBudgetMs);
+    j+=",\"completionTenths\":";j+=s.completionTenths;
+    j+="}";return j;
 }
 
 // Observe completion without invoking the manual controller's fault/stop policy.
@@ -1008,9 +1242,15 @@ void CommandQueue::observeMotion(uint32_t now) {
     const bool fresh = n.positionValid && n.velocityValid &&
         newer(n.positionMs, proofAt) && newer(n.velocityMs, proofAt) &&
         now-n.positionMs < 1000 && now-n.velocityMs < 1000;
+    // An accepted CD can still leave the driver's old target unchanged. If the
+    // pre-send position was fresh, require the target readback to represent this
+    // move before allowing two stationary samples to complete the await.
+    const bool expectedTargetSeen = !expectedMoveTargetValid_ ||
+        (int64_t(n.targetTenths) - expectedMoveTargetTenths_ <= 5 &&
+         int64_t(n.targetTenths) - expectedMoveTargetTenths_ >= -5);
     bool reached = home ? accepted_ && homeComplete_ :
         accepted_ && n.targetValid && newer(n.targetMs, phaseAt_) &&
-        now-n.targetMs < 1000 &&
+        expectedTargetSeen &&
         int64_t(n.positionTenths)-n.targetTenths <= 1 &&
         int64_t(n.positionTenths)-n.targetTenths >= -1;
     if (!fresh || !reached) doneSamples_ = 0;
@@ -1028,20 +1268,18 @@ void CommandQueue::observeMotion(uint32_t now) {
             !fresh ? "home_wait_fresh_feedback" :
             (n.velocityTenths < -5 || n.velocityTenths > 5) ? "home_wait_stationary" :
             "home_confirming_stationary");
+    } else if (accepted_ && n.targetValid && newer(n.targetMs, phaseAt_) &&
+               !expectedTargetSeen) {
+        setMessage("waiting_move_target");
     }
-    if (!motor_.autoQueriesEnabled() && !strictHome_) {
-        setMessage("automatic_queries_paused");
-        return;
-    }
-    if (now-queryAt_ >= 50) {
-        const uint8_t query[] = {step->id, uint8_t(queryIndex_ == 0 ? (home ? 0x3B : 0x33) :
-            (queryIndex_ == 1 ? 0x36 : 0x35)), 0x6B};
-        if (!motor_.queueSendLogical(query, sizeof(query))) {
-            fail(now, "tx_failed", step->line);
-            return;
-        }
-        queryAt_ = now; queryIndex_ = (queryIndex_+1)%3;
-    }
+    const auto demand=[this,step,now](uint8_t field,uint32_t period) {
+        motor_.queries_.demand(step->id,field,CanQueryScheduler::Await,period,1000,2,now);
+    };
+    demand(0x36,200); demand(0x35,200);
+    if (home && !homeComplete_) demand(0x3B,300);
+    else motor_.queries_.release(step->id,0x3B,CanQueryScheduler::Await);
+    if (!home && (!n.targetValid || !newer(n.targetMs,phaseAt_))) demand(0x33,500);
+    else motor_.queries_.release(step->id,0x33,CanQueryScheduler::Await);
 }
 
 namespace {
@@ -1071,6 +1309,8 @@ String CommandQueue::statusJson() const {
     json += queueStateName(state_);
     json += "\",\"runId\":";
     json += static_cast<unsigned long>(runId_);
+    json += ",\"active\":";json += active()?"true":"false";
+    json += ",\"programHash\":";json += static_cast<unsigned long>(programHash_);
     json += ",\"step\":";
     json += static_cast<unsigned int>(stepNumber);
     json += ",\"total\":";
@@ -1090,6 +1330,81 @@ String CommandQueue::statusJson() const {
     appendEscaped(json, message_);
     json += "\",\"raw\":";
     json += program_.hasRaw ? "true" : "false";
+    json += ",\"motionComplete\":";json += motionComplete_?"true":"false";
+    json += ",\"sync\":{\"phase\":\"";json += SyncRuntime::phaseName(sync_.phase());
+    json += "\",\"mode\":\"";json += sync_.triggerOnly()?"trigger_only":"progress_guarded";
+    json += "\",\"error\":\"";appendEscaped(json,sync_.error());
+    json += "\",\"sampleBudgetMs\":";json += static_cast<unsigned long>(sync_.sampleBudgetMs());
+    json += ",\"errorLower\":";json += String(sync_.errorLower(),6);
+    json += ",\"errorUpper\":";json += String(sync_.errorUpper(),6);
+    json += ",\"maxObservableError\":";json += String(sync_.maxObservableError(),6);
+    json += ",\"maxHelixObservableErrorMm\":";
+    if(helixTravelMm_>0) json += String(fmax(0.0,sync_.maxObservableError()*helixTravelMm_-helixGeometryErrorMm_),6);else json += "null";
+    json += ",\"helixErrorLowerMm\":";
+    if(helixTravelMm_>0) json += String(fmax(0.0,sync_.errorLower()*helixTravelMm_-helixGeometryErrorMm_),6);else json += "null";
+    json += ",\"helixErrorUpperMm\":";
+    if(helixTravelMm_>0) json += String(sync_.errorUpper()*helixTravelMm_+helixGeometryErrorMm_,6);else json += "null";
+    json += ",\"members\":[";
+    for(uint8_t i=0;i<sync_.plan().count;++i) {
+        if(i) json+=',';
+        const auto& m=sync_.member(i);
+        json += "{\"id\":";json += sync_.plan().axes[i].id;
+        json += ",\"line\":";json += sync_.plan().axes[i].line;
+        json += ",\"sentAt\":";json += static_cast<unsigned long>(m.sentAt);
+        json += ",\"accepted\":";json += m.accepted?"true":"false";
+        json += ",\"ackAssociation\":\"";
+        json += m.targetConfirmed?(m.targetDeferred?"opcode_only_with_triggered_target":
+            "opcode_only_with_changed_target"):"opcode_only";json += '"';
+        json += ",\"targetObserved\":";json += m.targetObserved?"true":"false";
+        json += ",\"targetDeferred\":";json += m.targetDeferred?"true":"false";
+        json += ",\"targetConfirmed\":";json += m.targetConfirmed?"true":"false";
+        json += ",\"targetExpectedTenths\":";json += String(static_cast<long>(m.target));
+        json += ",\"previousTargetTenths\":";json += m.previousTarget;
+        json += ",\"targetReadbackTenths\":";
+        if(m.targetReadbackValid) json += m.lastTargetReadback;else json += "null";
+        json += ",\"done\":";json += m.done?"true":"false";
+        json += ",\"stopSent\":";json += m.stopSent?"true":"false";
+        json += ",\"stopped\":";json += m.stopped?"true":"false";
+        json += '}';
+    }
+    json += "]}";
+    json += ",\"alert\":";
+    const auto* alert=motor_.queueDiagnostics_.alert();
+    if (!alert) json += "null";
+    else {
+        json += "{\"runId\":";json += static_cast<unsigned long>(alert->run);
+        json += ",\"iteration\":";json += static_cast<unsigned long>(alert->iteration);
+        json += ",\"line\":";json += alert->line;
+        json += ",\"motor\":";json += alert->id;
+        json += ",\"function\":";json += alert->function;
+        json += ",\"sentAt\":";json += static_cast<unsigned long>(alert->sentAt);
+        json += ",\"code\":";json += alert->code;
+        json += ",\"confirmation\":\"";
+        json += QueueDiagnostics::name(alert->confirmation);json += "\"}";
+    }
+    json += ",\"diagnosticsDropped\":";
+    json += static_cast<unsigned long>(motor_.queueDiagnostics_.dropped());
+    json += ",\"diagnostics\":[";
+    for (uint8_t i=0; i<motor_.queueDiagnostics_.count(); ++i) {
+        const auto& event=motor_.queueDiagnostics_.at(i);
+        if (i) json += ',';
+        json += "{\"sequence\":"; json += static_cast<unsigned long>(event.sequence);
+        json += ",\"runId\":"; json += static_cast<unsigned long>(event.run);
+        json += ",\"iteration\":"; json += static_cast<unsigned long>(event.iteration);
+        json += ",\"line\":"; json += event.line;
+        json += ",\"motor\":"; json += event.id;
+        json += ",\"function\":"; json += event.function;
+        json += ",\"sentAt\":"; json += static_cast<unsigned long>(event.sentAt);
+        json += ",\"responseAt\":";
+        if (event.responseSeen) json += static_cast<unsigned long>(event.responseAt);
+        else json += "null";
+        json += ",\"code\":"; json += event.code;
+        json += ",\"confirmation\":\"";
+        json += QueueDiagnostics::name(event.confirmation);
+        json += "\",\"associationUncertain\":";json += event.ambiguous?"true":"false";
+        json += "}";
+    }
+    json += ']';
     json += "}";
     return json;
 }

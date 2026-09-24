@@ -219,7 +219,7 @@ export function DeviceApp() {
   // Poll cadence, shared with the mutation path so a start/cancel answer also
   // speeds the next read up instead of waiting for the slow (idle) interval.
   const queueIntervalRef = useRef(2500);
-  const queueRunning = queue?.state === 'running';
+  const queueRunning = queue?.active === true || queue?.state === 'running';
   const queueStale = queueState === 'error';
   const queueBusy = queueRunning || queueLock.pending || queueLock.unconfirmed;
   const queueUnknown = queueLock.unconfirmed && !queueRunning;
@@ -660,7 +660,7 @@ export function DeviceApp() {
       const result = await request('/api/polling', {enabled: pollingPaused ? 1 : 0});
       if (typeof result.autoQueriesEnabled !== 'boolean') throw new Error('板端未返回轮询状态');
       setStatus(previous => ({...previous, autoQueriesEnabled: result.autoQueriesEnabled}));
-    } catch (error) { setNotice(`设置自动查询失败：${error.message}，请刷新确认板端状态`); }
+    } catch (error) { setNotice(`设置空闲刷新失败：${error.message}，请刷新确认板端状态`); }
     finally { setPollingBusy(false); }
   }
   const shown=(frozen ?? records).filter(r => (filter==='all'||r.dir===filter) && `${formatBytes(r.data)} ${formatCanId(r.canId)} ${r.note}`.toLowerCase().includes(traceQuery.toLowerCase()));
@@ -702,7 +702,7 @@ export function DeviceApp() {
       <DeviceFeedback status={current} connected={connected} live={connected && status.id === address} notice={notice} lab={tab==='lab'} address={address} opcode={selectedOpcode} records={records} experiment={experiment} limitsReady={limitsReady} queue={queue} queueRunning={queueRunning} queueStale={queueStale} directNote={tab==='lab' ? directPositionBoardNote(model.bytes) : null} draftNote={tab==='lab'||tab==='manual' ? DRAFT_NOTE : null}/>
     </main>}
     {tab!=='scale' && <div className="device-trace">
-      {pollingPaused && <p className="device-trace-warning" role="status">板端自动查询已暂停；接收、记录和手动查询继续。await 可能等待新的完成反馈，恢复查询后继续判断。</p>}
+      {pollingPaused && <p className="device-trace-warning" role="status">空闲页面刷新已暂停；正在执行的指令、await 和同步组仍会主动查询所需反馈。</p>}
       {traceWarning ? <p className="device-trace-warning" role="status"><GlyphInfo /><span>{traceWarning}</span><button type="button" className="link-button" onClick={()=>setTraceWarning('')}>知道了</button></p> : null}
       <TracePanel device pollingPaused={pollingPaused} pollingBusy={pollingBusy} onTogglePolling={togglePolling} records={shown} totalCount={records.length} hiddenCount={0} filter={filter} onFilterChange={setFilter} query={traceQuery} onQueryChange={setTraceQuery} paused={frozen!==null} onTogglePause={()=>setFrozen(frozen?null:[...records])} onClear={()=>{setRecords([]);if(frozen)setFrozen([]);setTraceWarning('');}} onCopy={copy}/>
     </div>}

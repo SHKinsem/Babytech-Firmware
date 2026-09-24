@@ -16,6 +16,8 @@
 
 #include "MotionCore.h"
 #include "X42sProtocol.h"
+#include "QueueDiagnostics.h"
+#include "CanQueryScheduler.h"
 
 namespace motion {
 
@@ -27,8 +29,14 @@ public:
     bool begin(int tx, int rx, long bitrate);
 
     // Bounded housekeeping (CAN TX may briefly block). Call often from loop().
-    void poll();
-    void setAutoQueriesEnabled(bool enabled) { autoQueriesEnabled_ = enabled; }
+    void poll(bool dispatchQueries = true);
+    // Production loop calls this after queue/UART/HTTP operations for TX priority.
+    void dispatchQueries();
+    CanQueryScheduler& queries() { return queries_; }
+    String queryStatusJson() const;
+    // Compatibility name: this controls idle page refresh only. Queries needed
+    // to supervise an active command always use the shared scheduler.
+    void setAutoQueriesEnabled(bool enabled);
     bool autoQueriesEnabled() const { return autoQueriesEnabled_; }
 
     // Selects the address the module tracks (1..255). Selecting a new id never
@@ -178,6 +186,13 @@ public:
 private:
     friend class CommandQueue;
     bool demoWatched_[256] = {};
+    bool syncObserve_[256]={};
+    bool queueTransport_=false;
+    QueueDiagnostics queueDiagnostics_;
+    CanQueryScheduler queries_;
+    static bool sendQuery(void* context, uint8_t id, uint8_t field);
+    uint32_t txFrameCount_=0;
+    uint32_t rxMissedCount_=0, rxOverrunCount_=0, txFailedCount_=0;
     uint8_t queueObserveId_ = 0;
     struct MoveFailure {
         uint8_t id = 0;
@@ -263,6 +278,8 @@ private:
         bool queueHomeRunning = false, queueHomeComplete = false, queueHomeFailed = false;
         uint32_t queueHomeProofMs = 0;
         uint32_t lastAckMs = 0;
+        uint32_t syncAckSequence=0,syncAckMs=0;
+        uint8_t syncAck=0;
     };
 
     struct MoveJob {
@@ -290,7 +307,6 @@ private:
         // same feedback sample is never counted twice.
         uint32_t lastDonePosMs = 0;
         uint32_t lastDoneVelMs = 0;
-        uint32_t lastDoneTargetMs = 0;
     };
 
     // CAN plumbing.
@@ -314,9 +330,7 @@ private:
     // Drops the driver's target sample for one node (0 = every node). Every frame
     // that can change what the driver considers its target invalidates it.
     void invalidateTarget(uint8_t id);
-    // Bounded 0x33 polling for one node: one immediate probe plus at most
-    // kMaxTargetProbes further probes inside kTargetPollWindowMs, sent in
-    // addition to the normal feedback rotation.
+    // Bounded 0x33 demand for one node, subject to the shared budget.
     void armTargetPoll(uint8_t id, uint32_t now);
     // Fresh 0x3B homing status byte, or false when none arrived in the window.
     bool freshHomeFlags(uint8_t id, uint32_t now, uint8_t& out) const;
@@ -411,17 +425,13 @@ private:
     uint8_t faultId_ = 0;
     bool faultGlobal_ = false;
 
-    uint32_t lastQueryMs_ = 0;
     bool autoQueriesEnabled_ = true;
-    uint8_t querySlot_ = 0;
-    uint8_t queryFieldIndex_ = 0;
 
     // Bounded on-demand 0x33 refresh. `targetPollId_` is 0 when nothing is being
-    // refreshed; the window and the probe cap keep a quiet node from turning into
+    // refreshed; the window and global budget keep a quiet node from turning into
     // an endless poll.
     uint8_t targetPollId_ = 0;
     uint32_t targetPollArmedMs_ = 0;
-    uint8_t targetPollProbes_ = 0;
 };
 
 }  // namespace motion

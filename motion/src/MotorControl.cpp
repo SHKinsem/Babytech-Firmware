@@ -14,10 +14,6 @@ constexpr uint32_t kFeedbackFreshMs = 600;
 // as missing. Neither timeout ever implies success.
 constexpr uint32_t kEnableAckTimeoutMs = 1500;
 constexpr uint32_t kMoveAckTimeoutMs = 1500;
-// Added to the planned duration before a running move is declared overdue.
-// One query request is issued per poll cycle, at least this far apart. A query
-// is only sent when at least this much time has actually elapsed.
-constexpr uint32_t kQueryIntervalMs = 30;
 // Bounded RX work per poll() call.
 constexpr uint32_t kMaxFramesPerPoll = 16;
 // "Approximately stopped" / "at target" tolerances.
@@ -30,9 +26,8 @@ constexpr int32_t kNoOpToleranceTenths = 1;
 // separate post-command position/velocity pairs).
 constexpr uint8_t kRequiredDoneUpdates = 2;
 // Bounded on-demand refresh of the driver's target sample (0x33): the poll stops
-// after this long, and after this many probes, whichever comes first.
+// after this long, within the single query scheduler's budget.
 constexpr uint32_t kTargetPollWindowMs = 1500;
-constexpr uint8_t kMaxTargetProbes = 24;
 
 // Homing frames and status bits (manual V1.0.5 pp61-63). 0x9A triggers homing,
 // 0x9C interrupts it and 0x3B is the homing status byte.
@@ -117,12 +112,8 @@ bool MotorControl::begin(int tx, int rx, long bitrate) {
     faultTag_ = kFaultNone;
     faultId_ = 0;
     faultGlobal_ = false;
-    lastQueryMs_ = 0;
-    querySlot_ = 0;
-    queryFieldIndex_ = 0;
     targetPollId_ = 0;
     targetPollArmedMs_ = 0;
-    targetPollProbes_ = 0;
     for (uint16_t i = 0; i < kNodeCount; ++i) {
         nodes_[i] = NodeState{};
     }
@@ -136,8 +127,9 @@ bool MotorControl::begin(int tx, int rx, long bitrate) {
     return canReady_;
 }
 
-void MotorControl::poll() {
+void MotorControl::poll(bool dispatchAutomaticQueries) {
     const uint32_t now = millis();
+    queueDiagnostics_.poll(now);
     refreshBusStatus();
 
     if (busState_ == CanControllerState::BusOff) {
@@ -183,11 +175,22 @@ void MotorControl::poll() {
     serviceHome(now);
     serviceStopConfirmations(now);
     serviceQueries(now);
+    if (dispatchAutomaticQueries) dispatchQueries();
 }
 
 void MotorControl::watch(uint8_t id) {
     if (id == 0) return;
     selectedId_ = id;
+    if (!autoQueriesEnabled_) return;
+    const uint8_t fields[]={0x36,0x35,0x3A};
+    for (uint8_t field:fields)
+        queries_.demand(id,field,CanQueryScheduler::Page,600,2000,0,millis());
+}
+
+void MotorControl::setAutoQueriesEnabled(bool enabled) {
+    autoQueriesEnabled_ = enabled;
+    if (!enabled) queries_.release(CanQueryScheduler::Page);
+    else if (selectedId_) watch(selectedId_);
 }
 
 bool MotorControl::canReady() const {
@@ -203,6 +206,9 @@ void MotorControl::refreshBusStatus() {
     }
     busState_ = status.state;
     txErrorCounter_ = status.txErrorCounter;
+    txFailedCount_ = status.txFailedCount;
+    rxMissedCount_ = status.rxMissedCount;
+    rxOverrunCount_ = status.rxOverrunCount;
 }
 
 const char* MotorControl::busStateString() const { return busStateName(busState_); }
@@ -241,6 +247,15 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
     }
     const uint8_t id = x42sCanAddress(frame.identifier);
     if (id == 0) return;
+    if(syncObserve_[id] && frame.length==3 && frame.data[0]==0xCD && frame.data[2]==kProtocolChecksum) {
+        auto& node=nodes_[id];++node.syncAckSequence;node.syncAckMs=now;
+        if(node.syncAck!=0xE2 && node.syncAck!=0xEE &&
+           (frame.data[1]!=0x9F || node.syncAck!=2)) node.syncAck=frame.data[1];
+    }
+    if (frame.length == 3 && frame.data[2] == kProtocolChecksum &&
+        QueueDiagnostics::functionBit(frame.data[0])) {
+        queueDiagnostics_.response(id, frame.data[0], frame.data[1], now);
+    }
     if (!nodeOfInterest(id)) return;
 
     const uint8_t function = frame.data[0];
@@ -261,6 +276,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
     // 0x3B homing status: its own bit table, kept out of the 0x3A motor flags.
     if (function == kFrameHomeStatus) {
         if (frame.length != 3 || frame.data[2] != kProtocolChecksum) return;
+        queries_.receive(id,function,now);
         node.seenEver = true;
         node.lastSeenMs = now;
         node.homeFlagsValid = true;
@@ -281,6 +297,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
 
     FeedbackSample sample;
     if (!decodeFeedback(frame.data, frame.length, sample)) return;
+    queries_.receive(id,function,now);
 
     node.seenEver = true;
     node.lastSeenMs = now;
@@ -466,22 +483,14 @@ void MotorControl::invalidateTarget(uint8_t id) {
     // A refresh that was armed for the previous bus state is obsolete too.
     if (id == 0 || targetPollId_ == id) {
         targetPollId_ = 0;
-        targetPollProbes_ = 0;
     }
 }
 
 void MotorControl::armTargetPoll(uint8_t id, uint32_t now) {
     targetPollId_ = id;
     targetPollArmedMs_ = now;
-    targetPollProbes_ = 0;
-    if (!canReady()) return;
-    // One probe right away: the caller is about to report "no fresh target", and
-    // the answer should already be on its way when it does. Everything else is
-    // driven by serviceQueries(), in addition to the normal rotation.
-    can_.clearTransmissionError();
-    can_.probeReadSysParams(id, X42sSysParam::Tpos);
-    can_.clearTransmissionError();
-    targetPollProbes_ = 1;
+    queries_.demand(id,0x33,CanQueryScheduler::Controller,500,
+                    kTargetPollWindowMs,2,now);
 }
 
 bool MotorControl::freshHomeFlags(uint8_t id, uint32_t now, uint8_t& out) const {
@@ -515,7 +524,10 @@ bool MotorControl::faultAppliesTo(uint8_t id) const {
 bool MotorControl::nodeOfInterest(uint8_t id) const {
     if (id == 0) return false;
     if (demoWatched_[id]) return true;
-    if (id == selectedId_ || id == experimentId_ || id == queueObserveId_) return true;
+    if (id == selectedId_ || id == experimentId_ || id == queueObserveId_ || syncObserve_[id]) return true;
+    const uint8_t fields[]={0x36,0x35,0x3A,0x33,0x3B};
+    for (uint8_t field : fields)
+        if (queries_.evidence(id,field).pending) return true;
     if (job_.active && job_.id == id) return true;
     if (home_.active && homeId_ == id) return true;
     const NodeState& node = nodes_[id];
@@ -597,13 +609,12 @@ void MotorControl::serviceJob(uint32_t now) {
 
     // A direct (FB/CB) job is additionally proven by the driver's OWN target
     // sample: the target it reports must be the one this job resolved, and the
-    // sample must be fresh and newer than the last counted pair. A 02 ack alone
+    // sample must follow this command; it is retained until target invalidation.
+    // Position and velocity still need two distinct fresh pairs. A 02 ack alone
     // is never completion, and neither is a single stationary pair.
-    int32_t reportedTarget = 0;
+    int32_t reportedTarget = node.targetTenths;
     const bool targetCounts = !job_.targetProof ||
-        (freshTarget(job_.id, now, reportedTarget) &&
-         isStrictlyNewerThan(node.targetMs, job_.startMs) &&
-         isStrictlyNewerThan(node.targetMs, job_.lastDoneTargetMs));
+        (node.targetValid && isStrictlyNewerThan(node.targetMs, job_.startMs));
 
     // "Done" needs an accepted ack plus two DISTINCT post-command sample pairs
     // near the target with a near zero speed. The same sample evaluated twice
@@ -615,7 +626,6 @@ void MotorControl::serviceJob(uint32_t now) {
          isStrictlyNewerThan(node.velocityMs, job_.lastDoneVelMs))) {
         job_.lastDonePosMs = node.positionMs;
         job_.lastDoneVelMs = node.velocityMs;
-        if (job_.targetProof) job_.lastDoneTargetMs = node.targetMs;
         const int64_t error = static_cast<int64_t>(position) - job_.targetTenths;
         const int64_t absError = error < 0 ? -error : error;
         const int64_t targetError =
@@ -762,98 +772,79 @@ void MotorControl::serviceStopConfirmations(uint32_t now) {    for (uint16_t id 
 }
 
 void MotorControl::serviceQueries(uint32_t now) {
-    if (!autoQueriesEnabled_) return;
-    if (!canReady()) return;
-    // Only send when the interval has actually elapsed: the comparison is a
-    // minimum gap, not a window the poll must land inside.
-    if (static_cast<uint32_t>(now - lastQueryMs_) < kQueryIntervalMs) return;
-    lastQueryMs_ = now;
-
-    // The query set is rebuilt every time from the selected id, the active job
-    // and any node with a pending enable or stop. Nothing accumulates, so
-    // switching ids can never exhaust a fixed slot table.
-    uint8_t targets[kMaxQueryTargets];
-    uint8_t count = 0;
-    const auto addTarget = [&targets, &count](uint8_t id) {
-        if (id == 0 || count >= kMaxQueryTargets) return;
-        for (uint8_t i = 0; i < count; ++i) {
-            if (targets[i] == id) return;
-        }
-        targets[count++] = id;
+    queries_.release(CanQueryScheduler::Controller);
+    const auto demand = [this,now](uint8_t id,uint8_t field,uint32_t period,uint8_t priority) {
+        queries_.demand(id,field,CanQueryScheduler::Controller,period,1000,priority,now);
     };
-    addTarget(experimentId_);
-    addTarget(selectedId_);
-    if (job_.active) addTarget(job_.id);
-    if (home_.active) addTarget(homeId_);
-    for (uint16_t id = 1; id < kNodeCount && count < kMaxQueryTargets; ++id) {
-        if (nodes_[id].enablePending || nodes_[id].stopRequested) {
-            addTarget(static_cast<uint8_t>(id));
+    for (uint16_t id=1; id<kNodeCount; ++id) {
+        const bool moving=(job_.active && job_.id==id) ||
+            (home_.active && homeId_==id) || experimentId_==id;
+        const auto& node=nodes_[id];
+        if (moving || node.stopRequested) {
+            demand(id,0x36,200,2); demand(id,0x35,200,2);
         }
+        if (moving || node.enablePending) demand(id,0x3A,500,1);
     }
-    if (count == 0) return;
-
-    if (querySlot_ >= count) querySlot_ = 0;
-    const uint8_t target = targets[querySlot_];
-    const X42sSysParam field = queryFieldIndex_ == 0
-        ? X42sSysParam::Cpos
-        : (queryFieldIndex_ == 1 ? X42sSysParam::Vel :
-           (queryFieldIndex_ == 2 ? X42sSysParam::Cpha : X42sSysParam::Flag));
-
-    // Single shot probe for every target: a node that is offline (or went
-    // quiet) must not spam retries or block the rotation.
-    can_.clearTransmissionError();
-    can_.probeReadSysParams(target, field);
-    can_.clearTransmissionError();
-
-    // While a homing run is supervised, also read that node's 0x3B homing
-    // status. It is sent IN ADDITION to the four feedback fields, never instead
-    // of them, so the existing position/velocity freshness cadence is unchanged.
-    if (home_.active) {
-        can_.probeReadSysParams(homeId_, X42sSysParam::Org);
-        can_.clearTransmissionError();
+    if (home_.active) demand(homeId_,0x3B,300,2);
+    if (job_.active && job_.targetProof &&
+        (!nodes_[job_.id].targetValid || !isStrictlyNewerThan(nodes_[job_.id].targetMs,job_.startMs)))
+        demand(job_.id,0x33,500,2);
+    if (targetPollId_ && ageWithin(now,targetPollArmedMs_,kTargetPollWindowMs)) {
+        int32_t sample=0;
+        if (!freshTarget(targetPollId_,now,sample)) demand(targetPollId_,0x33,500,1);
+        else targetPollId_=0;
     }
+    if (config_.state==2 && !config_.readIssued) demand(config_.id,0x22,3000,3);
+}
 
-    // The driver's target position (0x33, manual p70) is needed while a direct
-    // (FB/CB) job is supervised - it is part of that job's completion proof, and
-    // every pair needs its OWN newer sample - and for a bounded while after a
-    // mode-0 request was refused for a missing sample. It is sent in addition to
-    // the four feedback fields, exactly like the 0x3B read above, so the
-    // position/velocity cadence itself is untouched.
-    uint8_t targetId = 0;
-    bool targetDue = false;
-    if (job_.active && job_.targetProof) {
-        // Unconditional while the job runs: the proof is built from DISTINCT
-        // post-start samples, so a currently-fresh one is not a reason to stop
-        // asking. Only the on-demand idle refresh below stops on freshness.
-        targetId = job_.id;
-        targetDue = true;
-    } else if (targetPollId_ != 0 &&
-               ageWithin(now, targetPollArmedMs_, kTargetPollWindowMs) &&
-               targetPollProbes_ < kMaxTargetProbes) {
-        int32_t sample = 0;
-        targetId = targetPollId_;
-        targetDue = !freshTarget(targetId, now, sample);
-        if (!targetDue) {
-            // The refresh succeeded: stop asking and stop counting the window.
-            targetPollId_ = 0;
-            targetPollProbes_ = 0;
-        }
+bool MotorControl::sendQuery(void* context,uint8_t id,uint8_t field) {
+    auto& self=*static_cast<MotorControl*>(context);
+    const uint8_t bytes[]={id,field,0x6B};
+    self.can_.clearTransmissionError();
+    bool sent=false;
+    switch (field) {
+        case 0x36: sent=self.can_.probeReadSysParams(id,X42sSysParam::Cpos); break;
+        case 0x35: sent=self.can_.probeReadSysParams(id,X42sSysParam::Vel); break;
+        case 0x33: sent=self.can_.probeReadSysParams(id,X42sSysParam::Tpos); break;
+        case 0x3A: sent=self.can_.probeReadSysParams(id,X42sSysParam::Flag); break;
+        case 0x3B: sent=self.can_.probeReadSysParams(id,X42sSysParam::Org); break;
+        case 0x27: sent=self.can_.probeReadSysParams(id,X42sSysParam::Cpha); break;
+        case 0x22: sent=self.can_.sendRawLogical(bytes,sizeof(bytes)); break;
+        default: break;
     }
-    if (targetId != 0 && targetDue) {
-        can_.probeReadSysParams(targetId, X42sSysParam::Tpos);
-        can_.clearTransmissionError();
-        if (targetPollId_ == targetId && targetPollProbes_ < 0xFF) {
-            ++targetPollProbes_;
-        }
+    self.can_.clearTransmissionError();
+    if (field==0x22 && self.config_.state==2) {
+        self.config_.readIssued=true;self.config_.readAt=millis();
+        if (!sent) self.config_.state=8;
+        self.queries_.release(id,field,CanQueryScheduler::Controller);
     }
+    return sent;
+}
 
-    // Advance the target within a field, and only step the field once every
-    // target got its turn: with <=4 targets each node gets position, velocity
-    // and current well inside the freshness window.
-    if (++querySlot_ >= count) {
-        querySlot_ = 0;
-        queryFieldIndex_ = static_cast<uint8_t>((queryFieldIndex_ + 1) % 4);
-    }
+void MotorControl::dispatchQueries() {
+    queries_.poll(millis());
+    if (canReady()) queries_.dispatch(millis(),sendQuery,this);
+}
+
+String MotorControl::queryStatusJson() const {
+    const auto& c=queries_.config();const auto& s=queries_.statistics();
+    String j("{\"queriesPerSecond\":");j+=c.queriesPerSecond;
+    j+=",\"gapMs\":";j+=c.gapMs;j+=",\"timeoutMs\":";j+=c.timeoutMs;
+    j+=",\"cooldownMs\":";j+=c.cooldownMs;j+=",\"maxInflight\":";j+=c.maxInflight;
+    j+=",\"inflight\":";j+=queries_.inflight();
+    j+=",\"queries\":";j+=static_cast<unsigned long>(s.queries);
+    j+=",\"responses\":";j+=static_cast<unsigned long>(s.responses);
+    j+=",\"unanswered\":";j+=static_cast<unsigned long>(s.unanswered);
+    j+=",\"sendErrors\":";j+=static_cast<unsigned long>(s.sendErrors);
+    j+=",\"latencySumMs\":";j+=static_cast<unsigned long>(s.latencySumMs);
+    j+=",\"latencyMaxMs\":";j+=static_cast<unsigned long>(s.latencyMaxMs);
+    j+=",\"txFrames\":";j+=static_cast<unsigned long>(txFrameCount_);
+    j+=",\"rxFrames\":";j+=static_cast<unsigned long>(rxCount_);
+    j+=",\"txFailed\":";j+=static_cast<unsigned long>(txFailedCount_);
+    j+=",\"rxMissed\":";j+=static_cast<unsigned long>(rxMissedCount_);
+    j+=",\"rxOverrun\":";j+=static_cast<unsigned long>(rxOverrunCount_);
+    j+=",\"driverDrops\":null,\"unknownTraffic\":null,\"benchValidated\":false}";
+    return j;
 }
 
 void MotorControl::failJob(const char* tag, uint32_t now) {
@@ -1285,7 +1276,6 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     job_.doneUpdates = 0;
     job_.lastDonePosMs = now;
     job_.lastDoneVelMs = now;
-    job_.lastDoneTargetMs = now;
     return Result{kCodeQueued, "queued"};
 }
 
@@ -1430,21 +1420,13 @@ bool MotorControl::configFrame(const CanRawFrame& f, uint32_t now) {
     ++config_.packet;
     if (config_.received == 16) {
         if (config_.actual[15] != 0x6B) { config_.packet = config_.received = 0; return true; }
+        queries_.receive(config_.id,0x22,now);
         config_.state = memcmp(config_.expected, config_.actual, 15) == 0 ? 3 : 7;
     }
     return true;
 }
 
 void MotorControl::pollConfig(uint32_t now) {
-    if (config_.state == 2 && !config_.readIssued) {
-        config_.readIssued = true;
-        config_.readAt = now;
-        const uint8_t read[] = {config_.id, 0x22, 0x6B};
-        can_.clearTransmissionError();
-        if (!can_.sendValidatedCommand(read, sizeof(read)) || can_.hasTransmissionError())
-            config_.state = 8;
-        can_.clearTransmissionError();
-    }
     if (config_.state == 1 && uint32_t(now - config_.started) > 3000) config_.state = 5;
     if (config_.state == 2 && uint32_t(now - config_.readAt) > 3000) config_.state = 6;
 }
@@ -1482,7 +1464,9 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
     if (!bytes || length < 3 || length > 30) return false;
     if (!canReady()) return false;
     can_.clearTransmissionError();
+    queueTransport_=true;
     const bool sent = can_.sendRawLogical(bytes, length);
+    queueTransport_=false;
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -1494,7 +1478,9 @@ bool MotorControl::queueSendFrame(uint32_t id, bool extended, const uint8_t* dat
     if (length > kMaxCanDataBytes) return false;
     if (!canReady()) return false;
     can_.clearTransmissionError();
+    queueTransport_=true;
     const bool sent = can_.sendRawFrame(id, extended, data, length);
+    queueTransport_=false;
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -1503,6 +1489,7 @@ bool MotorControl::queueSendFrame(uint32_t id, bool extended, const uint8_t* dat
 }
 
 void MotorControl::noteRawTransmission(uint8_t id) {
+    queueDiagnostics_.invalidate(id);
     for (uint16_t nodeId = 1; nodeId < kNodeCount; ++nodeId) {
         if (id != 0 && nodeId != id) continue;
         NodeState& node = nodes_[nodeId];
@@ -1520,7 +1507,6 @@ void MotorControl::noteRawTransmission(uint8_t id) {
     }
     if (id == 0 || targetPollId_ == id) {
         targetPollId_ = 0;
-        targetPollProbes_ = 0;
     }
     if (id == 0) {
         job_ = MoveJob{};
@@ -1670,10 +1656,10 @@ void MotorControl::clearControlState() {
     faultGlobal_ = false;
     // Keep terminal config evidence for diagnosis, but end a pending transaction.
     if (configPending()) config_.state = 9;
-    targetPollId_ = targetPollProbes_ = 0;
+    targetPollId_ = 0;
     targetPollArmedMs_ = 0;
-    querySlot_ = queryFieldIndex_ = 0;
-    lastQueryMs_ = millis();
+    queries_.release(CanQueryScheduler::Controller);
+    queries_.release(CanQueryScheduler::Await);
     for (uint16_t id = 0; id < kNodeCount; ++id) nodes_[id] = NodeState{};
     // limits_, trace_, config evidence, and lastMoveFailure remain available.
     // A real bus fault will be observed again by the next poll.
@@ -2013,6 +1999,11 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
 
 void MotorControl::traceSink(void* context, const CanRawFrame& frame, bool tx) {
     MotorControl* self = static_cast<MotorControl*>(context);
+    if (tx) { ++self->txFrameCount_; self->queries_.noteTraffic(millis()); }
+    if(tx && !self->queueTransport_ && frame.length && (frame.identifier&0xFF)==0 &&
+       !CanQueryScheduler::supported(frame.data[0])) {
+        self->queueDiagnostics_.invalidate(uint8_t(frame.identifier>>8));
+    }
     TraceEntry& entry = self->trace_[self->traceNext_];
     entry.frame = frame;
     entry.tx = tx;
