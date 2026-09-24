@@ -3,11 +3,12 @@ set -euo pipefail
 
 source_root=$(realpath "$(wslpath -u "$1")")
 target=${2:-all}
+case "$target" in main-controller) target=brain;; device-controller) target=motion;; esac
 jobs=${3:-8}
 case "$target" in all|brain|motion|test) ;; *) echo 'Invalid build target' >&2; exit 2;; esac
 [[ "$jobs" =~ ^[0-9]+$ ]] && ((jobs >= 1 && jobs <= 32)) || exit 2
-test -f "$source_root/brain/platformio.ini"
-test -f "$source_root/motion/platformio.ini"
+test -f "$source_root/main-controller/platformio.ini"
+test -f "$source_root/device-controller/platformio.ini"
 test -f "$source_root/shared/BoardProtocol/library.json"
 
 export PATH="$HOME/.local/bin:$HOME/.platformio/penv/bin:$HOME/.venvs/platformio/bin:$PATH"
@@ -51,17 +52,19 @@ cd "$build_root"
 python3 tools/test_protocol.py
 python3 tools/test_motion.py
 python3 tools/test_raw_can.py
+python3 tools/test_demo.py
 if [[ "$target" == test ]]; then exit 0; fi
 if [[ "$target" == all ]]; then projects=(motion brain); else projects=("$target"); fi
 
 for project in "${projects[@]}"; do
     started=$(date +%s)
-    pio run -d "$project" -j "$jobs"
+    if [[ "$project" == brain ]]; then project_dir=main-controller; else project_dir=device-controller; fi
+    pio run -d "$project_dir" -e "$project" -j "$jobs"
     elapsed=$(( $(date +%s) - started ))
     destination="$source_root/out/wsl/$project"
     mkdir -p "$destination"
     for artifact in firmware.bin firmware.elf bootloader.bin partitions.bin; do
-        cp -- "$project/.pio/build/$project/$artifact" "$destination/$artifact"
+        cp -- "$project_dir/.pio/build/$project/$artifact" "$destination/$artifact"
     done
     cp -- "$PLATFORMIO_CORE_DIR/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" "$destination/boot_app0.bin"
     printf 'project=%s\nbuilt_utc=%s\nbuild_seconds=%s\nlinux_build=%s\n' \

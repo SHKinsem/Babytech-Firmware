@@ -15,12 +15,12 @@
 ## 生成升级包
 
 1. 分别修改对应板的 `include/ota_identity.h`，将 `BABYTECH_OTA_BUILD` 增大，并设置新版本。板端拒绝 `build` 小于或等于当前版本的镜像。
-2. 编译并通过相关测试。Windows 本机编译可使用 `pio run -d brain` 和 `pio run -d motion`；WSL 构建使用 `tools/build-wsl.ps1`。
+2. 编译并通过相关测试。Windows 本机编译可使用 `pio run -d main-controller` 和 `pio run -d device-controller`；WSL 构建使用 `tools/build-wsl.ps1`。
 3. 用 [`package-ota.py`](../tools/package-ota.py) 分别生成发布目录。例如本机 PlatformIO 输出：
 
    ```powershell
-   python tools/package-ota.py --board brain --build-dir brain/.pio/build/brain
-   python tools/package-ota.py --board motion --build-dir motion/.pio/build/motion
+   python tools/package-ota.py --board brain --build-dir main-controller/.pio/build/brain
+   python tools/package-ota.py --board motion --build-dir device-controller/.pio/build/motion
    ```
 
    WSL 产物已导出到 `out/wsl/<board>/` 时，可省略 `--build-dir`。脚本核对芯片镜像头、双应用槽容量、源文件时间和私钥对应的公钥，生成 `firmware.bin`、`manifest.json`。私钥默认在忽略的 `out/ota/signing-key.pem`；发布时只交付这两个输出文件，不交付私钥。当前仓库嵌入的是开发公钥，正式产品必须改用离线保管的发布密钥并重建固件。

@@ -16,10 +16,12 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 BOARDS = ('brain', 'motion')
+PROJECT_DIRS = {'brain': 'main-controller', 'motion': 'device-controller'}
+BOARD_ALIASES = {value: key for key, value in PROJECT_DIRS.items()}
 
 
 def identity(board):
-    header = (ROOT / board / 'include/ota_identity.h').read_text(encoding='utf-8')
+    header = (ROOT / PROJECT_DIRS[board] / 'include/ota_identity.h').read_text(encoding='utf-8')
     values = {}
     for key in ('BOARD', 'HARDWARE', 'VERSION', 'BUILD'):
         match = re.search(rf'^#define BABYTECH_OTA_{key} (.+)$', header, re.M)
@@ -62,11 +64,12 @@ def run_openssl(*args, input_bytes=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--board', required=True, choices=BOARDS)
+    parser.add_argument('--board', required=True, choices=(*BOARDS, *BOARD_ALIASES))
     parser.add_argument('--build-dir', type=Path, help='Directory containing firmware.bin and partitions.bin')
     parser.add_argument('--signing-key', type=Path, default=ROOT / 'out/ota/signing-key.pem')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args(argv)
+    args.board = BOARD_ALIASES.get(args.board, args.board)
 
     fields = identity(args.board)
     build_dir = args.build_dir or ROOT / 'out/wsl' / args.board
@@ -81,7 +84,7 @@ def main(argv=None):
                 f"{fields['build']}|{fields['version']}").encode('ascii')
     if image_id not in image:
         raise ValueError('Firmware does not contain the expected board and build identity')
-    source_roots = [ROOT / args.board / folder for folder in ('src', 'include', 'data', 'lib')]
+    source_roots = [ROOT / PROJECT_DIRS[args.board] / folder for folder in ('src', 'include', 'data', 'lib')]
     source_roots += [ROOT / 'shared/WifiOta/src', ROOT / 'shared/BoardProtocol/src',
                      ROOT / 'shared/BabytechDisplayCore/src']
     newest_source = max(path.stat().st_mtime for folder in source_roots

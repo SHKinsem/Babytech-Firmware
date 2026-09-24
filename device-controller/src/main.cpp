@@ -3,7 +3,7 @@
 // Responsibilities of this file:
 //   * brain link (BoardProtocol v2 READ/WRITE/EXEC/STOP frames) over UART1,
 //   * CAN bring-up + motor command HTTP API (delegated to motion::MotorControl),
-//   * WiFi soft-AP + single embedded debug page (motion/data/index.html).
+//   * WiFi soft-AP + single embedded debug page (device-controller/data/index.html).
 //
 // It sends no enable or movement command on boot. Every motion command has to
 // come from an explicit HTTP or UART request; the driver may already be enabled.

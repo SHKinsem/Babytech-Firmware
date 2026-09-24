@@ -21,9 +21,9 @@ DISPLAY 编译分支的“屏幕流程”、JSON 与 `/api/demo*` 接口见 [演
 
 | 文件 | 作用 |
 | --- | --- |
-| `motion/include/board_config.h` | UART、CAN 与软 AP 常量 |
-| `motion/src/main.cpp` | AP + HTTP 服务 + 脑板链路状态桥 |
-| `motion/data/index.html` | 内嵌调试页（内联 CSS/JS，无外部依赖） |
+| `device-controller/include/board_config.h` | UART、CAN 与软 AP 常量 |
+| `device-controller/src/main.cpp` | AP + HTTP 服务 + 脑板链路状态桥 |
+| `device-controller/data/index.html` | 内嵌调试页（内联 CSS/JS，无外部依赖） |
 | `docs/motion-debug.md` | 本文档 |
 
 ## 1. 网络
@@ -53,7 +53,7 @@ DISPLAY 编译分支的“屏幕流程”、JSON 与 `/api/demo*` 接口见 [演
 | HX711 DOUT | 1 | 3.3 V HX711 数据输出 |
 | HX711 SCK | 2 | 3.3 V HX711 时钟，空闲保持 LOW |
 
-HX711 引脚集中在 `motion/include/board_config.h`。新板型可以修改默认值，也可以在
+HX711 引脚集中在 `device-controller/include/board_config.h`。新板型可以修改默认值，也可以在
 构建参数中指定 `BABYTECH_SCALE_DOUT_PIN` 与 `BABYTECH_SCALE_SCK_PIN`；编译期冲突
 检查会阻止它们与 CAN 或脑板 UART 引脚重叠。
 

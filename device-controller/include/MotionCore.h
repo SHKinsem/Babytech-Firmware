@@ -305,7 +305,7 @@ inline bool decodeFeedback(
 }
 
 // Status bytes are taken verbatim from the authoritative X firmware codec
-// (motion/lib/XMotor/src/x_firmware_can_codec.h):
+// (device-controller/lib/XMotor/src/x_firmware_can_codec.h):
 //   0x02 received, 0x9F completed, 0xE2 parameter error, 0xEE format error.
 inline AckStatus classifyAck(uint8_t rawStatus) {
     switch (rawStatus) {

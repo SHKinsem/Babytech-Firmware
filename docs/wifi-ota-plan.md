@@ -29,9 +29,9 @@
 
 ## 当前代码接入点
 
-- `brain/src/main.cpp`：现有热点、`WebServer` 和主控板 UART 轮询。
-- `motion/src/main.cpp`：设备板 HTTP 路由、运动/队列/UART 轮询及 `motionBusy()`。
-- `motion/src/WiFiSetup.cpp`：设备板 AP+STA、配网忙碌状态。
+- `main-controller/src/main.cpp`：现有热点、`WebServer` 和主控板 UART 轮询。
+- `device-controller/src/main.cpp`：设备板 HTTP 路由、运动/队列/UART 轮询及 `motionBusy()`。
+- `device-controller/src/WiFiSetup.cpp`：设备板 AP+STA、配网忙碌状态。
 - 两个 `platformio.ini`：均选用 `default_16MB.csv`。
 - `tools/package-device.py`、`tools/flash-device.py`：现有串口发布包和首次安装流程；OTA 发布包需单独定义，不能直接上传四镜像包。
 

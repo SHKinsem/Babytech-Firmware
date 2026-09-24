@@ -22,7 +22,7 @@ for (const match of [...html.matchAll(/<link\b[^>]*href="([^"]+\.css)"[^>]*>/g)]
 html = html.replace(/<link\b[^>]*rel="modulepreload"[^>]*>/g,'');
 html = html.replace(/\r\n?/g, '\n');
 if (/<(?:script|link)\b[^>]*(?:src|href)="\//.test(html)) throw Error('External asset remains in device HTML');
-const target=resolve(root,'../../motion/data/index.html');
+const target=resolve(root,'../../device-controller/data/index.html');
 await mkdir(dirname(target),{recursive:true});
 await writeFile(target,html);
 await writeFile(resolve(output,'index.html'),html);

@@ -12,7 +12,7 @@ Claude Code 使用用户已配置的 api.deepseek.com / deepseek-flash[1m] 实�
 - 实际 X42sProtocol.cpp 配合 fake TWAI：FB/CB 两包的 ID、字节及对应公开驱动函数均通过。
 - Playwright qa-direct-position：8 项通过（mock HTTP），验证单次发送、FB/CB 精确字节、同步拦截、mode 0 提示和零位移。
 - Playwright qa-device：13 项通过，含 Wi-Fi、称重、常规运动及 1513×1039 / 1280×800 桌面回归。
-- Motion 固件构建通过；发布包见 out/releases/motion-direct-position-20260922，SHA256SUMS.json 校验文件。包内网页需与当前 motion/data/index.html 逐字节匹配。
+- Motion 固件构建通过；发布包见 out/releases/motion-direct-position-20260922，SHA256SUMS.json 校验文件。包内网页需与当前 device-controller/data/index.html 逐字节匹配。
 
 本轮没有烧录，没有发送真实电机运动。浏览器用模拟 API 验证请求，不作为机械效果验证。之前 Wi-Fi / 主循环疑似阻塞的问题未在本次改动中修复。
 

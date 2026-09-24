@@ -6,7 +6,7 @@ const require=createRequire(import.meta.url);
 const {chromium}=require('C:/Users/xusen/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
 const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe'});
 const page=await browser.newPage({viewport:{width:1280,height:800}});
-const html=await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const html=await readFile(new URL('../../device-controller/data/index.html',import.meta.url),'utf8');
 let limits={maxSpeedRpm:120,maxAccelRpmS:240,maxCurrentMa:5000,maxAngleDeg:3600,maxMoveSeconds:60,experimentSeconds:5};
 let saveFail=false,limitsOffline=false,seq=1,commandFail=false;
 const posts=[],errors=[];page.on('pageerror',e=>errors.push(e.message));

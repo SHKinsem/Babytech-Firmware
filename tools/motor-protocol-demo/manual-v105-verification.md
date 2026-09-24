@@ -18,7 +18,7 @@
 - Playwright 使用拦截的测试 API 与手册报文夹具，未验证物理电机。截图在忽略目录 `qa/manual-v105-*.png`。
 - WSL 原生测试通过：MotionCore 133 checks、MotorControl 704 checks，UART v1/v2 与 BoardMotion 集成测试通过。
 - `./tools/build-wsl.ps1 -Target motion` 成功；Flash 1,119,721 bytes，RAM 72,368 bytes。
-- 最终 `motion/data/index.html` 为 332,999 bytes，逐字节确认它包含在 `out/wsl/motion/firmware.bin` 中。
+- 最终 `device-controller/data/index.html` 为 332,999 bytes，逐字节确认它包含在 `out/wsl/motion/firmware.bin` 中。
 - 固件 SHA256：`abf3e2de90685a748ae5ae02306dd345c79a8b6e3fbe99f0b871849dfffd2149`。
 - 本地预览：`http://127.0.0.1:4175/?device`。没有连接板端时显示离线，不生成模拟反馈。
 

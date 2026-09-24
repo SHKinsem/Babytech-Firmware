@@ -11,7 +11,7 @@ const require=createRequire(import.meta.url);
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'C:/Users/xusen/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
 const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe'});
 const page=await browser.newPage({viewport:{width:1513,height:1039}});
-const html=await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const html=await readFile(new URL('../../device-controller/data/index.html',import.meta.url),'utf8');
 const errors=[],posts=[];
 let seq=30,runId=0; let gets=0; let autoQueriesEnabled=true;
 let startMode='ok',cancelMode='ok';
