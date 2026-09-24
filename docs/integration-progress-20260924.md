@@ -1,6 +1,6 @@
 # 固件整合进度与协作步骤（2026-09-24）
 
-整合分支：`codex/firmware-integration-20260924`。这是待审阅的软件整合，不是已部署版本；尚未合并到 main、烧录设备或完成实机验收。
+整合分支：`codex/firmware-integration-20260924`。用户已要求将通过软件检查的整合作为主线协作基线，优先让协作者继续调试 sync；合并状态见 [PR #12](https://github.com/SHKinsem/Babytech-Firmware/pull/12)。本轮未烧录设备或完成整合镜像的实机验收，剩余验证继续在 issue 中跟进，不再以所有外围功能验收完成作为上主线的前提。
 
 ## 最高优先级：保住昨晚验证过的 sync
 
@@ -22,7 +22,7 @@
 
 协议、运动、raw CAN、demo 主机测试通过；前端单元测试 92/92、Sites 测试 4/4、OTA 页面测试 3/3、刷写工具模拟测试 8/8 通过。设备页面和 Sites 构建通过。原生 PlatformIO 6.1.19 / espressif32 6.4.0 编译主控、设备 BRAIN 与 DISPLAY 配置通过。WSL 脚本通过语法检查，但本轮未在 WSL 实际编译。
 
-浏览器 QA：设备页面 14/14 通过（包含 `60.` 禁发与 `60` 编码为 600 的回归），同步页面两种视口、显式设置保存、停止锁及无自动 POST 检查通过，命令反馈页面 QA 通过。全部 API 使用 mock，未接触设备。最终 DISPLAY 固件已核对精确包含提交的 HTML。整合草稿见 [PR #12](https://github.com/SHKinsem/Babytech-Firmware/pull/12)。以上软件检查不能代替 UART/CAN 电机实测、掉线停止测试或签名 OTA/回滚验收。
+浏览器 QA：设备页面 14/14 通过（包含 `60.` 禁发与 `60` 编码为 600 的回归），同步页面两种视口、显式设置保存、停止锁及无自动 POST 检查通过，命令反馈页面 QA 通过。全部 API 使用 mock，未接触设备。最终 DISPLAY 固件已核对精确包含提交的 HTML。整合记录见 [PR #12](https://github.com/SHKinsem/Babytech-Firmware/pull/12)。以上软件检查不能代替 UART/CAN 电机实测、掉线停止测试或签名 OTA/回滚验收。
 
 ## 协作者接下来怎么做
 
