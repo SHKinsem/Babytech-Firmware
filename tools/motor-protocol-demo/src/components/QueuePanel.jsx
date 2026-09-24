@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { GlyphInfo, HelpTip } from './glyphs.jsx';
+import { QueueDiagnostics } from './QueueDiagnostics.jsx';
+import { SyncSettings } from './SyncSettings.jsx';
+import BOTTLE_CAP_PROGRAM from '../examples/bottle-cap-cycle.queue?raw';
+import { CompactPanel } from './CompactPanel.jsx';
 import { ROTATION_DISTANCE_MAX, ROTATION_DISTANCE_MIN, errorLabels, queueProgressText, queueStateLabels, queueActionLabels, queueMessageText, readMotorDistance, readQueueStatus, request } from '../device-api.js';
 import {
   QUEUE_LIMITS,
@@ -101,6 +105,7 @@ export function QueuePanel({
   const [copied, setCopied] = useState('');
   const startingRef = useRef(false);
   const fileRef = useRef(null);
+  const editorRef = useRef(null);
 
   // --------------------------------------------------------------- rotation distance
   const [distanceId, setDistanceId] = useState('1');
@@ -143,7 +148,7 @@ export function QueuePanel({
   const result = useMemo(() => validateProgram(program, { distances }), [program, distances]);
   const repeatCheck = checkRepeat(repeat);
   const mmIds = useMemo(
-    () => [...new Set(result.actions.filter((action) => action.verb === 'move' && action.unit === 'mm').map((action) => action.id))],
+    () => [...new Set(result.actions.flatMap(a=>a.verb==='helix'?[a.linearId]:a.verb==='move'&&a.unit==='mm'?[a.id]:[]))],
     [result.actions],
   );
   const mmIdKey = mmIds.join(',');
@@ -218,7 +223,7 @@ export function QueuePanel({
 
   // Configuration writes are refused by the board while a queue owns the bus,
   // so the page reports the lock instead of posting a request that will fail.
-  const configLocked = queue?.state === 'running' || queueUnknown;
+  const configLocked = queue?.active || queue?.state === 'running' || queueUnknown;
 
   async function saveDistance(clear) {
     // Synchronous guard: a double click (or a click racing the disabled state)
@@ -291,7 +296,7 @@ export function QueuePanel({
     ? '设备未连接：无法提交队列。'
     : queueState === 'unavailable'
       ? '板端没有 /api/queue 接口（固件未更新），本页无法提交队列。'
-      : queue?.state === 'running'
+      : queue?.active || queue?.state === 'running'
         ? '队列正在运行：请先「取消队列」或等待板端结束。'
         : queueUnknown
           ? '上一次提交的结果未知：请先「取消队列」确认板端状态。'
@@ -456,7 +461,7 @@ export function QueuePanel({
   // A failed read keeps the last board-reported status on screen but never
   // presents it as current: the label and the note say which one it is.
   const queueStale = queueState === 'error';
-  const lastStateLabel = queue ? (queue.state==='done' && queue.raw ? '发送结束' : queueStateLabels[queue.state]) : null;
+  const lastStateLabel = queue ? (queue.state==='done' ? (queue.motionComplete?'运动完成':'发送结束') : queueStateLabels[queue.state]) : null;
   const stateLabel = queueState === 'unavailable'
     ? '不可用'
     : queueStale && lastStateLabel ? `${lastStateLabel}（最后读取，当前未知）` : (lastStateLabel ?? queueStateLabels.unknown);
@@ -464,19 +469,22 @@ export function QueuePanel({
 
   return (
     <div className="queue-page">
+      <QueueDiagnostics queue={queue} editorRef={editorRef} notice={notice} />
+      <CompactPanel title="队列程序与操作" initiallyOpen className="compact-panel--queue-source">
       <section className="queue-col queue-col--source" aria-label="队列程序">
         <div className="queue-col__head">
           <h2 className="panel__title">编排队列</h2>
           <span className={`chip ${chipClass}`}>板端队列：{stateLabel}</span>
         </div>
-        <p className="panel__desc">
+        <details><summary>执行规则与注意事项</summary><p className="panel__desc">
           按顺序发送，默认发送后继续；move/home 末尾加 await 才等待本次动作完成。速度／力矩按写出的持续时间执行；<code>wait MS</code> 用于额外延时。await 期间反馈中断时停留当前行并提示，恢复后继续；驱动拒绝时报告原因，不自动失能或追加停机。原始帧只负责发送。浏览器断开后板端仍继续，不会自动重发。
-        </p>
+        </p></details>
 
         <label className="queue-editor__label" htmlFor="queue-program">
           队列程序（每行一个动作，<code>#</code> 注释）
         </label>
         <textarea
+          ref={editorRef}
           id="queue-program"
           className="queue-editor"
           aria-label="队列程序"
@@ -493,6 +501,7 @@ export function QueuePanel({
 
         <div className="queue-buttons">
           <button type="button" className="link-button" onClick={() => { setProgram(SAMPLE_PROGRAM); setNotice(null); }}>载入示例</button>
+          <button type="button" className="link-button" onClick={() => { setProgram(BOTTLE_CAP_PROGRAM); setNotice({ tone: 'warn', text: '已载入瓶盖流程草稿；请先核对 ID 1/3 的 mm/rev 设置。载入不会发送指令。' }); }}>载入瓶盖流程</button>
           <button type="button" className="link-button" onClick={copyProgram}>复制</button>
           <button type="button" className="link-button" onClick={exportProgram}>导出</button>
           <button type="button" className="link-button" onClick={() => fileRef.current?.click()}>导入</button>
@@ -538,10 +547,11 @@ export function QueuePanel({
         ) : (
           <p className="queue-gate"><GlyphInfo /><span>提交后本页不会自动重试；运行状态只以板端返回为准。</span></p>
         )}
-        {notice ? (
+        {notice && notice.tone!=='error' ? (
           <p className={`queue-notice queue-notice--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.text}</p>
         ) : null}
 
+        <CompactPanel title="动作插入（可选）" desktopInitiallyOpen={false} className="compact-panel--queue-builder">
         <section className="queue-builder" aria-label="动作插入">
           <h3 className="section__title">动作插入（可选）</h3>
           <div className="field">
@@ -592,15 +602,18 @@ export function QueuePanel({
           <button type="button" className="button button--outline" onClick={insertAction}>插入到程序末尾</button>
           {builderError ? <p className="field__error" role="alert">{builderError}</p> : null}
         </section>
+        </CompactPanel>
       </section>
+      </CompactPanel>
 
+      <CompactPanel title="语义预览" desktopInitiallyOpen={false} className="compact-panel--queue-preview">
       <section className="queue-col queue-col--preview" aria-label="语义预览">
         <div className="queue-col__head">
           <h2 className="panel__title">语义预览</h2>
           <span className="chip chip--soft">{result.preview.length} 个动作</span>
         </div>
         <p className="panel__desc">
-          按源码行列出板端将要执行的动作。单位与数值在本页换算，<strong>数值策略由板端按「调试限制」判定</strong>；mm 只使用该地址已确认的 mm/rev。
+          按源行预览动作；板端执行最终换算。普通队列只检查协议范围，mm 使用该地址保存的 mm/rev。
         </p>
         {result.preview.length ? (
           <ol className="queue-preview">
@@ -620,7 +633,9 @@ export function QueuePanel({
           原始帧（hex / can）只报告“已发送”，不代表电机已动作或已停止；原始步骤之后需要停止时，请显式写 stop 或 disable。
         </p>
       </section>
+      </CompactPanel>
 
+      <CompactPanel title="板端进度与设置" desktopInitiallyOpen={false} preferenceKey="queue-side-layout-v2" className="compact-panel--queue-side">
       <section className="queue-col queue-col--side" aria-label="板端进度与旋转距离">
         <div className="queue-col__head">
           <h2 className="panel__title">板端进度</h2>
@@ -635,6 +650,11 @@ export function QueuePanel({
           <div><dt>含原始帧</dt><dd>{queue ? (queue.raw ? '是（无运动监督）' : '否') : '—'}</dd></div>
         </dl>
         <p className="queue-progress__message">{queueMessageText(queue?.message) || '板端尚未报告消息。'}</p>
+        {queue?.sync?.phase && queue.sync.phase!=='idle'?<section aria-label="同步成员状态">
+          <p>同步阶段：{queue.sync.phase} · 可观测偏差下界 {queue.sync.errorLower ?? '—'} / 上界 {queue.sync.errorUpper ?? '—'}</p>
+          {queue.sync.helixErrorLowerMm!=null?<p>轴向偏差区间 {queue.sync.helixErrorLowerMm}–{queue.sync.helixErrorUpperMm} mm（非连续精度保证）</p>:null}
+          <ul>{(queue.sync.members??[]).map(m=><li key={m.id}>电机 {m.id} · 行 {m.line}：{m.stopped?'已观察到静止':m.stopSent?'停止已发送，静止未确认':queue.sync.error?'停止未发送成功，静止未知':m.done?'到位已确认':m.targetConfirmed?'目标读回匹配':m.accepted?'收到接受应答（无事务序号）':'准备中'}</li>)}</ul>
+        </section>:null}
         {queueUnknown ? (
           <p className="queue-notice queue-notice--warn" role="status">
             提交或取消的结果未知：板端可能仍在执行。本页持续读取 /api/queue，状态只会以板端返回为准。
@@ -646,13 +666,9 @@ export function QueuePanel({
             {queue && queueStale ? ' 上面显示的是最后一次成功读取的板端状态；读取失败不会解除锁定，也不会把运行中的队列当作已结束。' : ''}
           </p>
         ) : null}
-        <p className="queue-col__foot">
-          {limitsReady
-            ? `已确认的板端策略：速度 ≤ ${limits.maxSpeedRpm} RPM · 加减速 ≤ ${limits.maxAccelRpmS} RPM/s · 电流 ≤ ${limits.maxCurrentMa} mA · 行程 ≤ ${limits.maxAngleDeg}° · 单步时长 ≤ ${limits.maxMoveSeconds} s。程序数值由板端按此校验。`
-            : '尚未确认板端限制（/api/limits）：本页不做策略判断，队列提交后仍以板端校验结果为准。'}
-        </p>
 
         <div className="divider" />
+        <SyncSettings connected={connected} locked={configLocked} />
         <h3 className="section__title">旋转距离（mm/rev）</h3>
         <p className="queue-col__foot">
           mm 单位依赖每个地址自己的旋转距离，保存在板端 NVS。未读取到就是未读取到：本页不会假定默认值；写 0 表示显式清除。
@@ -721,12 +737,14 @@ export function QueuePanel({
         ) : null}
 
         <div className="divider" />
-        <h3 className="section__title">
+        <details><summary>指令与默认值</summary><h3 className="section__title">
           指令与默认值
-          <HelpTip label="编排队列" text="板端整份校验后执行；本页只做语法与数值框架检查，策略（速度/加速度/电流/行程/时长）由板端判定。" />
+          <HelpTip label="编排队列" text="板端先校验整份程序，再按顺序直接发送；只检查报文编码、单位换算和资源容量所需边界。速度、电流和行程由操作者按实机条件判断。" />
         </h3>
         <VerbHelp />
+        </details>
       </section>
+      </CompactPanel>
     </div>
   );
 }

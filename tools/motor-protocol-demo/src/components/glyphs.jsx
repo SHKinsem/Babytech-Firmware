@@ -1,3 +1,4 @@
+import { useEffect, useId, useRef, useState } from 'react';
 // Icons come from @phosphor-icons/react so no icon is hand drawn. The per-icon
 // entry points keep the dev graph and the production bundle small.
 
@@ -31,16 +32,26 @@ export function GlyphDot({ tone = 'ok', size = 9 }) {
   );
 }
 
-/** Small disclosure used instead of long paragraphs under every control. */
+/** Tap, click and keyboard disclosure for field notes. */
 export function HelpTip({ label, text }) {
-  return (
-    <button
-      type="button"
-      className="help-tip"
-      title={text}
-      aria-label={`${label}：${text}`}
-    >
-      <Info size={12} weight="regular" aria-hidden="true" />
+  const [open, setOpen] = useState(false);
+  const contentId = useId();
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKeyDown = event => { if (event.key === 'Escape') setOpen(false); };
+    const onPointerDown = event => { if (!rootRef.current?.contains(event.target)) setOpen(false); };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, [open]);
+  return <span className="help-tip-wrap" ref={rootRef}>
+    <button type="button" className="help-tip" aria-label={`查看${label}说明`} aria-expanded={open} aria-controls={contentId} aria-describedby={open ? contentId : undefined} onClick={() => setOpen(value => !value)}>
+      <Info size={14} weight="regular" aria-hidden="true" />
     </button>
-  );
+    {open ? <span id={contentId} className="help-tip__popover" role="note">{text}</span> : null}
+  </span>;
 }

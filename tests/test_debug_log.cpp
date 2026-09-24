@@ -1,4 +1,4 @@
-// Host tests for the RAM-only diagnostic log (motion/src/DebugLog.h).
+// Host tests for the RAM-only diagnostic log (device-controller/src/DebugLog.h).
 //
 // The logger is header-only and Arduino-free exactly so these properties can be
 // checked without hardware: chronological order, the fixed ring bound, explicit

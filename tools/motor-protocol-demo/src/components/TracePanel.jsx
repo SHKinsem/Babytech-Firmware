@@ -91,7 +91,7 @@ export function TracePanel({
         </div>
 
         {device && <>
-          <button type="button" className="pill" aria-pressed={pollingPaused} disabled={pollingBusy} onClick={onTogglePolling}>{pollingPaused ? '恢复自动查询' : '暂停自动查询'}</button>
+          <button type="button" className="pill" aria-pressed={pollingPaused} disabled={pollingBusy} onClick={onTogglePolling}>{pollingPaused ? '恢复空闲刷新' : '暂停空闲刷新'}</button>
           <label className="trace__motor">电机 <input aria-label="筛选电机 ID" type="number" min="1" max="255" placeholder="全部" value={motorId} onChange={e => setMotorId(e.target.value)} /></label>
           <button type="button" className={`pill${homeOnly ? ' is-active' : ''}`} aria-pressed={homeOnly} onClick={() => { setHomeOnly(!homeOnly); onQueryChange(''); }}>回零相关</button>
           <button type="button" className="link-button" aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? '收起记录' : '展开记录'}</button>

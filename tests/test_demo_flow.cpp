@@ -1,6 +1,7 @@
 #include "DemoFlowController.h"
 #include "DisplayLinkCore.h"
 #include <cassert>
+#include <cstring>
 #include <iostream>
 using namespace motion;
 using namespace babytech::display;

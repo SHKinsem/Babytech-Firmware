@@ -1,5 +1,8 @@
 import { certaintyLabel, formatBytes, formatCanId, hexByte } from '../protocol.js';
+import { displayError, displayRange, displayUnit, displayValue, protocolValue } from '../field-display.js';
+import { useEffect, useRef, useState } from 'react';
 import { FrameList } from './FrameList.jsx';
+import { CompactPanel } from './CompactPanel.jsx';
 import { GlyphInfo, HelpTip } from './glyphs.jsx';
 
 function Segmented({ label, options, value, onChange, name }) {
@@ -31,16 +34,32 @@ function Segmented({ label, options, value, onChange, name }) {
 }
 
 function FieldRow({ field, value, error, onChange, inputId }) {
-  // Long implementation notes live in a disclosure tooltip so the form stays
-  // as compact as the reference design.
-  const helpText = field.hint ? `${certaintyLabel(field.certainty)}：${field.hint}` : null;
+  const helpText = field.hint ? certaintyLabel(field.certainty) + '：' + field.hint : null;
+  const [draft, setDraft] = useState(null);
+  const lastWritten = useRef(null);
+  useEffect(() => {
+    if (lastWritten.current !== null && String(value ?? '') === String(lastWritten.current)) {
+      lastWritten.current = null;
+      return;
+    }
+    setDraft(null);
+  }, [value, field.key, field.unit]);
+  const shownValue = draft ?? displayValue(field, value);
+  const shownError = displayError(field, shownValue, error);
+
+  function edit(text) {
+    const raw = protocolValue(field, text);
+    lastWritten.current = raw;
+    setDraft(text);
+    onChange(raw);
+  }
 
   return (
-    <div className={`field${error ? ' has-error' : ''}`}>
+    <div className={'field' + (shownError ? ' has-error' : '')}>
       <div className="field__label">
         <label htmlFor={inputId}>
           {field.label}
-          {field.unit ? <span className="field__unit">（{field.unit}）</span> : null}
+          {field.unit ? <span className="field__unit">（{displayUnit(field)}）</span> : null}
         </label>
         {helpText ? <HelpTip label={field.label} text={helpText} /> : null}
       </div>
@@ -57,23 +76,24 @@ function FieldRow({ field, value, error, onChange, inputId }) {
           <div className="field__input">
             <input
               id={inputId}
-              className={`input input--mono${field.control === 'hex' ? ' input--hex' : ''}`}
-              inputMode={field.control === 'hex' ? 'text' : 'numeric'}
+              className={'input input--mono' + (field.control === 'hex' ? ' input--hex' : '')}
+              inputMode={field.control === 'hex' ? 'text' : field.unit === '0.1 RPM' || field.unit === '0.1°' ? 'decimal' : 'numeric'}
               autoComplete="off"
               spellCheck={false}
-              value={value ?? ''}
-              aria-invalid={error ? 'true' : undefined}
-              aria-describedby={error ? `${inputId}-error` : undefined}
-              onChange={(event) => onChange(event.target.value)}
+              value={shownValue}
+              aria-invalid={shownError ? 'true' : undefined}
+              aria-describedby={shownError ? inputId + '-error' : undefined}
+              onChange={(event) => edit(event.target.value)}
+              onBlur={() => setDraft(null)}
             />
             <span className="field__range">
-              {field.control === 'hex' ? '十六进制字节' : `${field.min}..${field.max} · ${field.bytes} 字节大端`}
+              {field.control === 'hex' ? '十六进制字节' : displayRange(field)}
             </span>
           </div>
         )}
-        {error ? (
-          <p className="field__error" id={`${inputId}-error`} role="alert">
-            {error}
+        {shownError ? (
+          <p className="field__error" id={inputId + '-error'} role="alert">
+            {shownError}
           </p>
         ) : field.certainty === 'protocol' ? (
           <p className="field__meta">
@@ -106,6 +126,10 @@ export function CommandPanel({
   address,
   addressError,
   gateReason,
+  response,
+  requestNotice = '',
+  headingRef,
+  onChooseCommand,
   onSend,
   onCopy,
 }) {
@@ -124,12 +148,13 @@ export function CommandPanel({
   return (
     <section className="panel panel--command" aria-label="指令配置">
       <div className="command__head">
-        <h2 className="panel__title">{item.name}</h2>
+        <h2 className="panel__title" ref={headingRef} tabIndex={headingRef ? -1 : undefined}>{item.name}</h2>
         <span className="chip chip--code">0x{hexByte(variant.opcode)}</span>
         <span className={`chip ${baseInterface ? 'chip--ok' : 'chip--muted'}`}>
           {device ? '板端校验' : item.custom ? '自定义' : baseInterface ? '基础接口' : '驱动已实现'}
         </span>
         <span className="chip chip--soft">{item.groupName}</span>
+        {onChooseCommand ? <button type="button" className="command__change-command" onClick={onChooseCommand}>更换指令</button> : null}
       </div>
       <p className="panel__desc">{item.summary}</p>
 
@@ -155,7 +180,7 @@ export function CommandPanel({
       </div>
 
       {editorMode === 'form' ? (
-        <div className="form">
+        <div className="form form--parameters">
           <div className="field">
             <span className="field__label">目标地址</span>
             <div className="field__control">
@@ -224,7 +249,7 @@ export function CommandPanel({
 
           {fields.map((field) => (
             <FieldRow
-              key={field.key}
+              key={[item.id, variant.key, field.key].join('-')}
               field={field}
               inputId={`field-${field.key}`}
               value={values[field.key]}
@@ -304,7 +329,7 @@ export function CommandPanel({
         </div>
       )}
 
-      <div className="preview">
+      <CompactPanel title="发送预览" desktopInitiallyOpen={false} className="compact-panel--command-preview"><div className="preview">
         <h3 className="section__title">发送预览</h3>
 
         <div className="preview__row">
@@ -328,7 +353,7 @@ export function CommandPanel({
             <FrameList frames={frames} annotations={annotations} onCopy={onCopy} />
           </div>
         </div>
-      </div>
+      </div></CompactPanel>
 
       <div className="actions">
         <button type="button" className="button button--primary" onClick={onSend} disabled={!canSend}>
@@ -358,6 +383,19 @@ export function CommandPanel({
             <span>指令提交后等待电机应答；收到应答不等于机械动作完成。</span>
           </p>
         )}
+        {device && response ? <div className="command-result" role="status" aria-label="本次指令反馈">
+          <div className="command-result__head"><strong>最近发送 · 电机 {response.address} · 0x{hexByte(response.opcode)}</strong>
+            <span>{response.phase === 'sending' ? '正在提交' : response.phase === 'queued' ? '请求已入队' : response.phase === 'unknown' ? '请求结果未知' : response.phase === 'restarted' ? '板端已重启' : '板端拒绝'}</span></div>
+          {response.phase === 'rejected' ? <p>板端拒绝：{response.detail}</p> : response.phase === 'restarted' ? <p>{response.detail}</p> : <>
+            {response.phase === 'unknown' && response.detail ? <p>{response.detail}</p> : null}
+            <p>{response.txSeen ? 'CAN TX 已在板端记录' : '尚未在板端记录看到 CAN TX'} · {response.rxCount ? `收到 ${response.rxCount} 包同地址/功能码 RX` : '尚未收到同地址/功能码 RX'}</p>
+            {response.reply?.decoded ? <><strong>{response.reply.decoded.title}</strong><pre>{response.reply.decoded.text}</pre></>
+              : response.reply ? <p>已收到原始回包：{formatBytes(response.reply.data)}{[0x42,0x43].includes(response.opcode) ? '（多包参数等待完整读回）' : '（布局未确认，保留原始字节）'}</p>
+              : <p>等待总线回包；部分命令可能不返回应答。</p>}
+            <small>按接收顺序关联，协议没有事务序号；同功能码的自动查询或其他发送也可能出现于此。</small>
+          </>}
+        </div> : null}
+        {device && requestNotice && !response ? <p className="command__request-notice" role="status">请求结果：{requestNotice}</p> : null}
       </div>
 
       <p className="panel__foot">

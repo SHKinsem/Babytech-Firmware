@@ -1,6 +1,6 @@
 // Host unit tests for the Arduino-independent motion core.
 // Build (no Arduino required):
-//   g++ -std=c++11 -I motion/include tests/test_motion_core.cpp -o test_motion_core
+//   g++ -std=c++11 -I device-controller/include tests/test_motion_core.cpp -o test_motion_core
 //
 // Covers: sign handling, wire scaling (acceleration is whole RPM/s), triangular
 // and trapezoid duration, range and non-finite rejection, malformed and
@@ -11,11 +11,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../motion/include/MotionCore.h"
+#include "../device-controller/include/MotionCore.h"
 // Authoritative X firmware sources, used to cross-check the acknowledgement
 // bytes and the CAN id framing rules against real fixtures.
-#include "../motion/lib/XMotor/src/x42s_can_id.h"
-#include "../motion/lib/XMotor/src/x_firmware_can_codec.h"
+#include "../device-controller/lib/XMotor/src/x42s_can_id.h"
+#include "../device-controller/lib/XMotor/src/x_firmware_can_codec.h"
 
 namespace {
 

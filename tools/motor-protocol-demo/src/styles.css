@@ -582,7 +582,9 @@ textarea {
 }
 
 .field__unit {
-  color: var(--faint);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
 }
 
 .field__control {
@@ -1652,3 +1654,7 @@ textarea {
  .trace__head .search { max-width: 170px; }
  .actions .button { min-width: 130px; }
 }
+.help-tip-wrap{position:relative;display:inline-flex;align-items:center;flex:none;}
+.help-tip{width:28px;height:28px;cursor:pointer;}
+.help-tip__popover{position:fixed;right:24px;bottom:70px;z-index:90;display:block;width:min(380px,calc(100vw - 32px));max-height:min(45vh,340px);overflow:auto;padding:12px 14px;border:1px solid var(--line-strong);border-radius:8px;background:#fff;box-shadow:0 10px 30px #172b4d30;color:var(--text-strong);font-size:13px;line-height:1.6;white-space:normal;}
+@media(max-width:1100px){.help-tip__popover{right:12px;bottom:calc(76px + env(safe-area-inset-bottom));}}

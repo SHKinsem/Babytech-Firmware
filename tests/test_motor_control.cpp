@@ -1,4 +1,4 @@
-// Host integration tests for the *real* motion/src/MotorControl.cpp.
+// Host integration tests for the *real* device-controller/src/MotorControl.cpp.
 //
 // The module is compiled as-is; it talks to a fake X42sProtocol (a fake CAN
 // driver) whose receive queue, millis() clock, controller state and captured
@@ -221,7 +221,7 @@ static void test_watch_select_1_to_255_not_exhausted() {
 
     uint32_t t = 0;
     for (int id = 1; id <= 255; ++id) {
-        t += 40;
+        t += 3000; // previous page lease and in-flight timeout have expired
         setMillis(t);
         rig.mc.watch(static_cast<uint8_t>(id));
         rig.mc.poll();
@@ -231,7 +231,7 @@ static void test_watch_select_1_to_255_not_exhausted() {
     }
 
     // Cycling back round must keep working: selecting never exhausts a slot.
-    t += 40;
+    t += 3000;
     setMillis(t);
     rig.mc.watch(1);
     rig.mc.poll();
@@ -239,18 +239,18 @@ static void test_watch_select_1_to_255_not_exhausted() {
     CHECK(lastTx().addr == 1);
 }
 
-static void test_query_first_after_30ms_and_repeats_past_600ms() {
+static void test_query_global_budget_and_repeats_past_600ms() {
     Rig rig;
     rig.mc.begin(4, 5, 500000);
     rig.mc.watch(1);
 
     setMillis(0);
     rig.mc.poll();
-    CHECK(countTx(TxKind::ReadSysParam) == 0);  // first query needs >= 30 ms
+    CHECK(countTx(TxKind::ReadSysParam) == 1);  // first demand has no old traffic
 
     setMillis(29);
     rig.mc.poll();
-    CHECK(countTx(TxKind::ReadSysParam) == 0);
+    CHECK(countTx(TxKind::ReadSysParam) == 1); // budget does not refill per poll
 
     setMillis(40);
     rig.mc.poll();
@@ -266,7 +266,7 @@ static void test_query_first_after_30ms_and_repeats_past_600ms() {
     CHECK(countTx(TxKind::ReadSysParam) > afterFirst + 1);
 }
 
-static void test_query_rotation_exactly_four_fields_selected_and_active() {
+static void test_query_budget_selected_and_active_without_current() {
     Rig rig;
     rig.mc.begin(4, 5, 500000);
 
@@ -285,12 +285,17 @@ static void test_query_rotation_exactly_four_fields_selected_and_active() {
 
     std::set<std::pair<int, int> > seen;
     uint32_t t = 80;
-    for (int i = 0; i < 8; ++i) {
-        t += 40;
+    for (int i = 0; i < 20; ++i) {
+        t += 100;
         setMillis(t);
         // Keep the active job's feedback fresh but moving, so it never completes.
         injectRx(makePosition(2, 50));
         injectRx(makeVelocity(2, 100));
+        injectRx(makeFlags(2, 1));
+        injectRx(makePosition(1, 0));
+        injectRx(makeVelocity(1, 0));
+        injectRx(makeFlags(1, 1));
+        rig.mc.watch(1);
         rig.mc.poll();
 
         const TxRecord last = lastTx();
@@ -299,17 +304,18 @@ static void test_query_rotation_exactly_four_fields_selected_and_active() {
                                    static_cast<int>(last.param)));
     }
 
-    // Exactly the three feedback fields (Cpos, Vel, Cpha) for both the selected
-    // node and the active job, no more and no fewer combinations.
-    CHECK(seen.size() == 8);
+    // Position, velocity and flags share a budget. Current is opt-in, not a
+    // periodic tax on every motor. Aging prevents low-priority starvation.
+    CHECK(seen.size() == 6);
     for (int addr = 1; addr <= 2; ++addr) {
         int fields = 0;
         if (seen.count(std::make_pair(addr, static_cast<int>(X42sSysParam::Cpos)))) ++fields;
         if (seen.count(std::make_pair(addr, static_cast<int>(X42sSysParam::Vel)))) ++fields;
         if (seen.count(std::make_pair(addr, static_cast<int>(X42sSysParam::Cpha)))) ++fields;
         if (seen.count(std::make_pair(addr, static_cast<int>(X42sSysParam::Flag)))) ++fields;
-        CHECK(fields == 4);
+        CHECK(fields == 3);
     }
+    CHECK(countTx(TxKind::ReadSysParam) <= 20);
 }
 
 static void test_enable_confirmed_only_after_f3_02() {
@@ -1515,7 +1521,7 @@ static void test_direct_position_mode0_needs_fresh_target() {
     CHECK(missing.code == kCodeUnavailable);
     CHECK(std::string(missing.message) == "target_not_fresh");
     CHECK(countTx(TxKind::Direct) == 0);
-    CHECK(countTxOpcode(0x33, 2) > 0);
+    CHECK(countTxOpcode(0x33, 2) == 0); // refresh is queued under the global budget
     CHECK(countTxOpcode(0x34, 2) == 0);  // p71's setpoint is never asked for
 
     // A fresh actual position is not a substitute, and a second attempt without
@@ -2016,6 +2022,57 @@ static void test_direct_position_dispatch_api_and_cb_modes() {
           "direct_sync_not_supported");
 }
 
+static void test_paused_page_polling_keeps_direct_move_feedback() {
+    Rig rig;
+    rig.mc.begin(4, 5, 500000);
+    enableAndFeedStationary(rig, 1, 0);
+
+    setMillis(60);
+    rig.mc.setAutoQueriesEnabled(false);
+    rig.mc.watch(2);  // A selected idle page must not generate traffic.
+    capturedTX.clear();
+    txLog.clear();
+    setMillis(700);
+    rig.mc.poll();
+    CHECK(countTx(TxKind::ReadSysParam) == 0);
+
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    setMillis(720);
+    rig.mc.poll();
+    uint8_t move[14];
+    buildDirectLimit(move, 1, 0, 300, 900, 2, 0, 800);
+    setMillis(740);
+    CHECK(rig.mc.command(move, sizeof(move)).code == kCodeQueued);
+    injectRx(makeAck(1, 0xCB, 0x02));
+    setMillis(760);
+    rig.mc.poll();
+
+    uint32_t targetQueryAt = 0;
+    for (uint32_t t = 860; t <= 1760; t += 100) {
+        injectRx(makePosition(1, 0));
+        injectRx(makeVelocity(1, 0));
+        setMillis(t);
+        rig.mc.poll();
+        if (countTxOpcode(0x33, 1) != 0) { targetQueryAt = t; break; }
+    }
+    CHECK(targetQueryAt != 0);
+    if (!targetQueryAt) return;
+
+    injectRx(makeTarget(1, 900));
+    injectRx(makePosition(1, 900));
+    injectRx(makeVelocity(1, 0));
+    setMillis(targetQueryAt + 10);
+    rig.mc.poll();
+    injectRx(makePosition(1, 900));
+    injectRx(makeVelocity(1, 0));
+    setMillis(targetQueryAt + 30);
+    rig.mc.poll();
+    CHECK(!activeIs(rig, 1));
+    CHECK(status(rig, 1).find("\"fault\":\"none\"") != std::string::npos);
+    CHECK(status(rig, 1).find("\"enabled\":true") != std::string::npos);
+}
+
 static void test_direct_position_target_proof_uses_33_not_34() {
     // A direct job whose target is 100 + 900 = 1000 (mode 2).
     // A matching 0x34 real-time setpoint is never the proof: the position sits
@@ -2306,8 +2363,8 @@ int main() {
         {"raw diagnostics preserve unexpected replies and actual flags", test_diagnostics_capture_unrecognized_reply_and_flags},
         {"begin sends no motion", test_begin_sends_no_motion},
         {"watch/select 1..255 not exhausted", test_watch_select_1_to_255_not_exhausted},
-        {"query first >=30ms and repeats past 600ms", test_query_first_after_30ms_and_repeats_past_600ms},
-        {"query rotation: 4 fields, selected + active", test_query_rotation_exactly_four_fields_selected_and_active},
+        {"global query budget and repeated demands past 600ms", test_query_global_budget_and_repeats_past_600ms},
+        {"shared query budget: selected + active, no periodic current", test_query_budget_selected_and_active_without_current},
         {"enable confirmed only after F3 02", test_enable_confirmed_only_after_f3_02},
         {"late F3 ack after stop does not enable", test_late_f3_ack_after_stop_does_not_enable},
         {"move requires fresh feedback + enable", test_move_requires_fresh_feedback_and_enable},
@@ -2337,6 +2394,7 @@ int main() {
         {"direct FB/CB wire frame and modes 0/1/2", test_direct_position_wire_frame_and_modes},
         {"direct mode 0 needs a fresh 0x33 driver target, not 0x34", test_direct_position_mode0_needs_fresh_target},
         {"direct dispatch via the API and the CB form in every mode", test_direct_position_dispatch_api_and_cb_modes},
+        {"paused page polling retains CB target proof", test_paused_page_polling_keeps_direct_move_feedback},
         {"direct completion proof: 0x33 only, distant target rejected", test_direct_position_target_proof_uses_33_not_34},
         {"direct completion needs matched ack, fresh target and two pairs", test_direct_position_completion_proof},
         {"direct wrong-opcode ack never confirms the job", test_direct_position_wrong_opcode_ack_never_confirms},

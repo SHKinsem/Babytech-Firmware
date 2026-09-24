@@ -1,6 +1,6 @@
 # 电机协议工作台交付说明
 
-本版把 Claude Code 开发的桌面工作台接入 Motion 固件，整合原有 Wi-Fi 配网与电机控制。`motion/data/index.html` 是构建生成的单文件页面，CSS、JavaScript 均已内联，烧录后不依赖电脑网页服务、CDN 或单独文件系统分区。
+本版把 Claude Code 开发的桌面工作台接入 Motion 固件，整合原有 Wi-Fi 配网与电机控制。`device-controller/data/index.html` 是构建生成的单文件页面，CSS、JavaScript 均已内联，烧录后不依赖电脑网页服务、CDN 或单独文件系统分区。
 
 目标硬件：ESP32-S3 N16R8，16 MB Flash、8 MB OPI PSRAM。CAN TX GPIO4、RX GPIO5，500 kbit/s；需要外接 CAN 收发器。UART brain 链路维持 GPIO43/44、115200。
 
@@ -41,7 +41,7 @@ CD 范围：角度绝对值 0.1–3600°，速度 0.1–120 RPM，加减速度�
 
 ## 重建
 
-在 `tools/motor-protocol-demo` 执行 `npm ci`（首次），随后 `npm run build:device`。该步骤覆盖生成的 `motion/data/index.html`，不要手工编辑生成文件。
+在 `tools/motor-protocol-demo` 执行 `npm ci`（首次），随后 `npm run build:device`。该步骤覆盖生成的 `device-controller/data/index.html`，不要手工编辑生成文件。
 
 回到仓库根目录执行：
 
@@ -49,7 +49,7 @@ CD 范围：角度绝对值 0.1–3600°，速度 0.1–120 RPM，加减速度�
 ./tools/build-wsl.ps1 -Target motion
 ```
 
-也可使用已安装的原生 PlatformIO：`pio run -d motion`。前端未修改时，直接编译已提交的内嵌 HTML 即可，无需 Node。WSL 产物在 `out/wsl/motion/`。
+也可使用已安装的原生 PlatformIO：`pio run -d device-controller`。前端未修改时，直接编译已提交的内嵌 HTML 即可，无需 Node。WSL 产物在 `out/wsl/motion/`。
 
 ## 烧录文件
 
@@ -62,7 +62,7 @@ CD 范围：角度绝对值 0.1–3600°，速度 0.1–120 RPM，加减速度�
 | boot_app0.bin | 0xE000 |
 | firmware.bin | 0x10000 |
 
-`firmware.elf` 用于调试与符号解析，不直接烧录。推荐以后在确认端口后，用原工程 `pio run -d motion -t upload --upload-port 实际端口` 上传；不要擦除整片 Flash 来更新网页，否则会清掉已保存的 Wi-Fi NVS。
+`firmware.elf` 用于调试与符号解析，不直接烧录。推荐以后在确认端口后，用原工程 `pio run -d device-controller -t upload --upload-port 实际端口` 上传；不要擦除整片 Flash 来更新网页，否则会清掉已保存的 Wi-Fi NVS。
 
 ## 验证与剩余事项
 

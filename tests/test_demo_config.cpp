@@ -1,5 +1,6 @@
 #include "DemoFlowConfig.h"
 #include <cassert>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>

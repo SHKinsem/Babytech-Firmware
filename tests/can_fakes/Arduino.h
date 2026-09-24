@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <cstring>
+#include "../fakes/Arduino.h"
 constexpr int OUTPUT=1, INPUT_PULLUP=2;
 inline void pinMode(int,int) {}
 void delay(unsigned long ms);

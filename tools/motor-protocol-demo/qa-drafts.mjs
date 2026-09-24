@@ -1,7 +1,7 @@
 // Desktop QA for the local form drafts of the device page.
 //
 // Conventions follow qa-current-limit.mjs: the built device page
-// (motion/data/index.html) is served behind a mocked board API and driven in a
+// (device-controller/data/index.html) is served behind a mocked board API and driven in a
 // real Chromium. Every request the page makes is recorded, so "restoring a draft
 // never sends anything" is an assertion about real traffic, and the browser's
 // localStorage is inspected directly.
@@ -28,7 +28,7 @@ const motor={enabled:false,state:'disabled',online:true,canReady:true,busState:'
   positionDeg:0,speedRpm:0,currentMa:0,driverEnabled:false,lastAck:'received',fault:'none',
   activeId:0,homeOutcome:'none',homeId:0,homeMode:null,homeOrg:null,homeRunning:null,homeFailed:null};
 let limitsCurrent=5000;
-const html=await readFile(new URL('../../motion/data/index.html',import.meta.url),'utf8');
+const html=await readFile(new URL('../../device-controller/data/index.html',import.meta.url),'utf8');
 await page.route('http://device.test/**',async route=>{
   const url=new URL(route.request().url()), path=url.pathname;
   const json=body=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});

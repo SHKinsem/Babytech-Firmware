@@ -1,0 +1,95 @@
+name: Firmware checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install C and C++ compilers
+        run: sudo apt-get update && sudo apt-get install --yes g++
+
+      - name: Install frontend dependencies
+        working-directory: tools/motor-protocol-demo
+        run: npm ci
+
+      - name: Test and build frontend
+        working-directory: tools/motor-protocol-demo
+        run: |
+          npm test
+          npm run build:device
+          npm run build
+          npm run test:sites
+
+      - name: Run protocol, motion, raw CAN, and demo tests
+        run: |
+          python tools/test_protocol.py
+          python tools/test_motion.py
+          python tools/test_raw_can.py
+          python tools/test_demo.py
+
+      - name: Run flash utility unit tests
+        run: python -m unittest discover -s tests -p 'test_flash_device.py'
+
+      - name: Test OTA page when available
+        run: |
+          if [[ -f tests/ota-page.test.cjs ]]; then
+            node --test tests/ota-page.test.cjs
+          else
+            echo "OTA page test not present; skipping"
+          fi
+
+  firmware-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install PlatformIO
+        run: python -m pip install platformio==6.1.19
+
+      - name: Build BRAIN and both MOTION UART peer variants
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -d main-controller ]]; then
+            brain_dir=main-controller
+          elif [[ -d brain ]]; then
+            brain_dir=brain
+          else
+            echo "Could not find main-controller or brain firmware directory" >&2
+            exit 1
+          fi
+
+          if [[ -d device-controller ]]; then
+            motion_dir=device-controller
+          elif [[ -d motion ]]; then
+            motion_dir=motion
+          else
+            echo "Could not find device-controller or motion firmware directory" >&2
+            exit 1
+          fi
+
+          pio run --project-dir "$brain_dir"
+          pio run --project-dir "$motion_dir"
+          PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -fstack-usage -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DMOTION_UART_PEER=2' \
+            pio run --project-dir "$motion_dir"

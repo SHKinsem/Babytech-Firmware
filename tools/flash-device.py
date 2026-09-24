@@ -104,7 +104,7 @@ def main(argv=None):
 
     def command(label, *arguments, reset=False):
         cmd = [sys.executable, str(args.esptool), '--chip', 'esp32s3', '--port', args.port,
-               '--baud', str(args.baud), '--after', 'hard-reset' if reset else 'no-reset', *map(str, arguments)]
+               '--baud', str(args.baud), '--after', 'hard_reset' if reset else 'no_reset', *map(str, arguments)]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 encoding='utf-8', errors='replace', timeout=240)
         (run / (label + '.log')).write_text(result.stdout, encoding='utf-8')
@@ -113,14 +113,14 @@ def main(argv=None):
         return result.stdout
 
     try:
-        identity = command('identity', 'flash-id')
+        identity = command('identity', 'flash_id')
         if args.expected_mac.lower() not in identity.lower():
             raise ValueError('Device MAC mismatch: no write performed')
         if not re.search(r'flash size:\s*16\s*MB', identity, re.I):
             raise ValueError('Device does not report 16 MB flash')
         report['identityChecked'] = True
         backup = run / 'before-boot-nvs.bin'
-        command('backup', 'read-flash', '0', '0x10000', backup)
+        command('backup', 'read_flash', '0', '0x10000', backup)
         before = backup.read_bytes()
         if len(before) != 0x10000:
             raise ValueError('Incomplete backup')
@@ -129,10 +129,10 @@ def main(argv=None):
             raise ValueError('Partition layout differs: automatic migration refused; no write performed')
         image_args = [part for offset, name in PARTS for part in (hex(offset), str(run / name))]
         report['writeStarted'] = True
-        command('write', 'write-flash', '--flash-mode', 'keep', '--flash-freq', 'keep', '--flash-size', 'keep', *image_args)
-        command('verify', 'verify-flash', *image_args)
+        command('write', 'write_flash', '--flash_mode', 'keep', '--flash_freq', 'keep', '--flash_size', 'keep', *image_args)
+        command('verify', 'verify_flash', *image_args)
         nvs = run / 'after-nvs.bin'
-        command('nvs-check', 'read-flash', '0x9000', '0x5000', nvs, reset=True)
+        command('nvs-check', 'read_flash', '0x9000', '0x5000', nvs, reset=True)
         if nvs.read_bytes() != before[0x9000:0xE000]:
             raise RuntimeError('NVS verification mismatch; backup retained; no automatic restore')
         report.update(status='flash-verified', nvsUnchanged=True)
