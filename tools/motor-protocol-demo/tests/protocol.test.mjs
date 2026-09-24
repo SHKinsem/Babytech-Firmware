@@ -87,22 +87,36 @@ test('human RPM and angle inputs become the exact protocol bytes once', () => {
   assert.deepEqual(positionFrame.bytes.slice(5, 9), [0x00, 0x00, 0x07, 0x0d]);
 });
 
-test('scaled inputs preserve partial drafts and reject excess precision', () => {
+test('scaled RPM converts 60 to 600 protocol units before encoding', () => {
+  const item = getCommandItem('velocity');
+  const field = getVariant(item, 'base').layout.find((entry) => entry.key === 'vel');
+  const values = { ...defaultValues(item, 'base'), vel: protocolValue(field, '60') };
+  assert.equal(values.vel, '600');
+
+  const result = encodeCommand({ item, variantKey: 'base', values, address: 1 });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.bytes.slice(5, 7), [0x02, 0x58]);
+});
+
+test('scaled inputs preserve drafts and reject unsupported numeric spellings', () => {
   const item = getCommandItem('velocity');
   const field = getVariant(item, 'base').layout.find((entry) => entry.key === 'vel');
   assert.equal(protocolValue(field, ''), '');
-  assert.equal(protocolValue(field, '60.'), '60.');
-  assert.equal(displayValue(field, '60.'), '60.');
-  assert.equal(protocolValue(field, '60.05'), '60.05');
-  assert.equal(displayError(field, '60.05', 'raw invalid'), '速度最多填写 1 位小数（RPM）');
-  const result = encodeCommand({
-    item,
-    variantKey: 'base',
-    values: { ...defaultValues(item, 'base'), vel: protocolValue(field, '60.05') },
-    address: 1,
-  });
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.vel);
+  for (const draft of ['60.', '+60', '1e2', ' 60 ', '60.05']) {
+    const raw = protocolValue(field, draft);
+    assert.equal(displayValue(field, raw), draft, `${JSON.stringify(draft)} remains visible as a draft`);
+
+    const result = encodeCommand({
+      item,
+      variantKey: 'base',
+      values: { ...defaultValues(item, 'base'), vel: raw },
+      address: 1,
+    });
+    assert.equal(result.ok, false, `${JSON.stringify(draft)} cannot encode`);
+    assert.ok(result.errors.vel);
+    assert.deepEqual(result.bytes, []);
+    assert.equal(displayError(field, draft, result.errors.vel), '速度最多填写 1 位小数（RPM）');
+  }
 });
 
 test('F3 enable example matches the reference design byte for byte', () => {
