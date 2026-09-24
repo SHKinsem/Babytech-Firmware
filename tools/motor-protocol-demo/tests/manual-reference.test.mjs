@@ -35,6 +35,11 @@ test('multi-packet X status is decoded only with intact packet order and sign by
   assert.match(reply.text,/目标位置 -360.0°/);
   assert.match(reply.text,/实时位置 360.0°/);
   assert.match(reply.text,/位置误差 -0.02°/);
+  assert.match(reply.text,/驱动温度 34 ℃/);
+  const negativeTemperature = packets.map((packet,index) => index === 4
+    ? {...packet,data:packet.data.map((byte,byteIndex) => byteIndex === 3 ? 1 : byte)}
+    : packet);
+  assert.match(decodeBulkCanReply(negativeTemperature).text,/驱动温度 -34 ℃/);
   assert.equal(decodeBulkCanReply([packets[0],packets[2],packets[1],packets[3],packets[4]]),null);
   assert.equal(decodeBulkCanReply(packets.map((p,i)=>i===4?{...p,data:[...p.data.slice(0,-1),0]}:p)),null);
 });

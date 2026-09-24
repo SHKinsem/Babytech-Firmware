@@ -502,7 +502,9 @@ export function decodeBulkCanReply(packets) {
     const speed = signIsValid(payload[17]) ? (signedMagnitude(payload[17],u16(payload[18],payload[19]))/10).toFixed(1) : null;
     const position = signed(payload[20],21,10);
     const error = signed(payload[25],26,100);
-    const temperature = signIsValid(payload[30]) ? signedMagnitude(payload[30],payload[31],true) : null;
+    // Bulk status sign5 uses 00/01 = positive/negative (manual p96), unlike
+    // the standalone 0x39 temperature reply on p72.
+    const temperature = signIsValid(payload[30]) ? signedMagnitude(payload[30],payload[31]) : null;
     if ([target,speed,position,error,temperature].some(value => value === null)) return null;
     title = '读取全部系统状态（X 固件）';
     text = lines(
