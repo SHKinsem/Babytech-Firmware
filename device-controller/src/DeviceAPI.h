@@ -57,6 +57,8 @@ struct DeviceSnapshot {
     uint32_t sampledAtMs = 0;
     uint8_t motorId = 0;
     bool busReady = false;
+    bool unverifiedMode = false;
+    bool unverifiedMotionOutstanding = false;
     bool manualBusy = false;
     bool hasActiveMotion = false;
     bool stopping = false;
@@ -81,6 +83,13 @@ public:
     // Lifecycle helpers allow host contract tests to drive the real composition.
     bool begin(int tx, int rx, long bitrate);
     void poll(uint32_t now, bool dispatchQueries = true);
+    void setUnverifiedMode(bool enabled) {
+        if (enabled && !motor_.unverifiedMode() && queue_.active())
+            motor_.noteUnverifiedMotionPossiblyOutstanding();
+        motor_.setUnverifiedMode(enabled);
+    }
+    bool unverifiedMode() const { return motor_.unverifiedMode(); }
+    bool unverifiedMotionOutstanding() const { return motor_.unverifiedMotionOutstanding(); }
 
     DeviceReceipt requestEnable(uint8_t id, bool enabled);
     DeviceReceipt requestBroadcastEnable(bool enabled);

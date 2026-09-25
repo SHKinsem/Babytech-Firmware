@@ -22,14 +22,26 @@ Status Endpoint::status(uint32_t now) const {
     return s;
 }
 bool Endpoint::cached(const Frame& q,Frame& out) const {
-    const auto check=[&](const Record& r) {
+    const auto check=[&](const Record& r,bool pending) {
         if (!r.valid || !keyMatches(q,r.request)) return false;
-        out=sameRequest(q,r.request) ? r.response : reject(q,Reason::RequestConflict);
+        if (!sameRequest(q,r.request)) out=reject(q,Reason::RequestConflict);
+        else if (pending && backend_.unverifiedMode()) {
+            // The prior supervised command was already submitted to CAN. A
+            // retry receives the send-only outcome now; tick still emits its
+            // one terminal event for the original Brain owner.
+            const bool cancelled=&r==&exec_ &&
+                (stop_.valid || r.response.payload[0]==uint8_t(Outcome::Cancelled));
+            const bool sent=&r!=&stop_ ||
+                (pendingStopSentKnown_ ? pendingStopSent_ : backend_.stopped());
+            out=reply(q,cancelled ? Outcome::Cancelled :
+                          (sent ? Outcome::Done : Outcome::Failed),
+                      sent ? Reason::None : Reason::NotReady);
+        } else out=r.response;
         out.kind=Kind::Response; return true;
     };
-    if (check(exec_) || check(stop_)) return true;
-    for (const auto& r:results_) if (check(r)) return true;
-    for (const auto& s:sessions_) if (check(s.last)) return true;
+    if (check(exec_,true) || check(stop_,true)) return true;
+    for (const auto& r:results_) if (check(r,false)) return true;
+    for (const auto& s:sessions_) if (check(s.last,false)) return true;
     return false;
 }
 Frame Endpoint::finish(Record& r,Outcome outcome,Reason reason) {
@@ -38,7 +50,9 @@ Frame Endpoint::finish(Record& r,Outcome outcome,Reason reason) {
     for (auto& s:sessions_) {
         if (s.last.valid && keyMatches(s.last.request,r.request)) s.last.response=r.response;
     }
-    Frame event=r.response; r.valid=false; return event;
+    Frame event=r.response; r.valid=false;
+    if (&r==&stop_) pendingStopSentKnown_=false;
+    return event;
 }
 bool Endpoint::cancelPending(Frame& event) {
     if (exec_.valid) { event=finish(exec_,Outcome::Cancelled,Reason::None); return true; }
@@ -84,9 +98,10 @@ Frame Endpoint::read(const Frame& q,Reader& r,uint32_t now,bool discovery) {
 Frame Endpoint::write(const Frame& q,Reader& r) {
     const uint32_t expected=r.get(4); const uint8_t count=r.get(1);
     if (!count || count>6 || r.remaining()!=size_t(count)*11) return reject(q,Reason::InvalidParam);
-    if (expected!=revision_) return reject(q,Reason::ConfigMismatch);
-    if (busy() || backend_.busy()) return reject(q,Reason::Busy);
-    if (backend_.fault()) return reject(q,Reason::FaultActive);
+    const bool unverified=backend_.unverifiedMode();
+    if (!unverified && expected!=revision_) return reject(q,Reason::ConfigMismatch);
+    if (!unverified && (busy() || backend_.busy())) return reject(q,Reason::Busy);
+    if (!unverified && backend_.fault()) return reject(q,Reason::FaultActive);
     if (revision_==UINT32_MAX) return reject(q,Reason::InvalidState);
     Parameters next=params_; uint8_t seen=0;
     for (uint8_t i=0;i<count;++i) {
@@ -95,7 +110,8 @@ Frame Endpoint::write(const Frame& q,Reader& r) {
         if (field<1 || field>6 || length!=4 || (seen & (1u<<(field-1)))) return reject(q,Reason::InvalidParam);
         seen|=1u<<(field-1); next.set(field,uint32_t(r.get(4)));
     }
-    if (!r.done() || !validParameters(next)) return reject(q,Reason::InvalidParam);
+    if (!r.done() || !(unverified ? representableParameters(next) : validParameters(next)))
+        return reject(q,Reason::InvalidParam);
     params_=next; ++revision_; backend_.watch(uint8_t(params_.motor));
     Frame out=reply(q,Outcome::Ok); Writer w(out.payload+3,kMaxPayload-3); w.put(revision_,4);
     out.length=7; return out;
@@ -107,6 +123,11 @@ bool Endpoint::handle(const Frame& q,uint32_t now,Frame& out) {
     const bool discovery=q.cmd==Cmd::Read && target==0;
     if (target!=boot_ && !(target==0 && q.cmd==Cmd::Stop) && !discovery) {
         out=reject(q,Reason::BootMismatch); return true;
+    }
+    if (backend_.unverifiedMode() && stop_.valid && !pendingStopSentKnown_) {
+        // Snapshot the old STOP before a fresh UART STOP can overwrite the
+        // backend's latest TX result. Its terminal event belongs to this key.
+        pendingStopSent_=backend_.stopped(); pendingStopSentKnown_=true;
     }
     if (cached(q,out)) return true;
     Session* session=nullptr;
@@ -124,14 +145,15 @@ bool Endpoint::handle(const Frame& q,uint32_t now,Frame& out) {
     else if (q.cmd==Cmd::Exec) {
         const uint8_t cls=r.get(1); const uint16_t instance=r.get(2),op=r.get(2);
         const uint32_t expected=r.get(4);
+        const bool unverified=backend_.unverifiedMode();
         const bool disable=cls==kMotor && instance>=1 && instance<=255 && op==kDisable;
         if (!r.done()) out=reject(q,Reason::InvalidParam);
-        else if (expected!=revision_) out=reject(q,Reason::ConfigMismatch);
-        else if (!disable && (busy() || backend_.busy())) out=reject(q,Reason::Busy);
+        else if (!unverified && expected!=revision_) out=reject(q,Reason::ConfigMismatch);
+        else if (!unverified && !disable && (busy() || backend_.busy())) out=reject(q,Reason::Busy);
         else {
             // Disabling may preempt a live UART owner. Stop its other motors
             // before transferring ownership, and retain the cancelled result.
-            if (disable && exec_.valid) {
+            if (!unverified && disable && exec_.valid) {
                 backend_.stop();
                 finish(exec_,Outcome::Cancelled,Reason::None);
             }
@@ -139,15 +161,26 @@ bool Endpoint::handle(const Frame& q,uint32_t now,Frame& out) {
             if (cls==kStage && instance==kMoveStage && op==kRun) reason=backend_.startMove(params_);
             else if (cls==kMotor && instance>=1 && instance<=255 && (op==kEnable || op==kDisable))
                 reason=backend_.enable(uint8_t(instance),op==kEnable);
-            out=reason==Reason::None ? reply(q,Outcome::Accepted) : reject(q,reason);
-            if (reason==Reason::None) {
+            // Done in unverified mode means the CAN send was admitted. It is
+            // never evidence of a motor ACK, arrival or physical disable.
+            out=reason==Reason::None ? reply(q,unverified ? Outcome::Done : Outcome::Accepted) : reject(q,reason);
+            if (reason==Reason::None && !unverified) {
                 exec_.valid=true; exec_.request=q; exec_.response=out; lastOwnerAt_=now; linkLost_=false;
             }
         }
     } else if (q.cmd==Cmd::Stop) {
         if (!r.done()) out=reject(q,Reason::InvalidParam);
-        else if (stop_.valid) out=reject(q,Reason::Busy); // existing stop already owns the path
+        else if (stop_.valid && !backend_.unverifiedMode())
+            out=reject(q,Reason::Busy); // supervised stop already owns the path
+        else if (backend_.unverifiedMode()) {
+            if (exec_.valid) exec_.response=reply(exec_.request,Outcome::Cancelled);
+            backend_.stop();
+            const bool sent=backend_.stopped();
+            out=reply(q,sent ? Outcome::Done : Outcome::Failed,
+                      sent ? Reason::None : Reason::NotReady);
+        }
         else {
+            pendingStopSentKnown_=false;
             stop_.valid=true; stop_.request=q; stop_.response=reply(q,Outcome::Accepted);
             stopAt_=now; backend_.stop(); out=stop_.response;
         }
@@ -163,6 +196,27 @@ bool Endpoint::handle(const Frame& q,uint32_t now,Frame& out) {
     return true;
 }
 bool Endpoint::tick(uint32_t now,Frame& event) {
+    if (backend_.unverifiedMode()) {
+        // Mode may be enabled while a supervised UART command is pending.
+        // Complete the old key without polling motor evidence or link timeout.
+        linkLost_=false;
+        if (exec_.valid) {
+            const bool cancelled=stop_.valid ||
+                exec_.response.payload[0]==uint8_t(Outcome::Cancelled);
+            event=finish(exec_,cancelled ? Outcome::Cancelled : Outcome::Done,Reason::None);
+            return true;
+        }
+        if (stop_.valid) {
+            if (!pendingStopSentKnown_) {
+                pendingStopSent_=backend_.stopped(); pendingStopSentKnown_=true;
+            }
+            const bool sent=pendingStopSent_;
+            event=finish(stop_,sent ? Outcome::Done : Outcome::Failed,
+                         sent ? Reason::None : Reason::NotReady);
+            return true;
+        }
+        return false;
+    }
     if (exec_.valid) {
         if (!linkLost_ && now-lastOwnerAt_>=kLinkTimeoutMs && !stop_.valid) {
             linkLost_=true; backend_.stop();

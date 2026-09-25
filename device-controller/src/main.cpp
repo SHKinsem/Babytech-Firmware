@@ -18,6 +18,7 @@
 #include "QueueBoardMotion.h"
 #include "CommandQueue.h"
 #include "DeviceAPI.h"
+#include "WireDecimal.h"
 #include "DebugLog.h"
 #include "ProtocolGate.h"
 #include <esp_efuse.h>
@@ -66,7 +67,12 @@ bool controlBusy() { return demoBusy() || endpoint.busy() || motor.hasActiveMoti
 bool motionBusy() { return controlBusy() || ota.maintenanceActive(); }
 WiFiSetup wifiSetup(server, motionBusy);
 bool canStarted = false;
-bool safeForOta() { return !controlBusy() && !motor.operationBusy() && !wifiSetup.busy(); }
+// Unverified transmissions have no arrival proof. Keep OTA closed for the
+// entire session after an unverified move, including after the switch is off.
+bool safeForOta() {
+    return !motor.unverifiedMode() && !motor.unverifiedMotionOutstanding() &&
+           !controlBusy() && !motor.operationBusy() && !wifiSetup.busy();
+}
 bool otaHealthy() { return canStarted && wifiSetup.apReady() &&
                            WiFi.softAPIP() != IPAddress(0,0,0,0); }
 uint32_t lastBrainByteAt = 0;
@@ -97,7 +103,7 @@ String bootIdHex(uint64_t value) {
 // (which carry credentials) are deliberately absent.
 const char* const kLoggedPostRoutes[] = {
     "/api/enable-all", "/api/command", "/api/move", "/api/enable", "/api/stop", "/api/stop-all",
-    "/api/control/reset",
+    "/api/control/reset", "/api/control/mode",
     "/api/queue/start", "/api/queue/cancel", "/api/limits", "/api/motor-distance", "/api/query-budget",
     "/api/sync-settings",
     "/api/scale/tare", "/api/scale/calibrate", "/api/scale/config",
@@ -114,7 +120,7 @@ bool loggedPostRoute(const String& uri) {
 // arbitrary argument and any credential field cannot reach the log. Queue
 // programs are excluded on purpose: the browser already owns that text.
 const char* const kLoggedArgs[] = {
-    "id", "hex", "angle", "speed", "accel", "decel", "current", "enabled",
+    "id", "hex", "angle", "speed", "accel", "decel", "current", "enabled", "unverified",
     "repeat", "knownWeightG", "doutPin", "sckPin", "rotationDistance",
     "maxSpeedRpm", "maxAccelRpmS", "maxCurrentMa", "maxAngleDeg",
     "maxMoveSeconds", "experimentSeconds",
@@ -321,7 +327,7 @@ BoardRotationSource boardRotation;
 
 #if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
 motion::DemoMotorExecutor demoExecutor(motor, queue, deviceApi, boardRotation,
-                                      []() { return !wifiSetup.busy(); });
+                                       []() { return deviceApi.unverifiedMode() || !wifiSetup.busy(); });
 motion::DemoFlowController demo(demoExecutor);
 motion::DisplayLinkCore displayLink(demo);
 String demoConfigJson;
@@ -563,6 +569,72 @@ bool argDecimal(const char* name, double& out) {
     return parseDecimalStrict(server.arg(name), out);
 }
 
+// Parse an HTTP decimal exactly at the motor protocol's 0.1-unit resolution.
+// Going through float would silently change large, but wire-valid, CD angles.
+bool parseWireTenths(const String& raw, uint32_t maximum, bool signedValue,
+                     uint32_t& out, bool& negative) {
+    return motion::parseWireTenths(raw.c_str(), raw.length(), maximum,
+                                   signedValue, out, negative);
+}
+
+bool modeStorageReady = false;
+
+String controlModeJson() {
+    String json = F("{\"unverifiedMode\":");
+    json += deviceApi.unverifiedMode() ? F("true") : F("false");
+    json += F(",\"persisted\":");
+    json += modeStorageReady ? F("true") : F("false");
+    json += '}';
+    return json;
+}
+
+void loadControlMode() {
+    Preferences prefs;
+    if (!prefs.begin("control-mode", true)) {
+        debugLog.add(millis(), "error", "control.mode", "nvs_open_failed");
+        return;
+    }
+    const bool enabled = prefs.getBool("unverified", false);
+    prefs.end();
+    modeStorageReady = true;
+    deviceApi.setUnverifiedMode(enabled);
+    debugLog.addf(millis(), "info", "control.mode", "loaded_unverified=%d", enabled ? 1 : 0);
+}
+
+void handleControlMode() {
+    if (!server.hasArg("unverified")) { sendError(400, F("unverified_required")); return; }
+    const String value = server.arg("unverified");
+    if (value != "0" && value != "1") { sendError(400, F("unverified_must_be_0_or_1")); return; }
+    const bool enabled = value == "1";
+    const bool changed = enabled != deviceApi.unverifiedMode();
+    // Turning supervision back on halfway through a script would reinterpret
+    // the same run with different completion rules. Let the operator stop the
+    // run first; enabling unverified mode remains available to escape a wait.
+    if (!enabled && deviceApi.unverifiedMode() && (queue.active() || demoBusy())) {
+        sendError(409, F("control_mode_busy")); return;
+    }
+    Preferences prefs;
+    if (!prefs.begin("control-mode", false)) {
+        modeStorageReady = false;
+        sendError(500, F("control_mode_save_failed"));
+        return;
+    }
+    const bool saved = prefs.putBool("unverified", enabled) == 1;
+    prefs.end();
+    if (!saved) {
+        modeStorageReady = false;
+        sendError(500, F("control_mode_save_failed"));
+        return;
+    }
+    modeStorageReady = true;
+    deviceApi.setUnverifiedMode(enabled);
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    if (changed) demo.invalidate();
+#endif
+    debugLog.addf(millis(), "warn", "control.mode", "unverified=%d", enabled ? 1 : 0);
+    sendJson(200, controlModeJson());
+}
+
 // ---------------------------------------------------------------------------
 // Brain link: v2 shared endpoint, bounded receive and event servicing.
 // ---------------------------------------------------------------------------
@@ -642,15 +714,21 @@ String demoStatusJson() {
 }
 bool applyDemoJson(const String& json, std::string& error) {
     motion::DemoConfig candidate;
-    if (!motion::parseDemoConfig(json.c_str(), json.length(), candidate, error)) return false;
-    if (!motion::demoRotationMatches(candidate, boardRotation)) { error = "rotation_distance_mismatch"; return false; }
+    if (!motion::parseDemoConfig(json.c_str(), json.length(), candidate, error,
+                                 deviceApi.unverifiedMode())) return false;
+    if (!deviceApi.unverifiedMode() && !motion::demoRotationMatches(candidate, boardRotation)) {
+        error = "rotation_distance_mismatch"; return false;
+    }
     if (!demo.apply(std::move(candidate))) { error = "demo_busy"; return false; }
     demoConfigJson = json;
     demoExecutor.configure(demo.config());
     return true;
 }
 void handleDemoConfig() {
-    if (demo.busy() || !demoExecutor.available() || wifiSetup.busy()) { sendError(409, F("demo_busy")); return; }
+    if (demo.busy() || !demoExecutor.available() ||
+        (!deviceApi.unverifiedMode() && wifiSetup.busy())) {
+        sendError(409, F("demo_busy")); return;
+    }
     std::string error;
     if (!applyDemoJson(server.arg("json"), error)) {
         String body = "{\"error\":\""; body += error.c_str(); body += "\"}";
@@ -659,7 +737,8 @@ void handleDemoConfig() {
     sendJson(200, demoStatusJson());
 }
 void handleDemoAction() {
-    if (wifiSetup.busy() || !motion::demoRotationMatches(demo.config(), boardRotation)) {
+    if (!deviceApi.unverifiedMode() &&
+        (wifiSetup.busy() || !motion::demoRotationMatches(demo.config(), boardRotation))) {
         sendError(409, F("configuration_or_wifi_busy")); return;
     }
     const String action = server.arg("action");
@@ -845,6 +924,14 @@ void handleEnable() {
         return;
     }
     const bool enabling = enabledRaw == "1";
+    if (deviceApi.unverifiedMode()) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+        if (!enabling) demo.cancelLocal("disabled");
+#endif
+        sendResult("enable", id, legacyResult(deviceApi.requestEnable(
+            static_cast<uint8_t>(id), enabling)));
+        return;
+    }
     if (enabling && !demoManualMutation()) return;
     if (!enabling) stopDemoOwnership();
     if (enabling) {
@@ -864,16 +951,55 @@ void handleEnable() {
 }
 
 void handleMove() {
-    if (!demoManualMutation()) return;
-    if (queue.active()) { sendError(409, F("queue_busy")); return; }
-    if (endpoint.busy()) { sendError(409, F("uart_operation_active")); return; }
-    if (wifiSetup.busy()) {
-        sendError(409, F("wifi_busy"));
-        return;
+    if (!deviceApi.unverifiedMode()) {
+        if (!demoManualMutation()) return;
+        if (queue.active()) { sendError(409, F("queue_busy")); return; }
+        if (endpoint.busy()) { sendError(409, F("uart_operation_active")); return; }
+        if (wifiSetup.busy()) {
+            sendError(409, F("wifi_busy"));
+            return;
+        }
     }
     long id = 0;
     if (!argInteger("id", id) || id < 1 || id > 255) {
         sendError(400, F("id must be an integer 1..255"));
+        return;
+    }
+
+    if (deviceApi.unverifiedMode()) {
+        uint32_t angleTenths = 0, speedTenths = 0;
+        bool reverse = false, ignoredSign = false;
+        if (!server.hasArg("angle") ||
+            !parseWireTenths(server.arg("angle"), UINT32_MAX, true, angleTenths, reverse)) {
+            sendError(400, F("angle_unrepresentable")); return;
+        }
+        if (!server.hasArg("speed") ||
+            !parseWireTenths(server.arg("speed"), UINT16_MAX, false, speedTenths, ignoredSign)) {
+            sendError(400, F("speed_unrepresentable")); return;
+        }
+        long accel = 0, decel = 0, currentMa = 0;
+        if (!argInteger("accel", accel) || accel < 0 || accel > UINT16_MAX) {
+            sendError(400, F("accel_unrepresentable")); return;
+        }
+        if (!argInteger("decel", decel) || decel < 0 || decel > UINT16_MAX) {
+            sendError(400, F("decel_unrepresentable")); return;
+        }
+        if (!argInteger("current", currentMa) || currentMa < 0 || currentMa > UINT16_MAX) {
+            sendError(400, F("current_unrepresentable")); return;
+        }
+        // CD wire fields are encoded directly so no float conversion, limit
+        // policy, feedback or ACK gate can change the requested instruction.
+        const uint8_t frame[] = {
+            static_cast<uint8_t>(id), motion::kFrameMove, static_cast<uint8_t>(reverse ? 1 : 0),
+            static_cast<uint8_t>(accel >> 8), static_cast<uint8_t>(accel),
+            static_cast<uint8_t>(decel >> 8), static_cast<uint8_t>(decel),
+            static_cast<uint8_t>(speedTenths >> 8), static_cast<uint8_t>(speedTenths),
+            static_cast<uint8_t>(angleTenths >> 24), static_cast<uint8_t>(angleTenths >> 16),
+            static_cast<uint8_t>(angleTenths >> 8), static_cast<uint8_t>(angleTenths),
+            motion::kMotionModeRelativeToCurrent, 0,
+            static_cast<uint8_t>(currentMa >> 8), static_cast<uint8_t>(currentMa),
+            motion::kProtocolChecksum};
+        sendResult("move", id, legacyResult(deviceApi.requestRawCommand(frame, sizeof(frame))));
         return;
     }
 
@@ -936,6 +1062,13 @@ void handleStop() {
         sendError(400, F("id must be an integer 1..255"));
         return;
     }
+    if (deviceApi.unverifiedMode()) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+        demo.cancelLocal("stopped");
+#endif
+        sendResult("stop", id, legacyResult(deviceApi.requestStop(static_cast<uint8_t>(id))));
+        return;
+    }
     // An authorised stop cancels a running queue first and always stays
     // available, even when the queue software already failed.
     if (stopDemoIfOwned()) return;
@@ -953,8 +1086,11 @@ void handleStop() {
 // is not evidence of that. GET cannot reach this handler.
 void handleControlReset() {
 #if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
-    demo.invalidate();
-    if (demo.busy()) demo.stop(millis());
+    if (deviceApi.unverifiedMode()) demo.cancelLocal("control_state_cleared");
+    else {
+        demo.invalidate();
+        if (demo.busy()) demo.stop(millis());
+    }
 #endif
     // First record what is being cleared: without this the reset itself would
     // erase the only evidence of the state it repaired.
@@ -977,18 +1113,23 @@ void handleControlReset() {
         ++cancelled;
     }
 
-    // One queue reset: it cancels the run (the existing cancel path sends the
-    // abort/stop once), then clears queue and controller ownership whether or not
-    // that stop could actually be transmitted.
+    // Clear queue and controller ownership. In supervised mode this also asks
+    // the drive to stop; in unverified mode it is deliberately local-only.
     const auto stopped = deviceApi.clearControlState();
-    const bool stopSent = stopped.code < 300;
-    debugLog.addf(millis(), stopSent ? "warn" : "error", "control.cleared",
+    const bool cleared = stopped.code < 300;
+    const bool stopSent = !deviceApi.unverifiedMode() && cleared;
+    debugLog.addf(millis(), cleared ? "warn" : "error", "control.cleared",
                   "uart_cancelled=%u stop_code=%u stop_sent=%d stop_message=%s",
                   static_cast<unsigned>(cancelled),
                   static_cast<unsigned>(stopped.code),
                   stopSent ? 1 : 0,
                   stopped.message ? stopped.message : "");
 
+    if (deviceApi.unverifiedMode() && cleared) {
+        sendJson(200, F("{\"ok\":true,\"stateCleared\":true,\"stopSent\":false,"
+                        "\"message\":\"control_state_cleared_no_can\"}"));
+        return;
+    }
     if (stopSent) {
         sendJson(200, F("{\"ok\":true,\"stateCleared\":true,\"stopSent\":true,"
                         "\"message\":\"control_state_cleared\"}"));
@@ -1005,6 +1146,13 @@ void handleEnableAll() {
     if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
         sendError(400, F("enabled must be 0 or 1")); return;
     }
+    if (deviceApi.unverifiedMode()) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+        if (!enabled) demo.cancelLocal("disabled_all");
+#endif
+        sendResult("enable-all", -1, legacyResult(deviceApi.requestBroadcastEnable(enabled == 1)));
+        return;
+    }
     if (enabled && !demoManualMutation()) return;
     if (!enabled) stopDemoOwnership();
     if (enabled) {
@@ -1020,6 +1168,13 @@ void handleEnableAll() {
 }
 
 void handleStopAll() {
+    if (deviceApi.unverifiedMode()) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+        demo.cancelLocal("stopped");
+#endif
+        sendResult("stop-all", -1, legacyResult(deviceApi.requestStopAll()));
+        return;
+    }
     if (stopDemoIfOwned()) return;
     const auto result = deviceApi.cancelProgram("stopped");
     sendResult("stop-all", -1, result.code < 300 ? motion::Result{202,"queued"} : legacyResult(result));
@@ -1038,6 +1193,22 @@ void handleCommand() {
         if (digit < 0) { sendError(400, F("invalid hex")); return; }
         if (!(i % 2)) bytes[i/2] = static_cast<uint8_t>(digit << 4);
         else bytes[i/2] |= static_cast<uint8_t>(digit);
+    }
+    if (deviceApi.unverifiedMode()) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+        const uint8_t opcode = bytes[1];
+        const uint8_t length = static_cast<uint8_t>(hex.length() / 2);
+        const bool stopLike = bytes[length - 1] == motion::kProtocolChecksum &&
+            ((opcode == 0xFE && length == 5 && bytes[2] == 0x98 && bytes[3] == 0) ||
+             (opcode == 0x9C && length == 4 && bytes[2] == 0x48) ||
+             (opcode == 0xF3 && length == 6 && bytes[2] == 0xAB &&
+              bytes[3] == 0 && bytes[4] == 0));
+        if (stopLike)
+            demo.cancelLocal("raw_stop");
+#endif
+        sendResult("command", bytes[0], legacyResult(deviceApi.requestRawCommand(
+            bytes, static_cast<uint8_t>(hex.length() / 2))));
+        return;
     }
     const auto kind=motion::validateCommand(bytes,hex.length()/2,motor.debugLimits());
     if (kind == motion::CommandKind::Invalid) {
@@ -1224,7 +1395,10 @@ void sendQueueResult(const motion::Result& result, bool started) {
 }
 
 void handleQueueStart() {
-    if (!demoManualMutation()) return;
+    if (!deviceApi.unverifiedMode() && !demoManualMutation()) return;
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    if (deviceApi.unverifiedMode() && demo.busy()) { sendError(409, F("demo_busy")); return; }
+#endif
     // The queue is a command sender: a fault, a pending stop, a busy UART/Wi-Fi
     // or an unloaded limit set must not refuse a program the operator wrote. Only
     // a queue that is already running is refused (one program owns the order of
@@ -1240,7 +1414,7 @@ void handleQueueStart() {
     const String program = server.arg("program");
     const auto started = deviceApi.startProgram(
         program.c_str(), program.length(), repeat, boardRotation, millis());
-    if (started.code < 300) {
+    if (started.code < 300 && !deviceApi.unverifiedMode()) {
         // Only a started program takes the bus over: finish any pending UART
         // record so the two owners cannot interleave. An invalid program has no
         // side effects at all - nothing is cancelled and nothing is sent.
@@ -1255,6 +1429,13 @@ void handleQueueStart() {
 }
 
 void handleQueueCancel() {
+    if (deviceApi.unverifiedMode()) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+        demo.cancelLocal("cancelled");
+#endif
+        sendQueueResult(legacyResult(deviceApi.cancelProgram("cancelled")), false);
+        return;
+    }
     if (stopDemoIfOwned()) return;
     // Cancelling also stops everything, and it stays available even when the
     // queue itself already failed: an authorised stop must keep working.
@@ -1381,6 +1562,9 @@ void setup() {
                       kCanTxPin, kCanRxPin, kCanBitrate);
     }
 
+    // Read the persistent control choice before parsing the bundled Demo.
+    // Loading it changes only local admission/supervision, never sends CAN.
+    loadControlMode();
     loadDebugLimits();
     loadQueryBudget();
     loadSyncSettings();
@@ -1434,6 +1618,10 @@ void setup() {
     server.on("/api/move", HTTP_POST, []() { if (!rejectDuringOta()) handleMove(); });
     server.on("/api/stop", HTTP_POST, handleStop);
     server.on("/api/stop-all", HTTP_POST, handleStopAll);
+    server.on("/api/control/mode", HTTP_GET, []() { sendJson(200, controlModeJson()); });
+    server.on("/api/control/mode", HTTP_POST, []() {
+        if (!rejectDuringOta()) handleControlMode();
+    });
     // Operator reset of volatile control ownership: POST only, available while
     // the queue, UART or a supervised action is busy, and never a re-enable.
     server.on("/api/control/reset", HTTP_POST, []() { if (!rejectDuringOta()) handleControlReset(); });

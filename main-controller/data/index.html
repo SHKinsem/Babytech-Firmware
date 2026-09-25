@@ -53,7 +53,7 @@ let queryAt = 0;
 let responseCount = 0;
 let latest = null, formBoot = null, formRevision = 0, sending = false, applyPending = null;
 const form = byId('parameters');
-const commands = {none:'尚未发送动作',waiting:'已发送，等待下板回复',accepted:'下板已接受，等待执行结果',ok:'参数已应用',done:'下板已确认完成',rejected:'下板拒绝请求',failed:'执行失败',cancelled:'执行已取消',unknown:'结果未知，正在查询下板',unknown_after_restart:'下板已重启，上次结果未知'};
+const commands = {none:'尚未发送动作',waiting:'已发送，等待下板回复',accepted:'下板已接受，等待执行结果',ok:'参数已应用',done:'下板报告结束；不校验模式仅表示已发送，实际动作需核对',rejected:'下板拒绝请求',failed:'执行失败',cancelled:'执行已取消',unknown:'结果未知，正在查询下板',unknown_after_restart:'下板已重启，上次结果未知'};
 const reasons = ['无','忙碌','参数不合法','状态不允许（可能尚未使能）','尚未准备好','故障锁定','不支持','参数版本已变化','超时','反馈过期','请求冲突','结果已过期','下板已重启','停止未确认','内部错误'];
 function loadForm() {
   if (!latest || !latest.connected || !latest.parameterRevision || latest.parameterRevision !== latest.revision) return;

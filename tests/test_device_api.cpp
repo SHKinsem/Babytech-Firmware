@@ -822,6 +822,176 @@ static void test_broadcast_disable_records_cancellation() {
     CHECK(rig.state(1, 40).manualMove == DeviceMoveStage::None);
 }
 
+static void test_unverified_api_reports_submission_without_completion() {
+    Rig rig;
+    rig.begin();
+    CHECK(rig.api.requestMove(move(1)).admission == DeviceAdmission::Busy);
+    rig.api.setUnverifiedMode(true);
+    CHECK(rig.api.unverifiedMode());
+    DeviceSnapshot state = rig.state(1, 0);
+    CHECK(state.unverifiedMode);
+    CHECK(!state.unverifiedMotionOutstanding);
+
+    const DeviceReceipt sent = rig.api.requestMove(move(1));
+    CHECK(sent.admission == DeviceAdmission::Accepted);
+    CHECK(sent.code == 202);
+    CHECK(sent.operationId == 0); // No supervised result or reached claim.
+    CHECK(rig.api.readSnapshot(1).manualMove == DeviceMoveStage::None);
+    CHECK(rig.api.unverifiedMotionOutstanding());
+
+    const uint8_t unknown[] = {1, 0x7E, 0x01, 0x6B};
+    const size_t beforeRaw = capturedTX.size();
+    CHECK(rig.api.requestRawCommand(unknown, sizeof(unknown)).accepted());
+    CHECK(capturedTX.size() == beforeRaw + 1);
+    CHECK(capturedTX.back().data[0] == 0x7E);
+    const uint8_t bad[] = {1, 0x7E, 0x01, 0};
+    CHECK(rig.api.requestRawCommand(bad, sizeof(bad)).admission == DeviceAdmission::Invalid);
+
+    const size_t beforeStop = capturedTX.size();
+    CHECK(rig.api.requestStopAll().accepted());
+    CHECK(capturedTX.size() == beforeStop + 1);
+    CHECK(capturedTX.back().data[0] == kFrameStop);
+    CHECK(rig.api.unverifiedMotionOutstanding()); // FE does not prove stillness.
+    rig.api.setUnverifiedMode(false);
+    CHECK(!rig.api.unverifiedMode());
+    CHECK(rig.api.requestMove(move(1)).admission == DeviceAdmission::Busy);
+}
+
+static void test_unverified_stop_disable_and_cancel_are_single_wire_actions() {
+    const char waiting[] = "wait 1000\nenable 1\n";
+    for (int path = 0; path < 8; ++path) {
+        Rig rig;
+        rig.begin();
+        rig.api.setUnverifiedMode(true);
+        CHECK(rig.api.startProgram(waiting, sizeof(waiting) - 1,
+                                   1, rig.rotation, 0).accepted());
+        rig.poll(10);
+        CHECK(rig.state(1, 10).program == DeviceProgramStage::Running);
+        const uint8_t malformed[] = {1, 0xFE, 0x98, 0, 0};
+        CHECK(rig.api.requestRawCommand(malformed, sizeof(malformed)).code == 400);
+        CHECK(rig.state(1, 10).program == DeviceProgramStage::Running);
+        const size_t before = capturedTX.size();
+        DeviceReceipt result = {DeviceAdmission::Failed, 0, "", 0, 0};
+        switch (path) {
+            case 0: result = rig.api.requestStop(1); break;
+            case 1: result = rig.api.requestStopAll(); break;
+            case 2: result = rig.api.requestEnable(1, false); break;
+            case 3: result = rig.api.requestBroadcastEnable(false); break;
+            case 4: {
+                const uint8_t raw[] = {1, 0xFE, 0x98, 0, 0x6B};
+                result = rig.api.requestRawCommand(raw, sizeof(raw)); break;
+            }
+            case 5: {
+                const uint8_t raw[] = {1, 0x9C, 0x48, 0x6B};
+                result = rig.api.requestRawCommand(raw, sizeof(raw)); break;
+            }
+            case 6: {
+                const uint8_t raw[] = {1, 0xF3, 0xAB, 0, 0, 0x6B};
+                result = rig.api.requestRawCommand(raw, sizeof(raw)); break;
+            }
+            case 7: result = rig.api.cancelProgram("operator_cancel"); break;
+        }
+        CHECK(result.accepted());
+        CHECK(capturedTX.size() == before + 1);
+        CHECK(rig.state(1, 10).program == DeviceProgramStage::Cancelled);
+        for (uint32_t t = 20; t <= 1200; t += 20) rig.poll(t);
+        CHECK(countWireEnableOn(1) == 0); // No later queue step restarts motion.
+        CHECK(capturedTX.size() == before + 1); // No hidden abort/query/stop.
+    }
+}
+
+static void test_switching_mode_mid_program_retains_uncertainty_for_ota() {
+    Rig rig;
+    rig.begin();
+    const char program[] = "move 1 10 deg\nwait 1000\n";
+    // The regular queue is a direct sender; no CAN reply is needed to start.
+    CHECK(rig.api.startProgram(program, sizeof(program) - 1,
+                               1, rig.rotation, 0).accepted());
+    rig.poll(10);
+    bool sawMove = false;
+    for (const CanRawFrame& frame : capturedTX) {
+        if (x42sCanAddress(frame.identifier) == 1 && frame.length &&
+            frame.data[0] == kFrameMove) sawMove = true;
+    }
+    CHECK(sawMove);
+    const size_t beforeToggle = capturedTX.size();
+    rig.api.setUnverifiedMode(true);
+    CHECK(capturedTX.size() == beforeToggle);
+    CHECK(rig.api.unverifiedMotionOutstanding());
+    rig.api.setUnverifiedMode(false);
+    CHECK(capturedTX.size() == beforeToggle);
+    CHECK(rig.api.unverifiedMotionOutstanding());
+}
+
+static void test_unverified_sync_batch_blocks_cross_entry_frames_until_ff_or_stop() {
+    const char syncProgram[] =
+        "sync begin\nmove 1 90 deg 100 200 200 800\n"
+        "move 2 90 deg 100 200 200 800\nsync end\n";
+    for (int stopPath = 0; stopPath < 6; ++stopPath) {
+        Rig rig;
+        rig.begin();
+        rig.api.setUnverifiedMode(true);
+        CHECK(rig.api.startProgram(syncProgram, sizeof(syncProgram) - 1,
+                                   1, rig.rotation, 0).accepted());
+        rig.poll(10); // Begin the batch.
+        rig.poll(12); // First cached CD; FF must still be held.
+        CHECK(rig.queue.unverifiedSyncInFlight());
+        bool sawCache = false, sawTrigger = false;
+        for (const CanRawFrame& frame : capturedTX) {
+            if (frame.length && frame.data[0] == kFrameMove) sawCache = true;
+            if (frame.length && frame.data[0] == 0xFF) sawTrigger = true;
+        }
+        CHECK(sawCache && !sawTrigger);
+
+        const size_t beforeBlocked = capturedTX.size();
+        const DeviceReceipt moveBlocked = rig.api.requestMove(move(3));
+        CHECK(moveBlocked.code == 409);
+        CHECK(std::strcmp(moveBlocked.message, "sync_batch_active") == 0);
+        CHECK(rig.api.requestEnable(3, true).code == 409);
+        CHECK(rig.api.requestBroadcastEnable(true).code == 409);
+        CHECK(rig.api.requestHome(3, 0).code == 409);
+        DirectPositionRequest direct;
+        direct.id = 3;
+        CHECK(rig.api.requestDirectPosition(direct).code == 409);
+        const uint8_t raw[] = {3, 0x7E, 0x55, 0x6B};
+        CHECK(rig.api.requestRawCommand(raw, sizeof(raw)).code == 409);
+        CHECK(rig.api.startProgram("wait 1\n", 7, 1, rig.rotation, 12).code == 409);
+        CHECK(rig.api.startDemo(QueueProgram{}, 12).code == 409);
+        CHECK(!rig.api.requestDemoMarker(3));
+        CHECK(capturedTX.size() == beforeBlocked);
+
+        if (stopPath >= 4) rig.api.setUnverifiedMode(false);
+        const size_t beforeStop = capturedTX.size();
+        DeviceReceipt stopped = {DeviceAdmission::Failed, 0, "", 0, 0};
+        if (stopPath == 0 || stopPath == 4) stopped = rig.api.requestStopAll();
+        else if (stopPath == 1 || stopPath == 5) {
+            const uint8_t fe[] = {0, 0xFE, 0x98, 0, 0x6B};
+            stopped = rig.api.requestRawCommand(fe, sizeof(fe));
+        } else if (stopPath == 2) {
+            const uint8_t interrupt[] = {0, 0x9C, 0x48, 0x6B};
+            stopped = rig.api.requestRawCommand(interrupt, sizeof(interrupt));
+        } else stopped = rig.api.requestEnable(3, false);
+        CHECK(stopped.accepted());
+        CHECK(capturedTX.size() == beforeStop + 1);
+        CHECK(!rig.queue.unverifiedSyncInFlight());
+        for (uint32_t t = 14; t <= 100; t += 2) rig.poll(t);
+        CHECK(rig.state(1, 100).program == DeviceProgramStage::Cancelled);
+        bool lateTrigger = false;
+        for (const CanRawFrame& frame : capturedTX)
+            if (frame.length && frame.data[0] == 0xFF) lateTrigger = true;
+        CHECK(!lateTrigger);
+    }
+
+    Rig completed;
+    completed.begin();
+    completed.api.setUnverifiedMode(true);
+    CHECK(completed.api.startProgram(syncProgram, sizeof(syncProgram) - 1,
+                                     1, completed.rotation, 0).accepted());
+    for (uint32_t t = 10; t <= 30; t += 2) completed.poll(t);
+    CHECK(!completed.queue.unverifiedSyncInFlight());
+    CHECK(completed.api.requestHome(3, 0).accepted()); // Gate ends after FF.
+}
+
 int main() {
     test_receipt_ack_and_observation_are_distinct();
     test_manual_move_reached_needs_new_evidence();
@@ -844,6 +1014,10 @@ int main() {
     test_rejected_ack_and_bus_off_have_operation_faults();
     test_clear_control_state_keeps_fault_and_stop_evidence();
     test_broadcast_disable_records_cancellation();
+    test_unverified_api_reports_submission_without_completion();
+    test_unverified_stop_disable_and_cancel_are_single_wire_actions();
+    test_switching_mode_mid_program_retains_uncertainty_for_ota();
+    test_unverified_sync_batch_blocks_cross_entry_frames_until_ff_or_stop();
     if (failures) std::printf("device-api: %d/%d checks failed\n", failures, checks);
     else std::printf("device-api: %d checks passed\n", checks);
     return failures ? 1 : 0;

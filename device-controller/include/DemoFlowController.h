@@ -37,13 +37,16 @@ struct DemoEvidence {
     bool fresh = false, stationary = false, fault = false;
     int32_t position = 0;
 };
-enum class DemoExecution { Running, Done, Failed };
+enum class DemoExecution { Running, Done, Failed, Cancelled };
 
-// Hardware adapter owns queue transport. Controller never treats transmission
-// or elapsed time as physical completion.
+// Hardware adapter owns queue transport. In unverified mode the existing UART
+// Idle stage with startEnabled describes script availability only; it does not
+// establish a physical reference, arrival, or a stopped motor.
 class DemoExecutor {
 public:
     virtual ~DemoExecutor() = default;
+    // A transport-only run reports submitted scripts, never observed motion.
+    virtual bool unverifiedMode() const { return false; }
     virtual bool healthy() const = 0;
     virtual bool available() const = 0;
     virtual bool configurationValid() const { return true; }
@@ -54,34 +57,50 @@ public:
     virtual DisplayError failureError() const { return DisplayError::Unknown; }
     virtual bool stop() = 0;
     virtual bool reset() = 0;
+    virtual void cancelLocal() {}
 };
 
 class DemoFlowController {
 public:
     explicit DemoFlowController(DemoExecutor& executor) : executor_(executor) {}
     const DemoConfig& config() const { return config_; }
-    bool busy() const { return running_ || stopping_ || resetPending_ || stage_ == DisplayStage::Complete; }
+    bool busy() const { return running_ || stopping_ || resetPending_ ||
+        (!executor_.unverifiedMode() && stage_ == DisplayStage::Complete); }
     bool referenceValid() const { return reference_; }
     bool initializing() const { return running_ && index_ == -1; }
-    DisplayStage stage() const { return stage_; }
+    DisplayStage stage() const {
+        if (executor_.unverifiedMode() &&
+            (stage_ == DisplayStage::Ready || stage_ == DisplayStage::Complete))
+            return DisplayStage::Idle;
+        if (!executor_.unverifiedMode() && stage_ == DisplayStage::Idle)
+            return DisplayStage::NotReady;
+        return stage_;
+    }
     DisplayError error() const { return stage_ == DisplayStage::Error ? error_ : DisplayError::None; }
-    bool startEnabled() const { return stage_ == DisplayStage::Ready; }
+    bool startEnabled() const { return executor_.unverifiedMode() ?
+        config_.configured && !busy() && executor_.available() &&
+            (stage_ == DisplayStage::Idle || stage_ == DisplayStage::Ready ||
+             stage_ == DisplayStage::Complete) : stage_ == DisplayStage::Ready; }
     const char* reason() const { return reason_; }
+    bool unverifiedMode() const { return executor_.unverifiedMode(); }
     bool apply(DemoConfig config);
     bool initialize(uint32_t now);
     bool start(uint32_t now);
     bool single(uint8_t index, uint32_t now);
+    void cancelLocal(const char* reason);
     void stop(uint32_t now);
     void invalidate();
     void tick(uint32_t now);
     babytech::display::DisplaySnapshot snapshot() const;
 private:
     bool settled(bool zero) const;
+    bool zerosRepresentable(const DemoScript& script) const;
     bool begin(int index, uint32_t now);
     void fail(DisplayError error, const char* reason, uint32_t now);
     DemoExecutor& executor_;
     DemoConfig config_;
     std::array<int32_t, 256> zeros_{};
+    std::array<bool, 256> zeroKnown_{};
     DisplayStage stage_ = DisplayStage::NotReady;
     DisplayError error_ = DisplayError::None;
     bool reference_ = false, running_ = false, stopping_ = false, full_ = false;

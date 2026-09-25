@@ -2,11 +2,13 @@
 #include "BoardProtocolV2.h"
 
 namespace babytech { namespace v2 {
-// Implementations must report actual feedback-backed completion, not elapsed
-// time or successful transmission. All methods run on the firmware loop thread.
+// In supervised mode implementations report feedback-backed completion. In
+// unverified mode Done only reports CAN submission, not motor completion.
+// All methods run on the firmware loop thread.
 class Backend {
 public:
     virtual ~Backend() {}
+    virtual bool unverifiedMode() const { return false; }
     virtual bool busy() const = 0;
     virtual bool stopping() const { return false; }
     virtual bool fault() const = 0;
@@ -15,6 +17,7 @@ public:
     virtual Reason enable(uint8_t motor, bool enabled) = 0;
     virtual Outcome operation(Reason& reason) const = 0;
     virtual void stop() = 0;
+    // In unverified mode this reports successful STOP transmission only.
     virtual bool stopped() const = 0;
     virtual void watch(uint8_t motor) = 0;
     virtual size_t motorFeedback(uint8_t motor, uint8_t* data, size_t capacity) const = 0;
@@ -40,7 +43,7 @@ private:
     Parameters params_;
     Session sessions_[4]; Record results_[8], exec_, stop_;
     uint8_t nextResult_=0; uint32_t lastOwnerAt_=0, stopAt_=0;
-    bool linkLost_=false;
+    bool linkLost_=false, pendingStopSentKnown_=false, pendingStopSent_=false;
     Frame finish(Record& record, Outcome outcome, Reason reason);
     bool cached(const Frame& request, Frame& response) const;
     Frame read(const Frame& request, Reader& reader, uint32_t now, bool discovery);

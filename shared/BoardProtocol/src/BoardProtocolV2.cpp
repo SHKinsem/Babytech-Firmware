@@ -103,6 +103,12 @@ bool validParameters(const Parameters& p) {
     const double peak=std::sqrt(2*d*a*b/(a+b));
     return (ramp<=d ? v/a+v/b+(d-ramp)/v : peak/a+peak/b)<=60.0;
 }
+bool representableParameters(const Parameters& p) {
+    // The bridge emits motor ID as u8 and speed/accel/decel/current as u16.
+    // Angle is already signed 32-bit tenths and fits the protocol's u32 magnitude.
+    return p.motor>=1 && p.motor<=255 && p.speed<=UINT16_MAX &&
+        p.accel<=UINT16_MAX && p.decel<=UINT16_MAX && p.current<=UINT16_MAX;
+}
 Frame readField(uint64_t session,uint32_t seq,uint64_t boot,uint8_t object,uint16_t instance,uint16_t field) {
     Frame q; q.session=session; q.sequence=seq; Writer w(q.payload,kMaxPayload);
     w.put(boot,8); w.put(1,1); w.put(object,1); w.put(instance,2); w.put(field,2); q.length=w.size(); return q;

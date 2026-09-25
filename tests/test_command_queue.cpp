@@ -1592,6 +1592,294 @@ static void test_demo_absolute_await_from_nonzero_position() {
     CHECK(rig.queue.state() == QueueState::Done);
 }
 
+static bool logicalPayloadFor(uint8_t id, uint8_t opcode, uint8_t* out, size_t& length) {
+    length = 0;
+    uint8_t nextPacket = 0;
+    for (const auto& frame : capturedTX) {
+        if (frame.data[0] != opcode || uint8_t(frame.identifier >> 8) != id ||
+            uint8_t(frame.identifier) != nextPacket) continue;
+        if (nextPacket == 0) out[length++] = opcode;
+        for (uint8_t i = 1; i < frame.length; ++i) out[length++] = frame.data[i];
+        ++nextPacket;
+    }
+    return nextPacket != 0;
+}
+
+static void test_unverified_program_await_wait_and_sync_exact_wire() {
+    QueueRig rig;
+    rig.begin();
+    rig.motor.setUnverifiedMode(true);
+    const char* program =
+        "move 1 10 deg await\n"
+        "home 2 2 await\n"
+        "wait 50\n"
+        "sync begin\n"
+        "move 3 90 deg 100 200 200 800\n"
+        "move 4 -90 deg 100 200 200 800\n"
+        "sync end\n"
+        "stop 1\n";
+    CHECK(startQueue(rig, program, 1, 10).code == 202);
+    tick(rig, 20);  // await move: submit, no feedback wait
+    tick(rig, 21);  // await home: submit, no feedback wait
+    tick(rig, 22);  // explicit wait starts
+    tick(rig, 71);
+    CHECK(opcodeFrames(0xCD) == 1);
+    tick(rig, 72);  // wait deadline only advances runner
+    tick(rig, 73);  // SyncBegin has no CAN frame
+    CHECK(rig.queue.unverifiedSyncInFlight());
+    CHECK(opcodeFrames(0xCD) == 1);
+    tick(rig, 74);  // first cached CD
+    CHECK(opcodeFrames(0xCD) == 2);
+    tick(rig, 75);  // mandatory cache pacing
+    CHECK(opcodeFrames(0xCD) == 2);
+    tick(rig, 76);  // second cached CD
+    CHECK(opcodeFrames(0xCD) == 3);
+    tick(rig, 77);
+    CHECK(opcodeFrames(0xFF) == 0);
+    tick(rig, 78);  // one shared trigger
+    CHECK(opcodeFrames(0xFF) == 1);
+    CHECK(!rig.queue.unverifiedSyncInFlight());
+    tick(rig, 79);  // explicit stop only
+    tick(rig, 80);
+    CHECK(rig.queue.state() == QueueState::Done);
+    CHECK(has(status(rig), "\"motionComplete\":false"));
+
+    const uint8_t expectedOp[] = {0xCD, 0x9A, 0xCD, 0xCD, 0xFF, 0xFE};
+    const uint8_t expectedId[] = {1, 2, 3, 4, 0, 1};
+    uint8_t actualOp[8] = {}, actualId[8] = {};
+    uint8_t firstPackets = 0;
+    for (const auto& frame : capturedTX) {
+        if (uint8_t(frame.identifier) != 0) continue;
+        if (firstPackets < 8) {
+            actualOp[firstPackets] = frame.data[0];
+            actualId[firstPackets] = uint8_t(frame.identifier >> 8);
+        }
+        ++firstPackets;
+    }
+    CHECK(firstPackets == 6); // no automatic 33/35/36/3A/3B queries or FE
+    for (uint8_t i = 0; i < 6 && i < firstPackets; ++i) {
+        CHECK(actualOp[i] == expectedOp[i]);
+        CHECK(actualId[i] == expectedId[i]);
+    }
+    for (const uint8_t id : {uint8_t(3), uint8_t(4)}) {
+        uint8_t payload[30] = {};
+        size_t length = 0;
+        CHECK(logicalPayloadFor(id, 0xCD, payload, length));
+        CHECK(length == 17);
+        if (length == 17) {
+            CHECK(payload[12] == 2); // relative position
+            CHECK(payload[13] == 1); // cached until the one FF trigger
+        }
+    }
+}
+
+static void test_unverified_demo_await_and_tx_failure() {
+    QueueRig rig;
+    rig.begin();
+    rig.motor.setUnverifiedMode(true);
+    QueueProgram program{};
+    program.count = 2;
+    auto& home = program.steps[0];
+    home.action = QueueAction::Home; home.id = 1; home.mode = 2;
+    home.line = 1; home.awaitCompletion = true;
+    auto& move = program.steps[1];
+    move.action = QueueAction::Move; move.id = 2; move.line = 2;
+    move.awaitCompletion = true; move.absolute = true;
+    move.distanceTenths = 900; move.speedTenths = 300;
+    move.accelRpmS = move.decelRpmS = 60; move.currentMa = 800;
+    CHECK(rig.queue.startDemo(program, 10).code == 202);
+    tick(rig, 20); tick(rig, 21); tick(rig, 22);
+    CHECK(rig.queue.state() == QueueState::Done);
+    CHECK(opcodeFrames(0x9A) == 1);
+    CHECK(opcodeFrames(0xCD) == 1);
+    CHECK(opcodeFrames(0xFE) == 0);
+
+    QueueRig failed;
+    failed.begin();
+    failed.motor.setUnverifiedMode(true);
+    CHECK(startQueue(failed,
+        "sync begin\nmove 1 90 deg 100 200 200 800\n"
+        "move 2 90 deg 100 200 200 800\nsync end\n", 1, 10).code == 202);
+    tick(failed, 20);
+    failNextMoveTx = true;
+    tick(failed, 21);
+    CHECK(failed.queue.state() == QueueState::Failed);
+    CHECK(has(status(failed), "tx_failed"));
+    CHECK(opcodeFrames(0xFF) == 0);
+    CHECK(opcodeFrames(0xFE) == 0);
+}
+
+static void test_unverified_switch_releases_old_wait_and_sync_without_stop() {
+    QueueRig waitRig;
+    waitRig.begin();
+    CHECK(startQueue(waitRig, "home 1 2 await\nstop 1\n", 1, 10).code == 202);
+    tick(waitRig, 20);
+    CHECK(waitRig.queue.state() == QueueState::Running);
+    waitRig.motor.setUnverifiedMode(true);
+    tick(waitRig, 21); // release old Motion wait, no CAN
+    CHECK(opcodeFrames(0xFE) == 0);
+    tick(waitRig, 22); // explicit stop
+    CHECK(opcodeFrames(0xFE) == 1);
+
+    QueueRig syncRig;
+    syncRig.begin();
+    SyncSettings settings;
+    settings.tolerance.progress = .2;
+    settings.tolerance.timeMs = 50;
+    settings.feedbackTimeoutMs = 5000;
+    settings.prepareTimeoutMs = 10000;
+    settings.stopTimeoutMs = 2000;
+    settings.responseBudgetMs = 20;
+    settings.completionTenths = 2;
+    CHECK(syncRig.queue.setSyncSettings(settings));
+    CHECK(startQueue(syncRig,
+        "sync begin trigger\nmove 6 360 deg 1 60 60 800\n"
+        "move 7 -180 deg 1 60 60 800\nsync end\n", 1, 10).code == 202);
+    tick(syncRig, 20); // verified Sync preflight begins
+    CHECK(has(status(syncRig), "\"phase\":\"checking\""));
+    syncRig.motor.setUnverifiedMode(true);
+    tick(syncRig, 21); // no new preflight: cached CD 6
+    tick(syncRig, 22); // pacing
+    tick(syncRig, 23); // cached CD 7
+    tick(syncRig, 25); // one FF
+    tick(syncRig, 26);
+    CHECK(syncRig.queue.state() == QueueState::Done);
+    CHECK(opcodeFrames(0xCD) == 2);
+    CHECK(opcodeFrames(0xFF) == 1);
+    CHECK(opcodeFrames(0xFE) == 0);
+    CHECK(has(status(syncRig), "\"motionComplete\":false"));
+}
+
+static void test_local_cancel_never_transmits_can() {
+    QueueRig rig;
+    rig.begin();
+    rig.motor.setUnverifiedMode(true);
+    CHECK(startQueue(rig, "wait 100\nmove 1 90 deg\n", 1, 10).code == 202);
+    tick(rig, 20);
+    CHECK(rig.queue.cancelLocal("external_stop"));
+    tick(rig, 200);
+    CHECK(rig.queue.state() == QueueState::Cancelled);
+    CHECK(capturedTX.empty());
+
+    QueueRig sync;
+    sync.begin();
+    sync.motor.setUnverifiedMode(true);
+    CHECK(startQueue(sync,
+        "sync begin\nmove 1 90 deg 100 200 200 800\n"
+        "move 2 90 deg 100 200 200 800\nsync end\n", 1, 10).code == 202);
+    tick(sync, 20); tick(sync, 21); // one cached CD has been sent
+    CHECK(sync.queue.unverifiedSyncInFlight());
+    const size_t before = capturedTX.size();
+    CHECK(sync.queue.cancelLocal("external_stop"));
+    CHECK(!sync.queue.unverifiedSyncInFlight());
+    tick(sync, 100);
+    CHECK(capturedTX.size() == before); // no other CD, FF or automatic FE
+    CHECK(opcodeFrames(0xFF) == 0);
+
+    QueueRig clear;
+    clear.begin();
+    clear.motor.setUnverifiedMode(true);
+    CHECK(startQueue(clear, "wait 100\nmove 1 90 deg\n", 1, 10).code == 202);
+    tick(clear, 20);
+    CHECK(clear.queue.clearControlState().code == 200);
+    CHECK(clear.queue.state() == QueueState::Idle);
+    CHECK(capturedTX.empty());
+}
+
+static void test_unverified_helix_keeps_encoding_but_skips_tolerance_gate() {
+    QueueRig rig;
+    rig.begin();
+    rig.rotation.set(2, 40.0);
+    const char* text = "helix 1 2 0.12345 2 1 1 -1 1 60 60 800 0.0000000001";
+    QueueProgram parsed{};
+    QueueError error;
+    CHECK(!parseQueueProgram(text, std::strlen(text), rig.rotation, parsed, error));
+    CHECK(has(error.message, "helix_geometry_quantization_tolerance"));
+    CHECK(parseQueueProgram(text, std::strlen(text), rig.rotation, parsed, error, true));
+    CHECK(parsed.count == 4);
+    rig.motor.setUnverifiedMode(true);
+    CHECK(startQueue(rig, text, 1, 10).code == 202);
+    tick(rig, 20); tick(rig, 21); tick(rig, 23); tick(rig, 25); tick(rig, 26);
+    CHECK(rig.queue.state() == QueueState::Done);
+    CHECK(opcodeFrames(0xCD) == 2);
+    CHECK(opcodeFrames(0xFF) == 1);
+}
+
+static void test_unverified_structured_fields_use_wire_widths_without_wrap() {
+    QueueRig rig;
+    rig.begin();
+    rig.motor.setUnverifiedMode(true);
+    const char* valid =
+        "move 0 0 deg 6553.5 65535 65535 65535\n"
+        "home 1 255\n"
+        "torque 1 -65535 0 6553.5 65535\n"
+        "velocity 1 -6553.5 0 65535 65535\n"
+        "wait 0\n";
+    CHECK(startQueue(rig, valid, 1, 10).code == 202);
+    for (uint32_t now = 20; now < 28; ++now) tick(rig, now);
+    CHECK(rig.queue.state() == QueueState::Done);
+    CHECK(opcodeFrames(0xCD) == 1);
+    CHECK(opcodeFrames(0x9A) == 1);
+    CHECK(opcodeFrames(0xC5) == 1);
+    CHECK(opcodeFrames(0xC6) == 1);
+    CHECK(opcodeFrames(0xFE) == 0); // explicit duration 0 has no timed stop
+    uint8_t payload[30] = {};
+    size_t length = 0;
+    CHECK(logicalPayloadFor(0, 0xCD, payload, length));
+    CHECK(length == 17);
+    if (length == 17) {
+        CHECK(payload[6] == 0xFF && payload[7] == 0xFF); // u16 speed
+        CHECK(payload[14] == 0xFF && payload[15] == 0xFF); // u16 current
+    }
+
+    const char* invalid[] = {
+        "move 1 1 deg 6553.6", "move 1 1 deg 1 65536",
+        "move 1 1 deg 1 1 1 65536", "home 1 256",
+        "torque 1 -65536", "velocity 1 6553.6",
+        "velocity 1 1 0 65535 65536",
+        "move 1 0.05 deg", "move 1 1 deg 0.05",
+        "torque 1 100 0 0.05", "velocity 1 0.05",
+        "helix 1 2 1 2 1 1 -1 0.05 60 60 800 1"
+    };
+    rig.rotation.set(2, 40.0);
+    QueueProgram parsed{};
+    QueueError error;
+    for (const char* command : invalid)
+        CHECK(!parseQueueProgram(command, std::strlen(command), rig.rotation,
+                                 parsed, error, true));
+    CHECK(parseQueueProgram("move 1 214748364.7 deg 6553.5",
+                            std::strlen("move 1 214748364.7 deg 6553.5"),
+                            rig.rotation, parsed, error, true));
+    CHECK(parsed.count == 1 && parsed.steps[0].distanceTenths == INT32_MAX);
+    CHECK(parseQueueProgram("move 1 -214748364.7 deg 0",
+                            std::strlen("move 1 -214748364.7 deg 0"),
+                            rig.rotation, parsed, error, true));
+    CHECK(parsed.count == 1 && parsed.steps[0].distanceTenths == -INT32_MAX);
+
+    QueueRig atomic;
+    atomic.begin();
+    atomic.motor.setUnverifiedMode(true);
+    CHECK(startQueue(atomic, "move 1 90 deg\nhex 01 FE 00\n", 1, 10).code == 400);
+    CHECK(atomic.queue.lastErrorLine() == 2);
+    CHECK(capturedTX.empty());
+}
+
+static void test_unverified_raw_frames_keep_two_ms_gap() {
+    QueueRig rig;
+    rig.begin();
+    rig.motor.setUnverifiedMode(true);
+    CHECK(startQueue(rig, "hex 01 FE 6B\nhex 02 FE 6B\n", 1, 10).code == 202);
+    tick(rig, 20);
+    CHECK(opcodeFrames(0xFE) == 1);
+    tick(rig, 21);
+    CHECK(opcodeFrames(0xFE) == 1);
+    tick(rig, 22);
+    CHECK(opcodeFrames(0xFE) == 2);
+    tick(rig, 23);
+    CHECK(rig.queue.state() == QueueState::Done);
+    CHECK(capturedTX.size() == 2);
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -1601,6 +1889,13 @@ int main() {
     const TestCase tests[] = {
         {"cross-entry enable and wait preserve observations", test_cross_entry_enable_and_wait_preserve_observations},
         {"absolute demo await from nonzero position", test_demo_absolute_await_from_nonzero_position},
+        {"unverified await/wait/sync exact wire without RX", test_unverified_program_await_wait_and_sync_exact_wire},
+        {"unverified built-in Demo await and Sync TX failure", test_unverified_demo_await_and_tx_failure},
+        {"mode switch releases old await and Sync without stop", test_unverified_switch_releases_old_wait_and_sync_without_stop},
+        {"local queue cancellation emits no CAN", test_local_cancel_never_transmits_can},
+        {"unverified helix skips tolerance but keeps wire encoding", test_unverified_helix_keeps_encoding_but_skips_tolerance_gate},
+        {"unverified structured fields use u8/u16 without wrapping", test_unverified_structured_fields_use_wire_widths_without_wrap},
+        {"unverified raw frames preserve 2 ms spacing", test_unverified_raw_frames_keep_two_ms_gap},
         {"fast home idle after grace without running sample", test_fast_home_without_running_sample},
         {"broadcast enable and disable wire frames", test_broadcast_enable_frames},
         {"home RX ordering, same tick and rejection", test_home_rx_order_and_same_tick},

@@ -90,6 +90,19 @@ bool isStrictlyNewerThan(uint32_t stamp, uint32_t since) {
     return static_cast<int32_t>(stamp - since) > 0;
 }
 
+// Typed values must fit the vendor's integer wire fields. Quantities that
+// would be rounded, clipped or wrapped are refused instead of silently changed.
+bool encodeWireQuantity(float value, double scale, uint32_t maximum, uint32_t& out) {
+    if (!isFiniteNumber(value) || value < 0) return false;
+    const double scaled = static_cast<double>(value) * scale;
+    if (scaled > static_cast<double>(maximum) + 0.05) return false;
+    const double rounded = floor(scaled + 0.5);
+    if (rounded > static_cast<double>(maximum) || fabs(scaled - rounded) > 0.05)
+        return false;
+    out = static_cast<uint32_t>(rounded);
+    return true;
+}
+
 const char* busStateName(CanControllerState state) {
     switch (state) {
         case CanControllerState::Unavailable: return "unavailable";
@@ -132,6 +145,13 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
     const uint32_t now = millis();
     queueDiagnostics_.poll(now);
     refreshBusStatus();
+
+    if (unverifiedMode_) {
+        // RX remains available for display and raw diagnostics. No old manual
+        // deadline, stop proof or query lease is allowed to generate CAN work.
+        if (canReady()) drainRx(now);
+        return;
+    }
 
     if (busState_ == CanControllerState::BusOff) {
         // No auto-resume: latch the fault, invalidate every pending/confirmed
@@ -186,7 +206,7 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
 void MotorControl::watch(uint8_t id) {
     if (id == 0) return;
     selectedId_ = id;
-    if (!autoQueriesEnabled_) return;
+    if (!autoQueriesEnabled_ || unverifiedMode_) return;
     const uint8_t fields[]={0x36,0x35,0x3A};
     for (uint8_t field:fields)
         bus_.demandQuery(id,field,CanQueryScheduler::Page,600,2000,0,millis());
@@ -196,6 +216,42 @@ void MotorControl::setAutoQueriesEnabled(bool enabled) {
     autoQueriesEnabled_ = enabled;
     if (!enabled) bus_.releaseQueries(CanQueryScheduler::Page);
     else if (selectedId_) watch(selectedId_);
+}
+
+void MotorControl::setUnverifiedMode(bool enabled) {
+    if (unverifiedMode_ == enabled) return;
+    if (enabled) {
+        if (hasActiveMotion() || operationBusy())
+            unverifiedMotionOutstanding_ = true;
+        // End local supervision without adding a stop/abort to the wire. The
+        // former handle is superseded, not reported as reached or physically
+        // stopped. Keep raw observations and historical diagnosis for display.
+        manual_.supersede();
+        experimentId_ = 0;
+        experimentStart_ = 0;
+        cancelConfig();
+        targetPollId_ = 0;
+        targetPollArmedMs_ = 0;
+        for (uint8_t owner = 0; owner < CanQueryScheduler::OwnerCount; ++owner)
+            bus_.releaseQueries(static_cast<CanQueryScheduler::Owner>(owner));
+        for (uint16_t id = 1; id < kNodeCount; ++id) {
+            NodeState& node = nodes_[id];
+            node.enablePending = false;
+            node.recoverFaultPending = false;
+            node.enableAck = false;
+            node.enableTimedOut = false;
+            node.enableConfirmed = false;
+            node.enableDesired = false;
+            node.stopRequested = false;
+            node.broadcastDisablePending = false;
+            node.broadcastDisableProofValid = false;
+            syncObserve_[id] = false;
+        }
+    }
+    unverifiedMode_ = enabled;
+    // Switching back does not invent a confirmed enable. The normal path must
+    // obtain its own fresh evidence. Outstanding motion remains sticky for OTA.
+    if (!enabled && autoQueriesEnabled_ && selectedId_) watch(selectedId_);
 }
 
 bool MotorControl::canReady() const {
@@ -264,7 +320,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
         QueueDiagnostics::functionBit(frame.data[0])) {
         queueDiagnostics_.response(id, frame.data[0], frame.data[1], now);
     }
-    if (!nodeOfInterest(id)) return;
+    if (!unverifiedMode_ && !nodeOfInterest(id)) return;
 
     const uint8_t function = frame.data[0];
     // Control replies. 0xFB/0xCB replies are the documented FB/CB answers
@@ -334,6 +390,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.flagsValid = true;
             node.flags = static_cast<uint8_t>(sample.value);
             node.flagsMs = now;
+            if (unverifiedMode_) break;
             if (node.broadcastDisablePending) {
                 if (node.flags & 1) {
                     node.broadcastDisableProofValid = false;
@@ -368,6 +425,13 @@ void MotorControl::handleAck(
     uint8_t id, uint8_t function, uint8_t status, uint32_t now) {
     NodeState& node = nodes_[id];
     const AckStatus ack = classifyAck(status);
+    if (unverifiedMode_) {
+        // Record only an observation. Neither a positive nor a rejected reply
+        // owns a command transaction in this mode.
+        node.lastAck = ackStatusToString(ack);
+        node.lastAckMs = now;
+        return;
+    }
     if (status == 0xE2 || status == 0xEE) node.demoRejected = true;
     if (id == queueObserveId_ && function == node.queueExpectedFunction) {
         // Unrelated late ACKs must not replace this action's evidence. Preserve
@@ -748,6 +812,7 @@ void MotorControl::querySent(void* context,uint8_t id,uint8_t field,bool sent) {
 }
 
 void MotorControl::dispatchQueries() {
+    if (unverifiedMode_) return;
     bus_.dispatchQueries(millis(),canReady(),querySent,this);
 }
 
@@ -869,6 +934,11 @@ bool MotorControl::sendStop(uint8_t id) {
 
 Result MotorControl::enable(uint8_t id, bool state) {
     const uint32_t now = millis();
+    if (unverifiedMode_) {
+        const uint8_t frame[] = {id, kFrameEnable, 0xAB,
+                                 static_cast<uint8_t>(state ? 1 : 0), 0, kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (id == 0) return Result{kCodeInvalid, "id_reserved"};
     if (state && configPending()) return Result{kCodeBusy, "config_pending"};
     // An operator's disable attempt withdraws recovery authority even if the
@@ -963,6 +1033,26 @@ Result MotorControl::enable(uint8_t id, bool state) {
 }
 
 Result MotorControl::move(const MoveRequest& request) {
+    if (unverifiedMode_) {
+        uint32_t angle = 0, speed = 0, accel = 0, decel = 0;
+        if (!isFiniteNumber(request.angleDeg) ||
+            !encodeWireQuantity(fabsf(request.angleDeg), 10.0, UINT32_MAX, angle) ||
+            !encodeWireQuantity(request.speedRpm, 10.0, UINT16_MAX, speed) ||
+            !encodeWireQuantity(request.accelRpmS, 1.0, UINT16_MAX, accel) ||
+            !encodeWireQuantity(request.decelRpmS, 1.0, UINT16_MAX, decel))
+            return Result{kCodeInvalid, "unrepresentable_value"};
+        const uint8_t frame[] = {
+            request.id, kFrameMove, static_cast<uint8_t>(request.angleDeg < 0 ? 1 : 0),
+            static_cast<uint8_t>(accel >> 8), static_cast<uint8_t>(accel),
+            static_cast<uint8_t>(decel >> 8), static_cast<uint8_t>(decel),
+            static_cast<uint8_t>(speed >> 8), static_cast<uint8_t>(speed),
+            static_cast<uint8_t>(angle >> 24), static_cast<uint8_t>(angle >> 16),
+            static_cast<uint8_t>(angle >> 8), static_cast<uint8_t>(angle),
+            kMotionModeRelativeToCurrent, 0,
+            static_cast<uint8_t>(request.currentMa >> 8), static_cast<uint8_t>(request.currentMa),
+            kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (configPending()) return Result{kCodeBusy, "config_pending"};
     const uint32_t now = millis();
     if (request.id == 0) return Result{kCodeInvalid, "id_reserved"};
@@ -1057,6 +1147,27 @@ Result MotorControl::move(const MoveRequest& request) {
 }
 
 Result MotorControl::directPosition(const DirectPositionRequest& request) {
+    if (unverifiedMode_) {
+        // All typed fields are already wire-sized integers. Preserve direction,
+        // mode, sync and current bytes even when the supervised path rejects them.
+        uint8_t frame[] = {
+            request.id, request.withCurrentLimit ? kFrameDirectLimit : kFrameDirect,
+            request.direction,
+            static_cast<uint8_t>(request.speedTenths >> 8),
+            static_cast<uint8_t>(request.speedTenths),
+            static_cast<uint8_t>(request.angleTenths >> 24),
+            static_cast<uint8_t>(request.angleTenths >> 16),
+            static_cast<uint8_t>(request.angleTenths >> 8),
+            static_cast<uint8_t>(request.angleTenths),
+            request.motionMode, static_cast<uint8_t>(request.sync ? 1 : 0),
+            static_cast<uint8_t>(request.currentMa >> 8),
+            static_cast<uint8_t>(request.currentMa), kProtocolChecksum};
+        if (!request.withCurrentLimit) {
+            frame[11] = kProtocolChecksum;
+            return submitUnverifiedLogical(frame, 12);
+        }
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (configPending()) return Result{kCodeBusy, "config_pending"};
     const uint32_t now = millis();
     if (request.id == 0) return Result{kCodeInvalid, "id_reserved"};
@@ -1192,6 +1303,10 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
 }
 
 Result MotorControl::home(uint8_t id, uint8_t mode) {
+    if (unverifiedMode_) {
+        const uint8_t frame[] = {id, kFrameHome, mode, 0, kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (configPending()) return Result{kCodeBusy, "config_pending"};
     const uint32_t now = millis();
     if (id == 0) return Result{kCodeInvalid, "id_reserved"};
@@ -1258,6 +1373,7 @@ Result MotorControl::home(uint8_t id, uint8_t mode) {
 }
 
 bool MotorControl::rawLogical(const uint8_t* bytes, uint8_t length) {
+    if (unverifiedMode_) return sendUnverifiedLogical(bytes, length);
     if (!bytes || length < 3 || length > 30) return false;
     // A raw frame must never interleave with a supervised operation, and the
     // bus must be healthy: nothing here stops or enables anything to make room.
@@ -1319,8 +1435,11 @@ String MotorControl::configJson() const {
 }
 
 bool MotorControl::rawCanFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length) {
-    if (length > kMaxCanDataBytes) return false;
-    if (!canReady() || operationBusy()) return false;
+    if (length > kMaxCanDataBytes || (length && !data) ||
+        (extended ? id > 0x1FFFFFFFu : id > 0x7FFu)) return false;
+    refreshBusStatus();
+    if (!canReady() || (!unverifiedMode_ && operationBusy())) return false;
+    if (unverifiedMode_) unverifiedMotionOutstanding_ = true;
     bus_.clearTransmissionError();
     const bool sent = bus_.sendRawFrame(id, extended, data, length);
     if (!sent || bus_.hasTransmissionError()) {
@@ -1331,6 +1450,12 @@ bool MotorControl::rawCanFrame(uint32_t id, bool extended, const uint8_t* data, 
 }
 
 bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
+    if (unverifiedMode_) {
+        queueTransport_ = true;
+        const bool sent = sendUnverifiedLogical(bytes, length);
+        queueTransport_ = false;
+        return sent;
+    }
     // Same wire path as the manual raw transport, but the queue is the only
     // owner while it runs: the existence of a manual operation or a latched fault
     // must not stop a program the operator asked to send.
@@ -1367,8 +1492,11 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
 }
 
 bool MotorControl::queueSendFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length) {
-    if (length > kMaxCanDataBytes) return false;
+    if (length > kMaxCanDataBytes || (length && !data) ||
+        (extended ? id > 0x1FFFFFFFu : id > 0x7FFu)) return false;
+    refreshBusStatus();
     if (!canReady()) return false;
+    if (unverifiedMode_) unverifiedMotionOutstanding_ = true;
     bus_.clearTransmissionError();
     queueTransport_=true;
     const bool sent = bus_.sendRawFrame(id, extended, data, length);
@@ -1406,6 +1534,13 @@ void MotorControl::noteRawTransmission(uint8_t id) {
 }
 
 bool MotorControl::broadcastAbortAll() {
+    if (unverifiedMode_) {
+        const uint8_t interrupt[] = {0, kFrameHomeInterrupt, 0x48, kProtocolChecksum};
+        const uint8_t stopFrame[] = {0, kFrameStop, 0x98, 0, kProtocolChecksum};
+        const bool aborted = sendUnverifiedLogical(interrupt, sizeof(interrupt));
+        const bool stopped = sendUnverifiedLogical(stopFrame, sizeof(stopFrame));
+        return aborted && stopped;
+    }
     // Abort local supervision first (an addressed 9C goes out for a live home),
     // then broadcast 9C for anything this board never supervised (a raw step may
     // have started homing), then the FE broadcast stop. Every part is best
@@ -1422,6 +1557,10 @@ bool MotorControl::broadcastAbortAll() {
 }
 
 Result MotorControl::stop(uint8_t id) {
+    if (unverifiedMode_) {
+        const uint8_t frame[] = {id, kFrameStop, 0x98, 0, kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (configPending() && config_.id() == id) cancelConfig();
     if (experimentId_ == id) experimentId_ = 0;
     const uint32_t now = millis();
@@ -1464,6 +1603,10 @@ Result MotorControl::stop(uint8_t id) {
 }
 
 Result MotorControl::stopAll() {
+    if (unverifiedMode_) {
+        const uint8_t frame[] = {0, kFrameStop, 0x98, 0, kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     cancelConfig();
     if (manual_.moveActive()) manual_.cancelMove(manual_.moveId());
     experimentId_ = 0;
@@ -1516,6 +1659,7 @@ Result MotorControl::stopAll() {
 
 Result MotorControl::broadcastEnable(bool enabled) {
     const uint8_t frame[] = {0, 0xF3, 0xAB, uint8_t(enabled ? 1 : 0), 0, 0x6B};
+    if (unverifiedMode_) return submitUnverifiedLogical(frame, sizeof(frame));
     if (enabled) {
         // Even a reported TX failure can leave delivery uncertain. Withdraw
         // earlier disable proof before trying a broadcast re-enable, and wait
@@ -1598,6 +1742,60 @@ Result MotorControl::broadcastEnable(bool enabled) {
     return Result{202, "broadcast_sent"};
 }
 
+bool MotorControl::unverifiedLogicalMayMove(const uint8_t* bytes, uint8_t length) {
+    if (length == 3) {
+        switch (bytes[1]) {
+            case 0x1A: case 0x1F: case 0x20: case 0x21: case 0x24:
+            case 0x26: case 0x27: case 0x31: case 0x32: case 0x33:
+            case 0x34: case 0x35: case 0x36: case 0x37: case 0x39:
+            case 0x3A: case 0x3B: case 0x3C: case 0x3D:
+                return false;
+            default: break;
+        }
+    }
+    if (length == 4 && ((bytes[1] == 0x42 && bytes[2] == 0x6C) ||
+                        (bytes[1] == 0x43 && bytes[2] == 0x7A) ||
+                        (bytes[1] == kFrameHomeInterrupt && bytes[2] == 0x48)))
+        return false;
+    if (length == 5 && bytes[1] == kFrameStop && bytes[2] == 0x98 && bytes[3] == 0)
+        return false;
+    if (length == 6 && bytes[1] == kFrameEnable && bytes[2] == 0xAB &&
+        bytes[3] == 0 && bytes[4] == 0) return false;
+    // Unknown opcodes and parameter writes are conservative: they might start
+    // motion or alter a moving motor, and the wire has no physical stop proof.
+    return true;
+}
+
+bool MotorControl::sendUnverifiedLogical(const uint8_t* bytes, uint8_t length) {
+    if (!bytes || length < 3 || length > 30 ||
+        bytes[length - 1] != kProtocolChecksum) return false;
+    refreshBusStatus();
+    if (!canReady()) return false;
+    if (unverifiedLogicalMayMove(bytes, length)) {
+        // Set before trying TX: an error after a partial multi-packet command
+        // cannot prove that no motor saw the first packet.
+        unverifiedMotionOutstanding_ = true;
+        invalidateTarget(bytes[0]);
+    }
+    bus_.clearTransmissionError();
+    const bool sent = bus_.sendRawLogical(bytes, length);
+    const bool failed = !sent || bus_.hasTransmissionError();
+    bus_.clearTransmissionError();
+    return !failed;
+}
+
+Result MotorControl::submitUnverifiedLogical(const uint8_t* bytes, uint8_t length) {
+    if (!bytes || length < 3 || length > 30 ||
+        bytes[length - 1] != kProtocolChecksum)
+        return Result{kCodeInvalid, "invalid_logical_frame"};
+    refreshBusStatus();
+    if (!canReady()) return Result{kCodeUnavailable,
+        busState_ == CanControllerState::BusOff ? "bus_off" : "can_unavailable"};
+    return sendUnverifiedLogical(bytes, length)
+        ? Result{kCodeQueued, "sent_unverified"}
+        : Result{kCodeUnavailable, "can_tx_failed"};
+}
+
 void MotorControl::takeQueueControl() {
     manual_.supersede();
     experimentId_ = 0;
@@ -1665,6 +1863,10 @@ String MotorControl::statusJson(uint8_t id) const {
     json += static_cast<unsigned int>(id);
     json += ",\"autoQueriesEnabled\":";
     json += autoQueriesEnabled_ ? "true" : "false";
+    json += ",\"unverifiedMode\":";
+    json += unverifiedMode_ ? "true" : "false";
+    json += ",\"unverifiedMotionOutstanding\":";
+    json += unverifiedMotionOutstanding_ ? "true" : "false";
     json += ",\"canReady\":";
     json += canReady() ? "true" : "false";
     json += ",\"busState\":\"";
@@ -1796,7 +1998,7 @@ String MotorControl::statusJson(uint8_t id) const {
 }
 
 void MotorControl::demoProbe(uint8_t id, uint8_t field) {
-    if (!id || !canReady()) return;
+    if (unverifiedMode_ || !id || !canReady()) return;
     // Demo refresh shares the same budget as await and sync. Direct 20 ms
     // probes reset lastTraffic continually and starve the awaited 0x33 target
     // query whenever the configured gap exceeds 20 ms.
@@ -1860,6 +2062,7 @@ bool MotorControl::setDebugLimits(const DebugLimits& limits) {
 }
 
 Result MotorControl::command(const uint8_t* b, uint8_t n) {
+    if (unverifiedMode_) return submitUnverifiedLogical(b, n);
     const CommandKind kind = validateCommand(b, n, limits_);
     if (kind == CommandKind::Invalid) {
         // A well-formed 0x4C write that only failed a policy bound gets its own

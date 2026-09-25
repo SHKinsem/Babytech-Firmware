@@ -12,6 +12,7 @@ with tempfile.TemporaryDirectory(prefix='babytech-motion-') as output:
     common = [compiler, '-std=c++11', '-Wall', '-Wextra', '-Werror',
         '-I', str(root / 'device-controller/include'), '-I', str(root / 'device-controller/lib/XMotor/src')]
     suites = [
+        ('wire-decimal', [str(root / 'tests/test_wire_decimal.cpp')]),
         ('program-runner', [str(root / 'tests/test_program_runner.cpp')]),
         ('query-scheduler', [str(root / 'tests/test_query_scheduler.cpp')]),
         ('manual-operation-supervisor', ['-I', str(root / 'device-controller/src'),

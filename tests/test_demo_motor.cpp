@@ -3,6 +3,7 @@
 #include <cassert>
 #include <iostream>
 #include <cstring>
+#include <utility>
 #include <vector>
 using namespace motion;
 using namespace fakecan;
@@ -86,8 +87,94 @@ static void test_demo_polling_does_not_starve_queue_await() {
     std::cout << "PASS demo and Page polling share budget: move await reaches home, Sync excludes other queries\n";
 }
 
+static void test_unverified_demo_sends_scripts_without_motor_rx() {
+    const char* noZeroJson = R"({"schema_version":1,"name":"no-home-bench","axes":[{"motor_id":1,"rotation_distance_mm":0}],"display":{"baby_name":"demo","formula_brand":"test","water_ml":0,"temperature_c":20},"initialization":{"timeout_ms":1000,"zero_axes":[],"commands":["enable 1"]},"stages":[{"id":"open_cap","timeout_ms":1000,"commands":["wait 1"]},{"id":"water","timeout_ms":1000,"commands":["wait 1"]},{"id":"powder","timeout_ms":1000,"commands":["wait 1"]},{"id":"close_cap","timeout_ms":1000,"commands":["wait 1"]},{"id":"mix","timeout_ms":1000,"commands":["wait 1"]}]})";
+    DemoConfig parsed; std::string parseError;
+    assert(parseDemoConfig(noZeroJson, std::strlen(noZeroJson), parsed, parseError));
+    assert(!parsed.configured);
+    assert(parseDemoConfig(noZeroJson, std::strlen(noZeroJson), parsed, parseError, true));
+    assert(parsed.configured);
+    fakeReset();
+    MotorControl motor; CommandQueue queue(motor); DeviceAPI api(motor, queue); Rotation rotation;
+    assert(motor.begin(4, 5, 500000));
+    api.setUnverifiedMode(true);
+    DemoConfig config;
+    config.configured = true;
+    config.axes.push_back({1, 10, 0, true});
+    config.initialization.commands = {"enable 1", "home 1 2 await", "disable 1"};
+    config.initialization.timeoutMs = 100;
+    config.stages[0].commands = {"enable 1", "move 1 10 deg 100 200 200 500 await", "wait 25", "disable 1"};
+    config.stages[0].timeoutMs = 10; // Explicit wait, not this old feedback watchdog, governs dispatch.
+    for (size_t i = 1; i < config.stages.size(); ++i) {
+        config.stages[i].commands = {"wait 1"};
+        config.stages[i].timeoutMs = 10;
+    }
+    DemoMotorExecutor executor(motor, queue, api, rotation);
+    DemoFlowController flow(executor);
+    assert(flow.apply(config));
+    executor.configure(flow.config());
+    assert(flow.initialize(1));
+    size_t seen = 0;
+    uint32_t moveAt = 0, disableAfterMoveAt = 0;
+    bool sawHome = false, sawMarker = false, sawQuery = false, sawImplicitStop = false;
+    std::vector<std::pair<uint8_t, uint8_t>> submitted;
+    const auto tick = [&](uint32_t now) {
+        setMillis(now);
+        motor.poll(false); executor.poll(now); queue.poll(now); flow.tick(now);
+        motor.dispatchQueries();
+        while (seen < capturedTX.size()) {
+            const auto frame = capturedTX[seen++];
+            const uint8_t op = frame.data[0];
+            if (op == 0x9A) sawHome = true;
+            if (op == 0xCD) moveAt = now;
+            if (op == 0xF3 && frame.length >= 3 && frame.data[2] == 0 && moveAt)
+                disableAfterMoveAt = now;
+            if (op == 0x50) sawMarker = true;
+            if (op == 0xFE) sawImplicitStop = true;
+            if (frame.length == 2 && frame.data[1] == 0x6B && CanQueryScheduler::supported(op))
+                sawQuery = true;
+            if ((frame.identifier & 0xFF) == 0 && (op == 0xF3 || op == 0x9A || op == 0xCD))
+                submitted.push_back({op, op == 0xF3 ? frame.data[2] : 0});
+        }
+    };
+    uint32_t now = 1;
+    for (; now < 500 && std::strcmp(flow.reason(), "initialization_commands_sent") != 0; ++now) tick(now);
+    assert(flow.stage() == DisplayStage::Idle && sawHome && !flow.referenceValid());
+    assert(flow.snapshot().stage == DisplayStage::Idle && flow.snapshot().startEnabled);
+    assert(std::strcmp(flow.reason(), "initialization_commands_sent") == 0);
+    assert(flow.start(now));
+    for (; now < 2000 && std::strcmp(flow.reason(), "scripts_sent") != 0; ++now) tick(now);
+    assert(flow.stage() == DisplayStage::Idle && flow.snapshot().stage == DisplayStage::Idle);
+    assert(std::strcmp(flow.reason(), "scripts_sent") == 0);
+    assert(moveAt && disableAfterMoveAt >= moveAt + 25);
+    const std::vector<std::pair<uint8_t, uint8_t>> expected = {
+        {0xF3, 1}, {0x9A, 0}, {0xF3, 0}, {0xF3, 1}, {0xCD, 0}, {0xF3, 0}};
+    assert(submitted == expected); // JSON order survives skipped awaits and the explicit wait.
+    assert(!sawMarker && !sawQuery && !sawImplicitStop);
+    assert(motor.queries().statistics().queries == 0);
+    failNextMoveTx = true;
+    assert(flow.single(0, now));
+    for (; now < 2100 && flow.stage() != DisplayStage::Error; ++now) tick(now);
+    assert(flow.stage() == DisplayStage::Error && flow.error() == DisplayError::CanFault);
+    assert(std::strcmp(flow.reason(), "execution_failed") == 0);
+    assert(!sawImplicitStop); // TX failure is reported; no unrequested FE is emitted.
+    assert(flow.start(now));
+    tick(now); // Submit the next Demo program, then an explicit stop interrupts it.
+    assert(queue.active());
+    const auto stopped = api.requestStopAll();
+    assert(stopped.accepted());
+    tick(++now);
+    assert(flow.stage() == DisplayStage::NotReady && !flow.busy());
+    assert(std::strcmp(flow.reason(), "script_cancelled") == 0);
+    const auto afterStop = capturedTX.size();
+    for (uint32_t later = now + 1; later < now + 50; ++later) tick(later);
+    assert(capturedTX.size() == afterStop); // No later Demo stage sends after Stop.
+    std::cout << "PASS unverified Demo and UART flow: no RX, marker, proof query or hidden stage timeout; explicit wait kept\n";
+}
+
 int main() {
     test_demo_polling_does_not_starve_queue_await();
+    test_unverified_demo_sends_scripts_without_motor_rx();
     fakeReset(); MotorControl motor; CommandQueue queue(motor); DeviceAPI api(motor,queue); Rotation rotation;
     assert(motor.begin(4,5,500000));
     QueueProgram unconfiguredSync;

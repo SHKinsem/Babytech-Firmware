@@ -61,9 +61,45 @@ static void test_disable_other_node_preserves_cancelled_owner() {
     assert(outcome==Outcome::Cancelled && fakecan::capturedTX.size()==count);
     endpoint.handle(disable,42,response); assert(fakecan::capturedTX.size()==count);
 }
+static void test_unverified_uart_preempts_future_queue_steps_without_extra_can() {
+    fakecan::fakeReset();motion::MotorControl motor;assert(motor.begin(4,5,500000));
+    motion::CommandQueue queue(motor);motion::DeviceAPI api(motor,queue);
+    QueueBoardMotion backend(motor,queue,api);Endpoint endpoint(backend);endpoint.begin(9);
+    Rotation rotation;const char* program="wait 1000\nenable 1";
+    motor.setUnverifiedMode(true);
+    assert(queue.start(program,strlen(program),1,rotation,0).code==202);
+    Frame response;Outcome outcome;Reason reason;
+    auto enable=exec(9,1,kMotor,1,kEnable);
+    endpoint.handle(enable,1,response);
+    assert(result(response,outcome,reason) && outcome==Outcome::Done);
+    assert(queue.active() && fakecan::capturedTX.size()==1);
+    auto disable=exec(9,2,kMotor,1,kDisable);
+    endpoint.handle(disable,2,response);
+    assert(result(response,outcome,reason) && outcome==Outcome::Done);
+    assert(queue.state()==motion::QueueState::Cancelled);
+    assert(fakecan::capturedTX.size()==2);
+    assert(fakecan::capturedTX.back().data[0]==0xF3 &&
+           fakecan::capturedTX.back().data[2]==0);
+    queue.poll(2000);assert(fakecan::capturedTX.size()==2);
+
+    fakecan::fakeReset();motion::MotorControl motor2;assert(motor2.begin(4,5,500000));
+    motion::CommandQueue queue2(motor2);motion::DeviceAPI api2(motor2,queue2);
+    QueueBoardMotion backend2(motor2,queue2,api2);Endpoint endpoint2(backend2);endpoint2.begin(9);
+    motor2.setUnverifiedMode(true);
+    assert(queue2.start(program,strlen(program),1,rotation,0).code==202);
+    Frame stop;stop.cmd=Cmd::Stop;stop.session=9;stop.sequence=1;
+    Writer w(stop.payload,sizeof(stop.payload));w.put(0,8);stop.length=w.size();
+    endpoint2.handle(stop,1,response);
+    assert(result(response,outcome,reason) && outcome==Outcome::Done);
+    assert(queue2.state()==motion::QueueState::Cancelled);
+    assert(fakecan::capturedTX.size()==1 && fakecan::capturedTX.back().data[0]==0xFE);
+    endpoint2.handle(stop,2,response);assert(fakecan::capturedTX.size()==1);
+    queue2.poll(2000);assert(fakecan::capturedTX.size()==1);
+}
 int main() {
     test_disable_preempts_queue_and_preserves_validation();
     test_disable_other_node_preserves_cancelled_owner();
+    test_unverified_uart_preempts_future_queue_steps_without_extra_can();
     fakecan::fakeReset();motion::MotorControl motor;assert(motor.begin(4,5,500000));
     motion::CommandQueue queue(motor);motion::DeviceAPI api(motor,queue);QueueBoardMotion backend(motor,queue,api);
     Endpoint endpoint(backend);const uint64_t boot=0x0102030405060708ULL;endpoint.begin(boot);

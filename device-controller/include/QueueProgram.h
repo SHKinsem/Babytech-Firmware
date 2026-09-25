@@ -4,10 +4,10 @@
 // The queue defaults to direct sending; move/home may explicitly await completion.
 // It translates readable lines
 // into CAN frames and sends them in order. Validation here is therefore limited
-// to what a *sender* needs - the grammar, the documented protocol field widths
-// and the resource bounds. Plain commands never ask for enable/feedback or apply
-// manual policy limits. Explicit sync/helix groups are checked separately by
-// SyncPlanner and SyncRuntime, including preparation and fault-generated stops.
+// to what a *sender* needs - grammar, field representability and fixed plan
+// storage. In the normal mode, documented drive limits and opt-in sync/helix
+// supervision also apply. Unverified mode uses the encoded field widths and
+// sends sync groups without response, trajectory or completion checks.
 //
 // One action per line, '#' starts a comment, commands and units are
 // case-insensitive. Numbers are parsed strictly (signed decimal, finite, integer
@@ -39,9 +39,9 @@ constexpr uint8_t kQueueMaxCanBytes = 8;
 constexpr double kQueueMinRotationMm = 0.000001;
 constexpr double kQueueMaxRotationMm = 1000000.0;
 
-// Documented wire ranges (X firmware, manual V1.0.5). These are protocol facts,
-// not board policy: the queue encodes what the user wrote as long as the field
-// can carry it. Nothing here reads DebugLimits.
+// Documented drive ranges (X firmware, manual V1.0.5) for normal parsing.
+// Unverified parsing permits the wider unsigned wire fields where applicable;
+// QueueStep still limits move distance to its signed int32 representation.
 constexpr uint32_t kQueueMaxSpeedTenths = 30000;  // 0..3000.0 RPM
 constexpr uint32_t kQueueMaxCurrentMa = 5000;     // 0000-1388 on every current field
 constexpr uint32_t kQueueMaxAccelRpmS = 65535;    // uint16 RPM/s
@@ -102,8 +102,8 @@ struct QueueStep {
     // home
     uint8_t mode = 0;
 
-    // torque (C5) / velocity (C6). `durationMs == 0` is the short form: the
-    // frame is sent and the next step follows immediately, with no implicit stop.
+    // torque (C5) / velocity (C6). `durationMs == 0` is the short form, also
+    // used by an explicit 0 in unverified mode: send and advance, no FE stop.
     int32_t torqueMa = 0;            // signed, |value| is transmitted
     int32_t velocityTenths = 0;      // signed 0.1 RPM
     uint16_t maxSpeedTenths = 0;     // C5 maximum speed
@@ -137,12 +137,13 @@ struct QueueProgram {
  *
  * `rotation` resolves mm steps; a move in mm for an id without a stored rotation
  * distance is rejected instead of guessed (the sender cannot invent a value it
- * does not have). No board policy is consulted: the plan is only checked against
- * the documented protocol field widths. On failure `program` is cleared and
+ * does not have). With unverified=true, drive policy and Sync tolerances are
+ * skipped while syntax, numeric conversion and overflow checks remain. On
+ * failure `program` is cleared and
  * `error` carries the stable reason plus the offending 1-based source line.
  */
 bool parseQueueProgram(const char* text, size_t length,
                        const QueueRotationSource& rotation, QueueProgram& program,
-                       QueueError& error);
+                       QueueError& error, bool unverified = false);
 
 }  // namespace motion

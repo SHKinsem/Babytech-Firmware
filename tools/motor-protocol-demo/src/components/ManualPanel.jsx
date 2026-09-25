@@ -40,6 +40,7 @@ function MoveField({ id, label, unit, value, error, help, range, onChange }) {
 
 export function ManualPanel({
   device = false,
+  unverifiedMode = false,
   values,
   errors,
   onChange,
@@ -70,7 +71,7 @@ export function ManualPanel({
           <span className="chip chip--soft">梯形位置 + 限流</span>
         </div>
         <p className="panel__desc">
-          {device ? '相对位置运动：真实使能应答和新鲜静止反馈到达后才能执行。' : '相对位置运动，与指令实验室共用 CD 组帧和模拟状态。'}
+          {device ? unverifiedMode ? '相对位置运动：按可编码的 CD 字段提交；不等待使能、静止或到位反馈。' : '相对位置运动：真实使能应答和新鲜静止反馈到达后才能执行。' : '相对位置运动，与指令实验室共用 CD 组帧和模拟状态。'}
         </p>
 
         <div className="form">
@@ -80,7 +81,7 @@ export function ManualPanel({
             unit="°"
             value={values.angle}
             error={errors.angle}
-            help={`正数幅值，内部按 0.1° 取整后作为 CD 指令的行程字；转向由「方向」决定。${device ? '上限来自板端已确认的「调试限制」。' : ''}`}
+            help={`非负幅值，内部按 0.1° 取整后作为 CD 指令的行程字；转向由「方向」决定。${device ? unverifiedMode ? '只检查 32 位字段可编码性。' : '上限来自板端已确认的「调试限制」。' : ''}`}
             range={`${limits.minAbsAngleDeg}..${limits.maxAbsAngleDeg}°`}
             onChange={(value) => onChange('angle', value)}
           />
@@ -119,7 +120,7 @@ export function ManualPanel({
             unit="RPM"
             value={values.speed}
             error={errors.speed}
-            help="按 0.1 RPM 下发（MotionCore kTenthsPerRpm）；上限来自板端已确认的「调试限制」。"
+            help={unverifiedMode ? '按 0.1 RPM 下发；只检查 16 位字段可编码性。' : '按 0.1 RPM 下发（MotionCore kTenthsPerRpm）；上限来自板端已确认的「调试限制」。'}
             range={`${limits.minSpeedRpm}..${limits.maxSpeedRpm} RPM`}
             onChange={(value) => onChange('speed', value)}
           />
@@ -129,7 +130,7 @@ export function ManualPanel({
             unit="RPM/s"
             value={values.accel}
             error={errors.accel}
-            help="整数 RPM/s；位置指令的加减速在线上不乘 10，上限来自板端已确认的「调试限制」。"
+            help={unverifiedMode ? '整数 RPM/s，直接编码到 16 位字段。' : '整数 RPM/s；位置指令的加减速在线上不乘 10，上限来自板端已确认的「调试限制」。'}
             range={`${limits.minAccelRpmS}..${limits.maxAccelRpmS} RPM/s`}
             onChange={(value) => onChange('accel', value)}
           />
@@ -164,7 +165,7 @@ export function ManualPanel({
                   目标 <strong>{prediction.ok && targetTenths != null ? formatPosition(targetTenths) : '—'}</strong>
                 </span>
                 <span className="prediction__item">
-                  时长 <strong>{prediction.ok ? `${prediction.durationMs} ms` : '—'}</strong>
+                  时长 <strong>{prediction.ok && prediction.durationMs > 0 ? `${prediction.durationMs} ms` : '—'}</strong>
                 </span>
                 <span className="prediction__item">
                   行程 <strong>{prediction.ok ? `${prediction.plan.clk} × 0.1°` : '—'}</strong>
@@ -173,7 +174,7 @@ export function ManualPanel({
                   方向 <strong>{Number(values.dir) === 1 ? '反向' : '正向'}</strong>
                 </span>
                 <span className="prediction__item">
-                  时长上限 <strong>{Math.round(limits.maxExpectedDurationMs / 1000)} s</strong>
+                  {unverifiedMode ? '发送门禁' : '时长上限'} <strong>{unverifiedMode ? '不按时长限制' : `${Math.round(limits.maxExpectedDurationMs / 1000)} s`}</strong>
                 </span>
               </div>
             </div>
@@ -182,7 +183,7 @@ export function ManualPanel({
           <p className="info-line">
             <GlyphInfo />
             <span>
-              运动需要电机处于使能状态；当前 {motor.enabled ? '已使能' : '未使能'}（地址 0x{hexByte(address)}）。
+              {unverifiedMode ? '不校验模式按指令提交，当前使能反馈只供观察：' : '运动需要电机处于使能状态；当前 '}{motor.enabled ? '已使能' : '未使能'}（地址 0x{hexByte(address)}）。
             </span>
           </p>
           {device && limitsConfirmed ? (
@@ -216,7 +217,7 @@ export function ManualPanel({
           ) : (
             <p className="actions__hint">
               <GlyphInfo />
-              <span>{device ? '停止请求独立发送，以新的静止反馈确认停止。' : '停止会作废未完成的模拟运动。'}</span>
+              <span>{device ? unverifiedMode ? '发送成功仅表示帧已提交，是否运动或停止请自行核对驱动反馈。' : '停止请求独立发送，以新的静止反馈确认停止。' : '停止会作废未完成的模拟运动。'}</span>
             </p>
           )}
         </div>

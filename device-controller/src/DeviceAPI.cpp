@@ -44,6 +44,24 @@ void copyText(char (&destination)[N], const char* source) {
     destination[N - 1] = '\0';
 }
 
+Result submitLiteral(MotorControl& motor, const uint8_t* bytes, uint8_t length) {
+    return motor.queueSendLogical(bytes, length)
+        ? Result{kCodeQueued, "sent_unverified"}
+        : Result{kCodeUnavailable, "can_tx_failed"};
+}
+
+bool rawImmediateStopLike(const uint8_t* bytes, uint8_t length) {
+    if (!bytes || length < 3 || length > 30 ||
+        bytes[length - 1] != kProtocolChecksum) return false;
+    if (bytes[1] == kFrameStop)
+        return length == 5 && bytes[2] == 0x98 && bytes[3] == 0;
+    if (bytes[1] == 0x9C)
+        return length == 4 && bytes[2] == 0x48;
+    if (bytes[1] == kFrameEnable)
+        return length == 6 && bytes[2] == 0xAB && bytes[3] == 0 && bytes[4] == 0;
+    return false;
+}
+
 } // namespace
 
 DeviceReceipt DeviceAPI::receipt(Result result, uint32_t runId, uint64_t operationId) {
@@ -71,45 +89,109 @@ void DeviceAPI::poll(uint32_t now, bool dispatchQueries) {
 }
 
 DeviceReceipt DeviceAPI::requestEnable(uint8_t id, bool enabled) {
-    if (id == 0) return receipt(Result{kCodeInvalid, "id_reserved"});
-    if (!enabled && queue_.active()) (void)queue_.cancel("disabled");
+    if (enabled && queue_.unverifiedSyncInFlight())
+        return receipt(Result{kCodeBusy, "sync_batch_active"});
+    if (!enabled && queue_.unverifiedSyncInFlight()) {
+        queue_.cancelLocal("disabled");
+        const uint8_t frame[] = {id, kFrameEnable, 0xAB, 0, 0, kProtocolChecksum};
+        return receipt(submitLiteral(motor_, frame, sizeof(frame)));
+    }
+    if (id == 0 && !motor_.unverifiedMode())
+        return receipt(Result{kCodeInvalid, "id_reserved"});
+    if (!enabled && queue_.active()) {
+        if (motor_.unverifiedMode()) queue_.cancelLocal("disabled");
+        else (void)queue_.cancel("disabled");
+    }
     return receipt(motor_.enable(id, enabled));
 }
 
 DeviceReceipt DeviceAPI::requestBroadcastEnable(bool enabled) {
-    if (!enabled && queue_.active()) (void)queue_.cancel("disabled_all");
+    if (enabled && queue_.unverifiedSyncInFlight())
+        return receipt(Result{kCodeBusy, "sync_batch_active"});
+    if (!enabled && queue_.unverifiedSyncInFlight()) {
+        queue_.cancelLocal("disabled_all");
+        const uint8_t frame[] = {0, kFrameEnable, 0xAB, 0, 0, kProtocolChecksum};
+        return receipt(submitLiteral(motor_, frame, sizeof(frame)));
+    }
+    if (!enabled && queue_.active()) {
+        if (motor_.unverifiedMode()) queue_.cancelLocal("disabled_all");
+        else (void)queue_.cancel("disabled_all");
+    }
     return receipt(motor_.broadcastEnable(enabled));
 }
 
 DeviceReceipt DeviceAPI::requestMove(const MoveRequest& request) {
+    if (queue_.unverifiedSyncInFlight())
+        return receipt(Result{kCodeBusy, "sync_batch_active"});
     const Result result = motor_.move(request);
     return receipt(result, 0, motor_.activeOperationId());
 }
 
 DeviceReceipt DeviceAPI::requestDirectPosition(const DirectPositionRequest& request) {
+    if (queue_.unverifiedSyncInFlight())
+        return receipt(Result{kCodeBusy, "sync_batch_active"});
     const Result result = motor_.directPosition(request);
     return receipt(result, 0, motor_.activeOperationId());
 }
 
 DeviceReceipt DeviceAPI::requestHome(uint8_t id, uint8_t mode) {
+    if (queue_.unverifiedSyncInFlight())
+        return receipt(Result{kCodeBusy, "sync_batch_active"});
     const Result result = motor_.home(id, mode);
     return receipt(result, 0, motor_.activeOperationId());
 }
 
 DeviceReceipt DeviceAPI::requestStop(uint8_t id) {
-    if (id == 0) return receipt(Result{kCodeInvalid, "id_reserved"});
-    if (queue_.active()) (void)queue_.cancel("stopped");
+    if (queue_.unverifiedSyncInFlight()) {
+        queue_.cancelLocal("stopped");
+        const uint8_t frame[] = {id, kFrameStop, 0x98, 0, kProtocolChecksum};
+        return receipt(submitLiteral(motor_, frame, sizeof(frame)));
+    }
+    if (id == 0 && !motor_.unverifiedMode())
+        return receipt(Result{kCodeInvalid, "id_reserved"});
+    if (queue_.active()) {
+        if (motor_.unverifiedMode()) queue_.cancelLocal("stopped");
+        else (void)queue_.cancel("stopped");
+    }
     return receipt(motor_.stop(id));
 }
 
 DeviceReceipt DeviceAPI::requestStopAll() {
+    if (queue_.unverifiedSyncInFlight()) {
+        queue_.cancelLocal("stopped");
+        const uint8_t frame[] = {0, kFrameStop, 0x98, 0, kProtocolChecksum};
+        return receipt(submitLiteral(motor_, frame, sizeof(frame)));
+    }
     // The queue cancellation already issues its abort + broadcast stop. Avoid
     // sending a second FE when this API is called without a source adapter.
+    if (motor_.unverifiedMode()) {
+        if (queue_.active()) queue_.cancelLocal("stopped");
+        return receipt(motor_.stopAll());
+    }
     if (queue_.active()) return receipt(queue_.cancel("stopped"));
     return receipt(motor_.stopAll());
 }
 
 DeviceReceipt DeviceAPI::requestRawCommand(const uint8_t* bytes, uint8_t length) {
+    if (motor_.unverifiedMode()) {
+        const bool validShape = bytes && length >= 3 && length <= 30 &&
+            bytes[length - 1] == kProtocolChecksum;
+        const bool stopLike = rawImmediateStopLike(bytes, length);
+        if (validShape && !stopLike && queue_.unverifiedSyncInFlight())
+            return receipt(Result{kCodeBusy, "sync_batch_active"});
+        if (stopLike && queue_.active())
+            queue_.cancelLocal("stopped");
+        return receipt(motor_.command(bytes, length));
+    }
+    if (queue_.unverifiedSyncInFlight()) {
+        if (rawImmediateStopLike(bytes, length)) {
+            queue_.cancelLocal("stopped");
+            return receipt(submitLiteral(motor_, bytes, length));
+        }
+        const CommandKind kind = validateCommand(bytes, length, motor_.debugLimits());
+        if (kind != CommandKind::Invalid)
+            return receipt(Result{kCodeBusy, "sync_batch_active"});
+    }
     const CommandKind kind = validateCommand(bytes, length, motor_.debugLimits());
     if (kind != CommandKind::Invalid && queue_.active()) {
         const bool stopLike = kind == CommandKind::Stop || kind == CommandKind::Interrupt ||
@@ -124,22 +206,42 @@ DeviceReceipt DeviceAPI::requestRawCommand(const uint8_t* bytes, uint8_t length)
 }
 
 bool DeviceAPI::requestDemoMarker(uint8_t id) {
+    if (queue_.unverifiedSyncInFlight()) return false;
     const uint8_t command[] = {id, 0x50, 1, 0x6B};
     return motor_.queueSendLogical(command, sizeof(command));
 }
 
 DeviceReceipt DeviceAPI::startProgram(const char* text, size_t length, long repeat,
-                                      const QueueRotationSource& rotation, uint32_t now) {
+                                       const QueueRotationSource& rotation, uint32_t now) {
+    if (queue_.unverifiedSyncInFlight())
+        return receipt(Result{kCodeBusy, "sync_batch_active"});
     const Result result = queue_.start(text, length, repeat, rotation, now);
     return receipt(result, queue_.runId());
 }
 
 DeviceReceipt DeviceAPI::startDemo(const QueueProgram& program, uint32_t now) {
+    if (queue_.unverifiedSyncInFlight())
+        return receipt(Result{kCodeBusy, "sync_batch_active"});
     const Result result = queue_.startDemo(program, now);
     return receipt(result, queue_.runId());
 }
 
 DeviceReceipt DeviceAPI::cancelProgram(const char* reason) {
+    if (queue_.unverifiedSyncInFlight()) {
+        const bool wasActive = queue_.cancelLocal(reason);
+        const uint8_t frame[] = {0, kFrameStop, 0x98, 0, kProtocolChecksum};
+        const Result stopped = submitLiteral(motor_, frame, sizeof(frame));
+        if (stopped.code != kCodeQueued) return receipt(stopped);
+        return receipt(Result{static_cast<uint16_t>(wasActive ? 202 : 200),
+                              wasActive ? "queue_cancelled" : "queue_idle"});
+    }
+    if (motor_.unverifiedMode()) {
+        const bool wasActive = queue_.cancelLocal(reason);
+        const Result stopped = motor_.stopAll();
+        if (stopped.code != kCodeQueued) return receipt(stopped);
+        return receipt(Result{static_cast<uint16_t>(wasActive ? 202 : 200),
+                              wasActive ? "queue_cancelled" : "queue_idle"});
+    }
     return receipt(queue_.cancel(reason));
 }
 
@@ -152,6 +254,8 @@ DeviceSnapshot DeviceAPI::readSnapshot(uint8_t id) const {
     result.sampledAtMs = millis();
     result.motorId = id;
     result.busReady = motor_.ready();
+    result.unverifiedMode = motor_.unverifiedMode();
+    result.unverifiedMotionOutstanding = motor_.unverifiedMotionOutstanding();
     result.manualBusy = motor_.operationBusy();
     result.hasActiveMotion = motor_.hasActiveMotion();
     result.stopping = motor_.stopping();

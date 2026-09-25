@@ -11,6 +11,26 @@ Reason mapResult(const motion::DeviceReceipt& r) {
 }
 }
 Reason BoardMotion::startMove(const Parameters& p) {
+    if (unverifiedMode()) {
+        if (!representableParameters(p)) return Reason::InvalidParam;
+        // Encode integer UART parameters directly. A float MoveRequest would
+        // round large int32 angles and silently change the outgoing command.
+        uint8_t frame[18]{}; size_t n=0;
+        const auto put16=[&](uint16_t value) {
+            frame[n++]=uint8_t(value>>8); frame[n++]=uint8_t(value);
+        };
+        const auto put32=[&](uint32_t value) {
+            frame[n++]=uint8_t(value>>24); frame[n++]=uint8_t(value>>16);
+            frame[n++]=uint8_t(value>>8); frame[n++]=uint8_t(value);
+        };
+        const uint32_t magnitude=p.angle<0 ? uint32_t(-int64_t(p.angle)) : uint32_t(p.angle);
+        frame[n++]=uint8_t(p.motor); frame[n++]=0xCD;
+        frame[n++]=p.angle<0 ? 1 : 0;
+        put16(uint16_t(p.accel)); put16(uint16_t(p.decel)); put16(uint16_t(p.speed));
+        put32(magnitude); frame[n++]=2; frame[n++]=0;
+        put16(uint16_t(p.current)); frame[n++]=0x6B;
+        return mapResult(api_.requestRawCommand(frame,uint8_t(n)));
+    }
     motion::MoveRequest r{uint8_t(p.motor),p.angle/10.0f,p.speed/10.0f,
         float(p.accel),float(p.decel),uint16_t(p.current)};
     if (motor_.hasFault()) return Reason::FaultActive;
@@ -24,6 +44,7 @@ Reason BoardMotion::enable(uint8_t id,bool desired) {
     return reason;
 }
 Outcome BoardMotion::operation(Reason& reason) const {
+    if (unverifiedMode()) { reason=Reason::None; return Outcome::Done; }
     const auto s=api_.readSnapshot(id_); reason=Reason::None;
     if (s.motor.fault || !s.busReady) { reason=Reason::FaultActive; return Outcome::Failed; }
     if (moving_) {
@@ -43,9 +64,11 @@ Outcome BoardMotion::operation(Reason& reason) const {
 void BoardMotion::stop() {
     since_=millis();
     const auto r=api_.requestStopAll(); stopSent_=r.code<300;
+    if (unverifiedMode()) return;
     for (uint16_t id=1;id<256;++id) stopTargets_[id]=api_.readMotorObservation(uint8_t(id)).stopPending;
 }
 bool BoardMotion::stopped() const {
+    if (unverifiedMode()) return stopSent_;
     if (!stopSent_ || !motor_.ready() || motor_.operationBusy()) return false;
     bool any=false; const uint32_t age=uint32_t(millis())-since_;
     for (uint16_t id=1;id<256;++id) if (stopTargets_[id]) {

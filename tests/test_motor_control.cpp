@@ -17,6 +17,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace motion;
 using namespace fakecan;
@@ -3005,6 +3006,155 @@ static void test_broadcast_disable_aborts_home_before_f3() {
     CHECK(rig.mc.snapshot(1).stopPending);
 }
 
+static std::vector<uint8_t> logicalFromTx(size_t first, size_t last, uint8_t id) {
+    std::vector<uint8_t> bytes;
+    if (first >= last) return bytes;
+    bytes.push_back(id);
+    bytes.push_back(capturedTX[first].data[0]);
+    for (size_t i = first; i < last; ++i) {
+        CHECK(x42sCanAddress(capturedTX[i].identifier) == id);
+        CHECK(capturedTX[i].data[0] == bytes[1]);
+        for (uint8_t j = 1; j < capturedTX[i].length; ++j)
+            bytes.push_back(capturedTX[i].data[j]);
+    }
+    return bytes;
+}
+
+static void test_unverified_mode_sends_typed_and_raw_without_evidence() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    CHECK(!rig.mc.unverifiedMode());
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeBusy);
+    rig.mc.setUnverifiedMode(true);
+    CHECK(rig.mc.unverifiedMode());
+    CHECK(status(rig, 1).find("\"unverifiedMode\":true") != std::string::npos);
+
+    setMillis(10);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    CHECK(!rig.mc.snapshot(1).enabled);
+    CHECK(!rig.mc.snapshot(1).enablePending);
+    MoveRequest move = moveRequest(1, 5000.0f);
+    move.currentMa = 6000; // Beyond policy, still fits the exact u16 wire field.
+    const size_t moveFirst = capturedTX.size();
+    CHECK(rig.mc.move(move).code == kCodeQueued);
+    const std::vector<uint8_t> moveWire = logicalFromTx(moveFirst, capturedTX.size(), 1);
+    const std::vector<uint8_t> expectedMove =
+        {1, 0xCD, 0, 0, 100, 0, 100, 1, 44, 0, 0, 0xC3, 0x50, 2, 0, 0x17, 0x70, 0x6B};
+    CHECK(moveWire == expectedMove);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.moveOutcome() == MotorControl::MoveOutcome::None);
+
+    DirectPositionRequest direct;
+    direct.id = 1;
+    direct.direction = 1;
+    direct.speedTenths = 400;
+    direct.angleTenths = 900;
+    direct.motionMode = 0;
+    direct.sync = true; // Cached form bypasses the supervised immediate-only gate.
+    direct.withCurrentLimit = true;
+    direct.currentMa = 6000;
+    const size_t directFirst = capturedTX.size();
+    CHECK(rig.mc.directPosition(direct).code == kCodeQueued);
+    const std::vector<uint8_t> directWire = logicalFromTx(directFirst, capturedTX.size(), 1);
+    const std::vector<uint8_t> expectedDirect =
+        {1, 0xCB, 1, 1, 144, 0, 0, 3, 132, 0, 1, 0x17, 0x70, 0x6B};
+    CHECK(directWire == expectedDirect);
+    CHECK(rig.mc.home(1, 255).code == kCodeQueued);
+    CHECK(!rig.mc.homeActive());
+
+    const uint8_t unknown[] = {1, 0x7E, 0x12, 0x34, 0x6B};
+    const size_t rawFirst = capturedTX.size();
+    CHECK(rig.mc.command(unknown, sizeof(unknown)).code == kCodeQueued);
+    CHECK(logicalFromTx(rawFirst, capturedTX.size(), 1) ==
+          std::vector<uint8_t>(unknown, unknown + sizeof(unknown)));
+    const uint8_t malformed[] = {1, 0x7E, 0x12, 0x34, 0};
+    CHECK(rig.mc.command(malformed, sizeof(malformed)).code == kCodeInvalid);
+    CHECK(rig.mc.unverifiedMotionOutstanding());
+    const uint8_t rawData[] = {0x7D, 0xAA, 0x55};
+    const size_t beforeRawCan = capturedTX.size();
+    CHECK(rig.mc.rawCanFrame(0x12A5u, true, rawData, sizeof(rawData)));
+    CHECK(capturedTX.size() == beforeRawCan + 1);
+    CHECK(capturedTX.back().identifier == 0x12A5u);
+    CHECK(capturedTX.back().length == sizeof(rawData));
+    CHECK(capturedTX.back().data[0] == rawData[0] &&
+          capturedTX.back().data[1] == rawData[1] &&
+          capturedTX.back().data[2] == rawData[2]);
+
+    injectRx(makePosition(1, 120));
+    injectRx(makeVelocity(1, 70));
+    setMillis(20);
+    rig.mc.poll();
+    CHECK(rig.mc.snapshot(1).positionValid);
+    CHECK(rig.mc.snapshot(1).velocityValid);
+    CHECK(!rig.mc.snapshot(1).enabled); // Observations are not admission proof.
+
+    rig.mc.watch(1);
+    const size_t noQueryFrom = capturedTX.size();
+    for (uint32_t t = 100; t <= 2000; t += 100) {
+        setMillis(t);
+        rig.mc.poll();
+        rig.mc.dispatchQueries();
+    }
+    CHECK(capturedTX.size() == noQueryFrom);
+    CHECK(!rig.mc.hasFault());
+}
+
+static void test_unverified_transition_and_transport_failure() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    setMillis(60);
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeQueued);
+    const uint64_t operationId = rig.mc.activeOperationId();
+    const size_t beforeMode = capturedTX.size();
+    rig.mc.setUnverifiedMode(true);
+    CHECK(capturedTX.size() == beforeMode); // Toggle itself sends no stop/abort.
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Superseded);
+    CHECK(!rig.mc.snapshot(1).enabled);
+    setMillis(100000);
+    rig.mc.poll();
+    CHECK(capturedTX.size() == beforeMode); // Old deadline cannot auto-stop.
+
+    failNextMoveTx = true;
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeUnavailable);
+    CHECK(capturedTX.size() == beforeMode); // No automatic FE or retry.
+    CHECK(rig.mc.unverifiedMotionOutstanding()); // Delivery may be uncertain.
+    CHECK(!rig.mc.hasFault());
+    CHECK(rig.mc.stopAll().code == kCodeQueued);
+    CHECK(rig.mc.unverifiedMotionOutstanding()); // FE is not physical stop proof.
+    rig.mc.setUnverifiedMode(false);
+    CHECK(!rig.mc.unverifiedMode());
+    CHECK(!rig.mc.snapshot(1).enabled);
+    CHECK(rig.mc.unverifiedMotionOutstanding());
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeBusy);
+}
+
+static void test_unverified_mode_bypasses_latched_fault_and_stop_wait() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    setMillis(60);
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeQueued);
+    injectRx(makeAck(1, kFrameMove, 0xEE));
+    setMillis(80);
+    rig.mc.poll();
+    CHECK(rig.mc.hasFault());
+    CHECK(rig.mc.snapshot(1).stopPending);
+    const size_t beforeMode = capturedTX.size();
+    rig.mc.setUnverifiedMode(true);
+    CHECK(capturedTX.size() == beforeMode);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.hasFault()); // Retained diagnosis, not a command gate.
+    const size_t beforeMove = capturedTX.size();
+    CHECK(rig.mc.move(moveRequest(1, 20)).code == kCodeQueued);
+    CHECK(capturedTX.size() > beforeMove);
+    CHECK(rig.mc.hasFault()); // No false recovery claim either.
+    const size_t afterMove = capturedTX.size();
+    setMillis(5000);
+    rig.mc.poll();
+    CHECK(capturedTX.size() == afterMove); // No stop after stale feedback/ACK.
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -3012,6 +3162,9 @@ struct TestCase {
 
 int main() {
     const TestCase tests[] = {
+        {"unverified mode sends typed/raw bytes without evidence or auto queries", test_unverified_mode_sends_typed_and_raw_without_evidence},
+        {"unverified transition supersedes supervision and TX failure never auto-stops", test_unverified_transition_and_transport_failure},
+        {"unverified mode bypasses latched fault and stop wait without auto recovery", test_unverified_mode_bypasses_latched_fault_and_stop_wait},
         {"broadcast disable keeps state until flags and stop proof", test_broadcast_disable_waits_for_driver_and_stop_proof},
         {"repeated disabled flags do not starve five-axis stop proof", test_broadcast_disable_repeated_flags_do_not_starve_stop_proof},
         {"five-axis broadcast disable recovers under the shared 10 qps budget", test_broadcast_disable_recovers_under_shared_10_qps_budget},

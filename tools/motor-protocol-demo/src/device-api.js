@@ -316,6 +316,80 @@ export const isLimitDependentOpcode = (op) => LIMIT_DEPENDENT_OPS.includes(op);
 
 export const stateLabels = { idle:'板端未报告受监督动作', disabled:'板端未确认使能', enabled:'已使能', moving:'运动中', homing:'回零中', stop_requested:'等待停止反馈', enable_pending:'等待使能应答', fault:'故障', experiment_running:'试验运行中' };
 
+/** A missing or malformed mode answer must never be mistaken for "off". */
+export function readUnverifiedMode(payload) {
+  return typeof payload?.unverifiedMode === 'boolean' ? payload.unverifiedMode : null;
+}
+
+/** Raw laboratory command for direct-send mode: retain every byte, including
+ * broadcast address 00 and unknown opcodes. HTTP /api/command accepts 3..30
+ * bytes; the final 6B is part of the X logical-frame wire shape. */
+export function parseUnverifiedLogicalHex(raw) {
+  const source = String(raw ?? '').replace(/[\s,]+/g,'');
+  const errors = [];
+  if (!source || /[^0-9a-fA-F]/.test(source) || source.length % 2) errors.push('请输入完整的十六进制字节（每字节两位）');
+  const bytes = errors.length ? [] : Array.from({length:source.length / 2},(_,i)=>parseInt(source.slice(i*2,i*2+2),16));
+  if (!errors.length && (bytes.length < 3 || bytes.length > 30)) errors.push('逻辑指令需要 3..30 字节');
+  if (!errors.length && bytes.at(-1) !== 0x6b) errors.push('X 逻辑指令末字节必须是 6B');
+  return {ok:errors.length===0,errors,bytes};
+}
+
+export const UNVERIFIED_MANUAL_LIMITS = {
+  minAbsAngleDeg:0, maxAbsAngleDeg:0xffffffff / 10,
+  minSpeedRpm:0, maxSpeedRpm:0xffff / 10,
+  minAccelRpmS:0, maxAccelRpmS:0xffff,
+  minCurrentMa:0, maxCurrentMa:0xffff,
+  maxExpectedDurationMs:0, // a duration is never used to gate direct send
+};
+
+/**
+ * The direct-send manual form keeps only field syntax and CD wire widths. It
+ * deliberately does not use saved board limits, feedback, or a time estimate
+ * as permission to send. The board sends these exact encoded values.
+ */
+export function planUnverifiedManualMove(input) {
+  const errors = {};
+  const field = (key, label, scale, max, integer = false) => {
+    const raw = String(input?.[key] ?? '').trim();
+    const value = Number(raw);
+    if (!raw || !Number.isFinite(value) || value < 0 || (integer && !Number.isInteger(value))) {
+      errors[key] = `${label}需为${integer ? '非负整数' : '非负有限数字'}`;
+      return null;
+    }
+    const encoded = value * scale;
+    if (!Number.isSafeInteger(encoded) || value > max / scale || encoded > max) {
+      errors[key] = `${label}必须精确落在协议单位上，且不超过 ${max / scale}`;
+      return null;
+    }
+    return encoded;
+  };
+  const clk = field('angle', '相对角度', 10, 0xffffffff);
+  const vel = field('speed', '速度', 10, 0xffff);
+  const accel = field('accel', '加速度', 1, 0xffff, true);
+  const decel = field('decel', '减速度', 1, 0xffff, true);
+  const maxCurrentMa = field('current', '电流上限', 1, 0xffff, true);
+  const dir = Number(input?.dir) === 1 ? 1 : 0;
+  if (Object.keys(errors).length) return {ok:false, errors, plan:null, deltaTenths:0, durationMs:0};
+  return {
+    ok:true, errors:{},
+    plan:{dir, accel, decel, vel, clk, motionMode:2, sync:0, maxCurrentMa},
+    deltaTenths:dir ? -clk : clk,
+    // Observation only. Zero means the estimate is unavailable, never refused.
+    durationMs:expectedDurationMs(clk, vel, accel, decel),
+  };
+}
+
+/** CD immediate position command, using the accepted wire values verbatim. */
+export function encodeUnverifiedManualMove(address, plan) {
+  if (!Number.isInteger(address) || address < 1 || address > 255 || !plan) return {bytes:[], labels:[]};
+  const word = n => [(n >>> 8) & 0xff, n & 0xff];
+  const long = n => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+  return {
+    bytes:[address, 0xcd, plan.dir, ...word(plan.accel), ...word(plan.decel), ...word(plan.vel), ...long(plan.clk), 2, 0, ...word(plan.maxCurrentMa), 0x6b],
+    labels:[],
+  };
+}
+
 /** The enable bit can outlive a stop or broadcast-disable request. Give the
  * unresolved operation priority over that last confirmed bit in the UI. */
 export function enableStatusPresentation(status, connected) {
@@ -541,6 +615,7 @@ export function queueConflictReason(bytes, { running = false, unknown = false } 
 }
 
 export const errorLabels = {
+  control_mode_busy:'队列或内置 Demo 正在运行，请等待脚本发送结束或先停止，再关闭不校验模式',
   sync_cache_isolation_unverified:'旧版固件要求人工隔离确认；请更新控制板固件。当前页面无需勾选人工许可。',
   driver_disabled:'驱动器反馈已失能，运动已终止',
   move_timeout:'在配置的单步时长内未确认到位，请查看失败时的目标与实际位置',

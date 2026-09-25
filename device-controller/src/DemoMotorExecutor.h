@@ -10,12 +10,12 @@ public:
                       bool (*externalAvailable)() = nullptr)
         : motor_(motor), queue_(queue), api_(api), rotation_(rotation), externalAvailable_(externalAvailable) {}
     void configure(const DemoConfig& config) {
-        motor_.releaseQueries(CanQueryScheduler::Demo);
-        for (unsigned id = 1; id < 256; ++id) motor_.demoWatch(static_cast<uint8_t>(id), false);
-        for (const auto& axis : config.axes) motor_.demoWatch(axis.id, true);
         config_ = &config; postStop_ = false; probe_ = 0; armed_.fill(false);
+        setProbeMode(api_.unverifiedMode());
     }
     void poll(uint32_t now) {
+        if (probeUnverified_ != api_.unverifiedMode()) setProbeMode(api_.unverifiedMode());
+        if (probeUnverified_) return;
         if (!config_ || config_->axes.empty() || uint32_t(now - probeAt_) < 20) return;
         probeAt_ = now;
         const auto count = config_->axes.size();
@@ -37,18 +37,20 @@ public:
             }
         }
     }
+    bool unverifiedMode() const override { return api_.unverifiedMode(); }
     bool healthy() const override {
+        if (unverifiedMode()) return true;
         if (!motor_.ready() || motor_.hasFault()) return false;
         if (config_) for (const auto& a : config_->axes)
             if (motor_.demoDriverFault(a.id) || driverRestarted(a.id)) return false;
         return !markerFailed_;
     }
     bool available() const override {
-        return !queue_.active() && !motor_.operationBusy() &&
-            (!externalAvailable_ || externalAvailable_());
+        return !queue_.active() && (unverifiedMode() ||
+            (!motor_.operationBusy() && (!externalAvailable_ || externalAvailable_())));
     }
     bool configurationValid() const override {
-        return !config_ || demoRotationMatches(*config_, rotation_);
+        return unverifiedMode() || !config_ || demoRotationMatches(*config_, rotation_);
     }
     DemoEvidence evidence(uint8_t id) const override {
         const auto s = motor_.snapshot(id);
@@ -64,25 +66,28 @@ public:
     }
     bool start(const DemoScript& script, bool initializing,
                const std::array<int32_t, 256>& zeros, uint32_t now) override {
-        if (!config_ || !healthy() || !demoRotationMatches(*config_, rotation_)) return false;
+        if (!config_ || !healthy() || !configurationValid()) return false;
         std::unique_ptr<QueueProgram> program(new QueueProgram);
         std::string error;
-        if (!buildDemoProgram(script, *config_, initializing, zeros, *program, error)) return false;
+        if (!buildDemoProgram(script, *config_, initializing, zeros, *program, error, unverifiedMode())) return false;
         postStop_ = false;
         const bool accepted = api_.startDemo(*program, now).code < 300;
-        if (accepted && initializing) {
+        if (accepted && initializing && !unverifiedMode()) {
             armed_.fill(false); marking_ = true; markIndex_ = 0; markSent_ = false;
         }
         return accepted;
     }
     DemoExecution execution() const override {
-        if (markerFailed_) return DemoExecution::Failed;
+        if (markerFailed_ && !unverifiedMode()) return DemoExecution::Failed;
+        if (unverifiedMode()) return queue_.active() ? DemoExecution::Running :
+            queue_.state() == QueueState::Done ? DemoExecution::Done :
+            queue_.state() == QueueState::Cancelled ? DemoExecution::Cancelled : DemoExecution::Failed;
         return queue_.active() || (marking_ && queue_.state() == QueueState::Done) ? DemoExecution::Running :
             queue_.state() == QueueState::Done ? DemoExecution::Done : DemoExecution::Failed;
     }
     DisplayError failureError() const override {
         const char* reason = queue_.message();
-        return !healthy() || std::strcmp(reason, "tx_failed") == 0 ||
+        return (!unverifiedMode() && !healthy()) || std::strcmp(reason, "tx_failed") == 0 ||
             std::strcmp(reason, "driver_rejected") == 0 || std::strcmp(reason, "driver_command_error") == 0 ||
             std::strcmp(reason, "home_failed") == 0 ? DisplayError::CanFault : DisplayError::Unknown;
     }
@@ -98,7 +103,21 @@ public:
         stopAt_ = millis(); postStop_ = true; markerFailed_ = false; marking_ = false;
         return sent;
     }
+    void cancelLocal() override {
+        marking_ = false;
+        markSent_ = false;
+        markerFailed_ = false;
+        postStop_ = false;
+        motor_.releaseQueries(CanQueryScheduler::Demo);
+    }
 private:
+    void setProbeMode(bool unverified) {
+        probeUnverified_ = unverified;
+        motor_.releaseQueries(CanQueryScheduler::Demo);
+        for (unsigned id = 1; id < 256; ++id) motor_.demoWatch(static_cast<uint8_t>(id), false);
+        if (!unverified && config_)
+            for (const auto& axis : config_->axes) motor_.demoWatch(axis.id, true);
+    }
     bool driverRestarted(uint8_t id) const {
         uint8_t flags; uint32_t age;
         return armed_[id] && motor_.demoFlags(id, flags, age) && !(flags & 0x80);
@@ -109,6 +128,7 @@ private:
     const QueueRotationSource& rotation_;
     bool (*externalAvailable_)() = nullptr;
     const DemoConfig* config_ = nullptr;
+    bool probeUnverified_ = false;
     size_t probe_ = 0;
     uint32_t probeAt_ = 0, stopAt_ = 0;
     bool postStop_ = false;

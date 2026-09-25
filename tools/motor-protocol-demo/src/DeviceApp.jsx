@@ -19,7 +19,7 @@ import { planManualMove, MANUAL_DEFAULTS } from './simulation.js';
 import { decodeCanReply, decodeBulkCanReply } from './manual-reference.js';
 import { deviceDefaults, experimentWindowText, limitsEqual, limitsToManualLimits, readLimitsPayload } from './device-limits.js';
 import { readDrafts, writeDrafts, safeStorage, getForm, putForm, lastVariantFor, getManual, putManual, putSelection, pickFields } from './device-drafts.js';
-import { request, supportReason, directPositionBoardNote, isMotionOpcode, isLimitDependentOpcode, stateLabels, enableStatusPresentation, errorLabels, readQueueStatus, queueProgressText, homeStatusText, queueConflictReason } from './device-api.js';
+import { request, supportReason, directPositionBoardNote, isMotionOpcode, isLimitDependentOpcode, stateLabels, enableStatusPresentation, errorLabels, readQueueStatus, queueProgressText, homeStatusText, queueConflictReason, readUnverifiedMode, parseUnverifiedLogicalHex, UNVERIFIED_MANUAL_LIMITS, planUnverifiedManualMove, encodeUnverifiedManualMove } from './device-api.js';
 
 const EMPTY = {id:0, enabled:false, online:false, positionDeg:null, speedRpm:null, currentMa:null};
 
@@ -76,15 +76,19 @@ const deviceNote = text => String(text || '')
   .filter(part => part && !SIMULATED_SENTENCE.test(part))
   .map(part => `${part}。`)
   .join('');
-const cleanItem = original => ({
+const cleanItem = (original, unverifiedMode = false) => ({
   ...original,
   note: original.id === 'passthroughPosition'
-    ? 'FB／CB 已接入板端位置监督，支持三种立即执行模式。相对上一目标需要驱动器的新鲜目标反馈；实际行程由板端校验。FB 不携带电流限制，使用驱动器自身设置；需要指定电流上限请选择 CB。'
+    ? unverifiedMode
+      ? 'FB／CB 按编码字节发送，不等待板端位置监督；模式 0/1/2 的动作结果请自行核对驱动器反馈。FB 不携带电流限制，需要指定电流上限请选择 CB。'
+      : 'FB／CB 已接入板端位置监督，支持三种立即执行模式。相对上一目标需要驱动器的新鲜目标反馈；实际行程由板端校验。FB 不携带电流限制，使用驱动器自身设置；需要指定电流上限请选择 CB。'
     : deviceNote(original.note) || null,
   variants: original.variants.map(v => ({...v,layout:v.layout.map(f => f.key === 'sync'
-    ? {...f,hint:'实机只接受立即执行；同步选项用于组帧预览。'}
+    ? {...f,hint:unverifiedMode ? '00 立即执行；01 缓存待 FF 触发。不校验模式只提交帧，不判断触发或运动完成。' : '实机只接受立即执行；同步选项用于组帧预览。'}
     : f.key === 'motionMode' && original.id === 'passthroughPosition'
-      ? {...f,hint:'00 相对驱动器上一输入目标；01 相对坐标零点的绝对位置；02 相对当前实际位置。方向决定位置数值的正负，三种模式均由板端监督实际到位。'}
+      ? {...f,hint:unverifiedMode ? '00 相对上一目标；01 绝对零点；02 相对当前实际位置。不校验模式只提交帧，不判断实际到位。' : '00 相对驱动器上一输入目标；01 相对坐标零点的绝对位置；02 相对当前实际位置。方向决定位置数值的正负，三种模式均由板端监督实际到位。'}
+      : unverifiedMode && f.kind === 'field' && f.type === 'int'
+        ? {...f,min:0,max:2 ** (8 * f.bytes) - 1,hint:`${f.hint || ''} 不校验模式仅要求该整数能编码进 ${f.bytes} 字节；驱动器是否接受需看回包。`}
       : f)})),
 });
 const metric = (value, unit) => value == null ? '—' : `${value} ${unit}`;
@@ -95,7 +99,7 @@ function formatClock(timestamp) {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
 }
 
-function DeviceFeedback({ status, connected, live, notice, lab, address, opcode, records, experiment, limitsReady, queue, queueRunning, queueStale, directNote, draftNote }) {
+function DeviceFeedback({ status, connected, live, notice, lab, address, opcode, records, experiment, limitsReady, queue, queueRunning, queueStale, directNote, draftNote, unverifiedMode }) {
   const enableStatus = enableStatusPresentation(status, connected);
   // Latest decoded reply for the address and function code currently selected.
   // Read-only history: it never feeds the gate, the metrics or the enable state.
@@ -126,6 +130,7 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
     </> : null}
     <div className="divider"/><h3 className="section__title">控制状态</h3>
     <p>{connected ? stateLabels[status.state] || status.state || '读取中' : '设备离线，读数已清空'}</p>
+    {connected && status.unverifiedMotionOutstanding === true ? <p className="device-error" role="alert">本次开机已提交未受监督的运动指令：实际运动状态未知。关闭不校验模式后，此提示仍保留。</p> : null}
     {/* Fresh board-side ownership summary: who is holding the board, and why.
         Ages are not shown here on purpose - they change on every poll and say
         nothing the reason does not. */}
@@ -152,13 +157,15 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
       <p>{queueProgressText(queue)}{queueStale ? '（读取失败：以下为最后一次成功读取的板端状态）' : ''}</p>
       {queue.action ? <p>当前动作：{queueActionLabels[queue.action] || queue.action}{['hex','can'].includes(queue.action) ? '（原始帧，无运动监督）' : ''}</p> : null}
       {queue.message ? <p className="device-notice">{queueMessageText(queue.message)}</p> : null}
-      <p className="capabilities__note">队列由板端独立执行：浏览器断开后，板端仍继续执行已提交的队列。本页只显示板端返回的状态。{queueRunning ? '运行期间常规试动与配置已锁定；「全部停止」会先取消队列。' : ''}</p>
+      <p className="capabilities__note">队列由板端独立执行：浏览器断开后，板端仍继续执行已提交的队列。本页只显示板端返回的状态。{queueRunning && !unverifiedMode ? '运行期间常规试动与配置已锁定；「全部停止」会先取消队列。' : ''}</p>
     </> : null}
     <div className="divider"/><h3 className="section__title">请求结果</h3><p className="device-notice" role="status">{notice || '尚未提交操作'}</p>
     {draftNote ? <p className="capabilities__note">{draftNote}</p> : null}
-    <p className="capabilities__note">收到 202 仅表示请求已被接受或帧已发送，不证明电机已到位、停止或失能；超时或断线时结果未知，本页不会自动重发。实际状态以新鲜反馈为准。</p>
-    <div className="divider"/><details className="device-compat device-boundaries"><summary>试验边界与协议说明</summary><p className="capabilities__note">{experiment ? `速度／力矩试验：${experiment}；反馈超时提前停止。` : '速度／力矩试验的时长由板端策略决定（未读取到限制）。'}回零（9A）已接入板端监督：等待应答、3B 回零标志与新鲜静止反馈；直通位置（FB/CB）也已接入：保留原功能码与字节，等待匹配的 FB/CB 应答、驱动器目标位置读值（0x33，手册 p70）与两对新鲜静止反馈；同步缓存与 FD 仍只可预览。参数写入需要驱动关闭使能且静止。</p>
-    <p className="capabilities__note">{limitsReady ? '运动数值按「调试限制」中已确认的板端策略校验。' : '尚未确认板端限制（/api/limits）：运动指令保持禁用，读取、停止与失能不受影响。'}</p>
+    <p className="capabilities__note">收到 202 仅表示请求已被接受或帧已发送，不证明电机已到位、停止或失能；超时或断线时结果未知，本页不会自动重发。{unverifiedMode ? '不校验模式下状态只供观察，不决定发送许可。' : '实际状态以新鲜反馈为准。'}</p>
+    <div className="divider"/><details className="device-compat device-boundaries"><summary>试验边界与协议说明</summary><p className="capabilities__note">{unverifiedMode
+      ? '不校验模式下，板端按可编码的指令提交发送；不等待使能、停止、目标或到位反馈来判定执行结果。同步缓存动作仍需驱动按协议触发，发送成功不代表触发或完成。'
+      : `${experiment ? `速度／力矩试验：${experiment}；反馈超时提前停止。` : '速度／力矩试验的时长由板端策略决定（未读取到限制）。'}回零（9A）已接入板端监督：等待应答、3B 回零标志与新鲜静止反馈；直通位置（FB/CB）也已接入：保留原功能码与字节，等待匹配的 FB/CB 应答、驱动器目标位置读值（0x33，手册 p70）与两对新鲜静止反馈；同步缓存与 FD 仍只可预览。参数写入需要驱动关闭使能且静止。`}</p>
+    <p className="capabilities__note">{unverifiedMode ? '板端调试限制与反馈不参与本次发送许可；报文仍需能按协议字段编码。' : limitsReady ? '运动数值按「调试限制」中已确认的板端策略校验。' : '尚未确认板端限制（/api/limits）：运动指令保持禁用，读取、停止与失能不受影响。'}</p>
     {directNote ? <p className="capabilities__note">直通位置（FB/CB）由板端解析：{directNote}</p> : null}
     </details>
     <div className="divider"/>
@@ -167,7 +174,7 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
       <p>协议依据：ZDT_X42S 二代闭环步进电机用户手册 V1.0.5（2026-05-27），页码见各字段提示。</p>
       <p>出厂默认固件是 Emm，报文格式与 X 固件不同；本页不自动识别固件类型、也不换算，接错固件时回包解析不可信。</p>
       <p>本页按默认 0.1°/计数的位置输入解释报文，不支持已配置为 0.01° 输入缩放的驱动器。</p>
-      <p>手册描述的能力不等于板端已实现的操作：未知功能码、同步队列与未接入的运动模式仍只作预览，本页不会自行放开。</p>
+      <p>{unverifiedMode ? '不校验模式可以提交未知功能码和同步缓存报文；实际接受与执行情况需根据驱动回包核对。' : '手册描述的能力不等于板端已实现的操作：未知功能码、同步队列与未接入的运动模式仍只作预览，本页不会自行放开。'}</p>
     </details>
   </section>;
 }
@@ -205,6 +212,10 @@ export function DeviceApp() {
   const check = validateAddress(draft), address = check.ok ? check.value : 0;
   const [status,setStatus] = useState(EMPTY), [connected,setConnected] = useState(false), [notice,setNotice] = useState('');
   const [busy,setBusy] = useState(false), busyRef = useRef(false);
+  // The saved board mode is authoritative. Null means it has not been read;
+  // never silently turn an unknown or malformed reply into verified mode.
+  const [unverifiedMode,setUnverifiedMode] = useState(null), [modeBusy,setModeBusy] = useState(false);
+  const modeMutationRef = useRef(0), modePendingRef = useRef(false);
   const [selected,setSelected] = useState(boot.commandId), [variant,setVariant] = useState(boot.variantKey);
   const [values,setValues] = useState(boot.values);
   const [mode,setMode] = useState(boot.mode), [raw,setRaw] = useState(boot.raw), [dirty,setDirty] = useState(boot.dirty);
@@ -282,13 +293,18 @@ export function DeviceApp() {
   if (storageRef.current === undefined) storageRef.current = safeStorage();
   const limitsReady = limitsState === 'ready' && limits !== null;
   const experiment = limitsReady ? experimentWindowText(limits) : null;
-  const item = cleanItem(getCommandItem(selected));
+  const item = cleanItem(getCommandItem(selected), unverifiedMode === true);
   const form = encodeCommand({item,variantKey:variant,values,address:address || 1});
   let model = {...form,bytes:form.bytes || [],labels:form.labels || [],errors:form.errors || {},item};
   if (mode === 'raw' && dirty) {
-    const parsed = parseLogicalHex(raw);
+    const parsed = unverifiedMode === true ? parseUnverifiedLogicalHex(raw) : parseLogicalHex(raw);
     const match = parsed.ok && identifyCommandBytes(parsed.bytes,address,selected);
-    if (!parsed.ok || !match || parsed.bytes[0] !== address) model = {ok:false,bytes:parsed.bytes || [],labels:[],errors:{_raw:['HEX 格式／指令结构不匹配，或地址与顶部不一致。']}};
+    if (unverifiedMode === true && parsed.ok) {
+      // Raw mode is genuinely raw here: the caller's address/opcode/parameters
+      // are sent as entered, including unknown opcodes and a different address.
+      model = {ok:true,bytes:parsed.bytes,labels:[],errors:{},item:match?.item || item,identified:Boolean(match)};
+    }
+    else if (!parsed.ok || !match || parsed.bytes[0] !== address) model = {ok:false,bytes:parsed.bytes || [],labels:[],errors:{_raw:[parsed.ok ? 'HEX 指令结构不匹配，或地址与顶部不一致。' : parsed.errors?.[0] || 'HEX 格式错误。']}};
     else {
       const result = encodeCommand({item:match.item,variantKey:match.variant.key,values:match.values,address});
       model = {...result,bytes:parsed.bytes,labels:result.labels || [],errors:result.errors || {},item:match.item,identified:true};
@@ -304,16 +320,28 @@ export function DeviceApp() {
   // 0xF3 *disable* direction; every other manual mutation (including a manual
   // enable) would interleave with the running program and is refused.
   const queueConflict = queueConflictReason(model.bytes,{running:queueRunning,unknown:queueUnknown});
-  const gate = !address ? check.error
-    : !connected ? '等待设备连接'
-    : !current.canReady ? 'CAN 控制器不可用'
-    : busy ? '等待当前请求返回'
-    : !model.ok ? '请修正参数'
-    // 0x45 (closed-loop maximum phase current) is a parameter write, not a
-    // motion, but its value can only be judged against the confirmed limits: it
-    // shares this gate without joining the motion list or needing an enable.
-    : queueConflict || (isLimitDependentOpcode(selectedOpcode) && !limitsReady ? '未读取到板端限制（/api/limits）：该指令的数值无法校验，已禁用；读取、停止与失能不受影响'
-    : supportReason(model.bytes, limitsReady ? limits : null) || (needsEnable && !current.enabled ? '请先发送使能，并等待真实确认' : null));
+  const rawDirect = unverifiedMode === true && mode === 'raw' && dirty;
+  const gate = modeBusy ? '正在切换不校验模式' : unverifiedMode === true
+    ? (!rawDirect && !address ? check.error : busy ? '等待当前请求返回' : !model.ok ? '请修正报文格式' : null)
+    : (!address ? check.error
+      : !connected ? '等待设备连接'
+      : !current.canReady ? 'CAN 控制器不可用'
+      : busy ? '等待当前请求返回'
+      : !model.ok ? '请修正参数'
+      // 0x45 is a parameter write, not motion, but shares the confirmed limits.
+      : queueConflict || (isLimitDependentOpcode(selectedOpcode) && !limitsReady ? '未读取到板端限制（/api/limits）：该指令的数值无法校验，已禁用；读取、停止与失能不受影响'
+      : supportReason(model.bytes, limitsReady ? limits : null) || (needsEnable && !current.enabled ? '请先发送使能，并等待真实确认' : null)));
+
+  useEffect(() => {
+    let disposed = false;
+    const controller = new AbortController();
+    const epoch = modeMutationRef.current;
+    request('/api/control/mode',undefined,controller.signal).then(payload => {
+      const value = readUnverifiedMode(payload);
+      if (!disposed && value !== null && epoch === modeMutationRef.current && !modePendingRef.current) setUnverifiedMode(value);
+    }).catch(() => { /* status poll can also provide the persisted mode */ });
+    return () => {disposed=true;controller.abort();};
+  },[]);
 
   useEffect(() => {
     let disposed = false, timer;
@@ -323,8 +351,13 @@ export function DeviceApp() {
       try {
         if (!address) return;
         const generation = resetGenerationRef.current;
+        const modeEpoch = modeMutationRef.current;
         const next = await request(`/api/status?id=${address}`,undefined,controller.signal);
-        if (!disposed && targetRef.current === address && !resetPendingRef.current && generation === resetGenerationRef.current) {setStatus(next);setConnected(true);}
+        if (!disposed && targetRef.current === address && !resetPendingRef.current && generation === resetGenerationRef.current) {
+          setStatus(next);setConnected(true);
+          const savedMode = readUnverifiedMode(next);
+          if (savedMode !== null && modeEpoch === modeMutationRef.current && !modePendingRef.current) setUnverifiedMode(savedMode);
+        }
       } catch { if (!disposed) {setConnected(false);setStatus({...EMPTY,id:address});} }
       if (!disposed) timer = setTimeout(poll,300);
     }
@@ -501,10 +534,10 @@ export function DeviceApp() {
     poll(); return () => {disposed=true;controller.abort();clearTimeout(timer);};
   },[boardLogNonce]);
 
-  async function submit(path,data,{stop=false}={}) {
+  async function submit(path,data,{stop=false,targetId=null}={}) {
     if (!stop && (busyRef.current || resetPendingRef.current)) return;
     if (!stop) {busyRef.current=true;setBusy(true);}
-    const id = data.id ?? address;
+    const id = targetId ?? data.id ?? address;
     const target = stop && path.endsWith('stop-all') ? '全部' : id;
     // An answer that arrives after a reset describes the state from before it.
     const generation = resetGenerationRef.current;
@@ -517,9 +550,11 @@ export function DeviceApp() {
       // The trial window is whatever the board is configured with — never a
       // hardcoded number in the page.
       const queued = result?.message === 'queued_experiment' || result?.message === 'queued_auto_stop_5s';
-      announce(`电机 ${target}：${queued
-        ? `已入队，${experiment || '时长由板端策略决定'}`
-        : '请求已入队，等待真实反馈'}`);
+      announce(unverifiedMode === true
+        ? `电机 ${target}：指令已提交发送；不校验模式不判断驱动接收或机械完成，请按需核对反馈。`
+        : `电机 ${target}：${queued
+          ? `已入队，${experiment || '时长由板端策略决定'}`
+          : '请求已入队，等待真实反馈'}`);
       return {ok:true};
     } catch (e) {
       const detail = errorLabels[e.message] || e.message;
@@ -538,8 +573,8 @@ export function DeviceApp() {
     if (gate) return;
     const cursor = traceCursorRef.current;
     const requestId = ++labRequestIdRef.current;
-    setLabRequest({requestId,address,opcode:selectedOpcode,generation:cursor.generation,seq:cursor.seq,phase:'sending'});
-    const outcome = await submit('/api/command',{hex:formatBytes(model.bytes).replaceAll(' ','')});
+    setLabRequest({requestId,address:model.bytes[0],opcode:selectedOpcode,generation:cursor.generation,seq:cursor.seq,phase:'sending'});
+    const outcome = await submit('/api/command',{hex:formatBytes(model.bytes).replaceAll(' ','')},{targetId:model.bytes[0]});
     setLabRequest(previous => previous?.requestId === requestId && previous.phase !== 'restarted'
       ? {...previous,phase:outcome?.ok ? 'queued' : outcome?.uncertain ? 'unknown' : 'rejected',detail:outcome?.detail}
       : previous);
@@ -550,9 +585,45 @@ export function DeviceApp() {
   async function refreshStatus() {
     if (!address) return;
     try {
+      const modeEpoch = modeMutationRef.current;
       const next = await request(`/api/status?id=${address}`);
-      if (targetRef.current === address) { setStatus(next); setConnected(true); }
+      if (targetRef.current === address) {
+        setStatus(next); setConnected(true);
+        const savedMode = readUnverifiedMode(next);
+        if (savedMode !== null && modeEpoch === modeMutationRef.current && !modePendingRef.current) setUnverifiedMode(savedMode);
+      }
     } catch { /* the status poll owns connection state */ }
+  }
+
+  async function toggleUnverifiedMode() {
+    if (modePendingRef.current || unverifiedMode === null) return;
+    const desired = !unverifiedMode;
+    modePendingRef.current = true;
+    modeMutationRef.current += 1; // discard status reads already on the wire
+    setModeBusy(true);
+    try {
+      const payload = await request('/api/control/mode',{unverified:desired ? 1 : 0});
+      const applied = readUnverifiedMode(payload);
+      if (applied === null || payload.persisted !== true) throw new Error('板端没有确认保存不校验模式');
+      setUnverifiedMode(applied);
+      setNotice(applied
+        ? '不校验模式已保存并开启：网页、队列、串口与内置 Demo 仅提交可编码指令；返回成功不代表电机已执行或到位。'
+        : '不校验模式已关闭并保存；恢复板端原有的监督与校验。');
+    } catch (error) {
+      // A timed-out POST may have applied. Read back instead of assuming the
+      // previous setting still holds or repeating the mutating request.
+      setUnverifiedMode(null);
+      setNotice(`切换不校验模式结果未知或失败：${errorLabels[error.message] || error.message}。正在读取板端实际设置；不会自动重发。`);
+      try {
+        const payload = await request('/api/control/mode');
+        const actual = readUnverifiedMode(payload);
+        if (actual !== null) setUnverifiedMode(actual);
+      } catch { /* keep unknown until a successful status poll */ }
+    } finally {
+      modeMutationRef.current += 1;
+      modePendingRef.current = false;
+      setModeBusy(false);
+    }
   }
 
   // Clear software ownership and request a stop. Confirmed enable, pending
@@ -570,9 +641,11 @@ export function DeviceApp() {
         // Local queue ownership is dropped; the board keeps hardware evidence.
         setQueueLock({pending:false,unconfirmed:false});
         idleStreakRef.current = 0;
-        setNotice(payload.stopSent === true
-          ? '软件控制占用已清理，停止帧已发送；板端仍保留使能、待停止与故障证据。请核对电机反馈，发送成功不代表已停止或失能。'
-          : errorLabels.control_state_cleared_stop_unconfirmed);
+        setNotice(payload.message === 'control_state_cleared_no_can'
+          ? '仅清理了软件占用；不校验模式下没有发送 CAN 或停止帧，电机实际运动状态仍未知。'
+          : payload.stopSent === true
+            ? '软件控制占用已清理，停止帧已发送；板端仍保留使能、待停止与故障证据。请核对电机反馈，发送成功不代表已停止或失能。'
+            : errorLabels.control_state_cleared_stop_unconfirmed);
       } else {
         setNotice('板端返回了未预期的内容，未清除本地状态；请重新读取状态后再操作。');
       }
@@ -736,13 +809,19 @@ export function DeviceApp() {
     queue: logSnapshot.queue,
     config: logSnapshot.config,
   };
-  const manualLimits=limitsReady ? limitsToManualLimits(limits) : undefined;
-  const prediction=planManualMove(manual,manualLimits);
-  const moveEncoded=prediction.ok ? encodeCommand({item:getCommandItem('position'),variantKey:'limit',values:prediction.plan,address:address || 1}) : {bytes:[],labels:[]};
+  const manualLimits=unverifiedMode === true ? UNVERIFIED_MANUAL_LIMITS : limitsReady ? limitsToManualLimits(limits) : undefined;
+  const prediction=unverifiedMode === true ? planUnverifiedManualMove(manual) : planManualMove(manual,manualLimits);
+  const moveEncoded=prediction.ok
+    ? unverifiedMode === true
+      ? encodeUnverifiedManualMove(address || 1,prediction.plan)
+      : encodeCommand({item:getCommandItem('position'),variantKey:'limit',values:prediction.plan,address:address || 1})
+    : {bytes:[],labels:[]};
   const moveFrames=buildFrames(moveEncoded.bytes || []);
   const manualFault=current.fault && current.fault !== 'none' ? current.fault : null;
   const manualStopPending=current.state === 'stop_requested' || current.control?.blockers?.some(entry=>entry.id === address && entry.reason === 'stop_pending');
-  const manualGate=!address ? check.error : !connected ? '等待设备连接' : !current.canReady ? 'CAN 控制器不可用' : queueBusy ? (queueRunning ? '板端队列正在运行：常规试动已锁定，请先「取消队列」或使用「全部停止」' : '队列提交结果未知：请先「取消队列」核对状态，再试动') : busy ? '等待请求返回' : manualFault ? `故障锁存：${errorLabels[manualFault] || manualFault}。${manualStopPending ? '先等待新的静止位置／速度反馈确认停止，' : '先核对新鲜静止反馈，'}再显式使能，等待默认 Receive 模式的 F3 02 接收应答与新的 3A 已使能反馈` : manualStopPending ? '停止待确认：等待新的静止位置／速度反馈；广播失能还需新的 3A 已失能反馈。确认后按实际使能状态继续' : !limitsReady ? '未读取到板端限制（/api/limits）：常规试动已禁用' : !prediction.ok ? Object.values(prediction.errors)[0] : current.state === 'enable_pending' ? '使能待确认：等待默认 Receive 模式的 F3 02 接收应答与新的 3A 已使能反馈' : !current.enabled ? '请显式发送使能；默认 Receive 模式需 F3 02 接收应答与新的 3A 已使能反馈' : !current.online ? '等待新鲜电机反馈' : current.activeId || current.state === 'moving' || current.state === 'homing' || current.state === 'experiment_running' ? '电机忙，请等待停止' : null;
+  const manualGate=modeBusy ? '正在切换不校验模式' : unverifiedMode === true
+    ? (!address ? check.error : busy ? '等待请求返回' : !prediction.ok ? Object.values(prediction.errors)[0] : null)
+    : !address ? check.error : !connected ? '等待设备连接' : !current.canReady ? 'CAN 控制器不可用' : queueBusy ? (queueRunning ? '板端队列正在运行：常规试动已锁定，请先「取消队列」或使用「全部停止」' : '队列提交结果未知：请先「取消队列」核对状态，再试动') : busy ? '等待请求返回' : manualFault ? `故障锁存：${errorLabels[manualFault] || manualFault}。${manualStopPending ? '先等待新的静止位置／速度反馈确认停止，' : '先核对新鲜静止反馈，'}再显式使能，等待默认 Receive 模式的 F3 02 接收应答与新的 3A 已使能反馈` : manualStopPending ? '停止待确认：等待新的静止位置／速度反馈；广播失能还需新的 3A 已失能反馈。确认后按实际使能状态继续' : !limitsReady ? '未读取到板端限制（/api/limits）：常规试动已禁用' : !prediction.ok ? Object.values(prediction.errors)[0] : current.state === 'enable_pending' ? '使能待确认：等待默认 Receive 模式的 F3 02 接收应答与新的 3A 已使能反馈' : !current.enabled ? '请显式发送使能；默认 Receive 模式需 F3 02 接收应答与新的 3A 已使能反馈' : !current.online ? '等待新鲜电机反馈' : current.activeId || current.state === 'moving' || current.state === 'homing' || current.state === 'experiment_running' ? '电机忙，请等待停止' : null;
   const pollingPaused = status.autoQueriesEnabled === false;
   async function togglePolling() {
     if (pollingBusy) return;
@@ -771,7 +850,7 @@ export function DeviceApp() {
     : '队列提交结果未知：配置改动可能被板端拒绝，请先「取消队列」核对状态。'}</span></p> : null;
 
   const renderGeneration = resetGenerationRef.current;
-  const feedbackContent = <DeviceFeedback status={current} connected={connected} live={connected && status.id === address} notice={notice} lab={tab==='lab'} address={address} opcode={selectedOpcode} records={records} experiment={experiment} limitsReady={limitsReady} queue={queue} queueRunning={queueRunning} queueStale={queueStale} directNote={tab==='lab' ? directPositionBoardNote(model.bytes) : null} draftNote={tab==='lab'||tab==='manual' ? DRAFT_NOTE : null}/>;
+  const feedbackContent = <DeviceFeedback status={current} connected={connected} live={connected && status.id === address} notice={notice} lab={tab==='lab'} address={address} opcode={selectedOpcode} records={records} experiment={experiment} limitsReady={limitsReady} queue={queue} queueRunning={queueRunning} queueStale={queueStale} directNote={tab==='lab' && unverifiedMode !== true ? directPositionBoardNote(model.bytes) : null} draftNote={tab==='lab'||tab==='manual' ? DRAFT_NOTE : null} unverifiedMode={unverifiedMode === true}/>;
   return <div className="app device-app">
     <header className="toolbar">
       <div className="toolbar__brand"><span className="toolbar__logo">Babytech</span><span className="toolbar__divider">/</span><h1 className="toolbar__title">电机协议工作台</h1></div>
@@ -780,11 +859,15 @@ export function DeviceApp() {
         <label className="toolbar__field">CAN ID <input aria-label="CAN ID" className="input input--mono toolbar__address" value={draft} onChange={e=>changeMotor(e.target.value)} inputMode="numeric" aria-invalid={!check.ok}/></label>
         <span className="device-toolbar__bitrate">CAN 500 kbit/s</span>
         <span className={`chip ${connected?'chip--ok':'chip--muted'}`}>{connected?'设备在线':'设备未连接'}</span>
+        {connected && status.unverifiedMotionOutstanding === true ? <span className="chip chip--warn" role="status">实际运动状态未知</span> : null}
+        <button type="button" className={`device-mode-toggle${unverifiedMode === true ? ' is-on' : ''}`} aria-label="不校验模式" aria-pressed={unverifiedMode === null ? undefined : unverifiedMode} disabled={modeBusy || busy || unverifiedMode === null} title="此设置保存在板端，重启后仍生效；开启后网页、队列、串口与内置 Demo 只检查输入格式和协议字段可编码性，不用反馈判定完成。指令提交不代表电机实际执行。" onClick={toggleUnverifiedMode}>
+          {modeBusy ? '正在切换…' : unverifiedMode === null ? '不校验模式：读取中' : unverifiedMode ? '不校验模式：已开启' : '不校验模式：关闭'}
+        </button>
       </div>
       <div className="device-toolbar__actions" role="group" aria-label="全局控制">
         <span className="device-toolbar__actions-label">全局控制</span>
-        <button type="button" className="button button--outline" disabled={resetPending} title="取消编排及串口控制占用并请求停止；保留板端已确认使能、待停止与故障证据。不改配置、不重启。停止帧发出也不证明电机已停或失能。" onClick={resetControlState}>{resetPending ? '正在清理…' : '清理软件占用'}</button>
-        <button type="button" className="button button--outline" disabled={!connected || busy || resetPending || queueBusy} title="广播使能总线上所有电机；不自动开始运动，也不会清除故障。故障恢复请逐轴显式使能并等待确认" onClick={()=>submit('/api/enable-all',{enabled:1})}>全部使能</button>
+        <button type="button" className="button button--outline" disabled={resetPending} title={unverifiedMode ? '清理编排及串口软件占用；不发送 CAN 或停止帧，不能据此判断电机已停。' : '取消编排及串口控制占用并请求停止；保留板端已确认使能、待停止与故障证据。不改配置、不重启。停止帧发出也不证明电机已停或失能。'} onClick={resetControlState}>{resetPending ? '正在清理…' : '清理软件占用'}</button>
+        <button type="button" className="button button--outline" disabled={busy || resetPending || modeBusy || (unverifiedMode !== true && (!connected || queueBusy))} title={unverifiedMode ? '广播使能已提交不证明每台电机实际使能' : '广播使能总线上所有电机；不自动开始运动，也不会清除故障。故障恢复请逐轴显式使能并等待确认'} onClick={()=>submit('/api/enable-all',{enabled:1})}>全部使能</button>
         <button type="button" className="button button--danger" title="取消队列并广播失能；帧已发送不代表每台电机已失能，仍需核对反馈" onClick={()=>submit('/api/enable-all',{enabled:0},{stop:true})}>全部失能</button>
         <button type="button" className="button button--danger device-toolbar__stop" onClick={()=>submit('/api/stop-all',{}, {stop:true})}>全部停止</button>
       </div>
@@ -793,7 +876,7 @@ export function DeviceApp() {
     <nav className="tabs" role="tablist" aria-label="工作模式">{DEVICE_TABS.map(([id,label])=><button key={id} role="tab" aria-selected={tab===id} className={`tabs__item${tab===id?' is-active':''}`} onClick={()=>setTab(id)}>{label}</button>)}<a className="tabs__item" href="/ota">固件升级</a>{tab!=='lab' ? <span className="device-network-note">板端真实接口 · 不自动重发操作</span> : null}</nav>
     {tab==='lab' ? <LabStatusSummary connected={connected} status={current} triggerRef={feedbackTriggerRef} onOpen={()=>setLabFeedbackOpen(true)}/> : null}
     <ConfigResult/>
-    {tab==='queue' ? <QueuePanel connected={connected && !resetPending} limits={limits} limitsReady={limitsReady}
+    {tab==='queue' ? <QueuePanel connected={connected && !resetPending} unverifiedMode={unverifiedMode === true} limits={limits} limitsReady={limitsReady}
       queue={queue} queueState={queueState} queueError={queueError} queueUnknown={queueUnknown}
       onQueueBusy={next=>{if(renderGeneration===resetGenerationRef.current) setQueueLock(next);}}
       onQueueStatus={next=>{
@@ -806,7 +889,7 @@ export function DeviceApp() {
         setQueue(next);setQueueState('ready');setQueueError(null);
       }}
       onRefreshQueue={()=>setQueueNonce(n=>n+1)}/>
-      : tab==='demo' ? <DemoPanel/> : tab==='scale' ? <ScaleWorkbench/> : tab==='log' ? <DebugLogPanel
+      : tab==='demo' ? <DemoPanel unverifiedMode={unverifiedMode === true}/> : tab==='scale' ? <ScaleWorkbench/> : tab==='log' ? <DebugLogPanel
         store={logStore} snapshot={logSnapshot} context={logContext}
         onCopy={copy} onClear={()=>{logStore.clear();setLogSnapshot(logStore.snapshot());}}
         onRefresh={()=>setBoardLogNonce(n=>n+1)}/>
@@ -822,12 +905,12 @@ export function DeviceApp() {
         </button>
         {labPickerOpen ? <div id="lab-command-picker-list" className="lab-command-picker__list"><CommandLibrary query={query} onQueryChange={setQuery} openGroups={groups} onToggleGroup={id=>setGroups(g=>({...g,[id]:!g[id]}))} selectedId={selected} onSelect={chooseFromPicker}/></div> : null}
       </div>
-      <CompactPanel title="指令编辑与发送" initiallyOpen className="compact-panel--command"><CommandPanel device item={item} variantKey={variant} onVariantChange={changeVariant} values={values} onValueChange={(key,value)=>editValues({...values,[key]:value})} editorMode={mode} onEditorModeChange={changeEditorMode} rawText={dirty?raw:formatBytes(form.bytes || [])} onRawTextChange={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} onRawTextReplace={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} rawDirty={dirty} onResetRaw={()=>{setDirty(false);saveForm({dirty:false});}} identifiedItem={model.identified?model.item:null} model={model} frames={frames} annotations={annotations} address={address || 1} addressError={check.ok?null:check.error} gateReason={gate} response={labResponse} requestNotice={notice} headingRef={labHeadingRef} onChooseCommand={()=>setLabPickerOpen(true)} onSend={sendLabCommand} onCopy={copy}/></CompactPanel>
+      <CompactPanel title="指令编辑与发送" initiallyOpen className="compact-panel--command"><CommandPanel device unverifiedMode={unverifiedMode === true} item={item} variantKey={variant} onVariantChange={changeVariant} values={values} onValueChange={(key,value)=>editValues({...values,[key]:value})} editorMode={mode} onEditorModeChange={changeEditorMode} rawText={dirty?raw:formatBytes(form.bytes || [])} onRawTextChange={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} onRawTextReplace={text=>{setRaw(text);setDirty(true);saveForm({raw:text,dirty:true});}} rawDirty={dirty} onResetRaw={()=>{setDirty(false);saveForm({dirty:false});}} identifiedItem={model.identified?model.item:null} model={model} frames={frames} annotations={annotations} address={address || 1} addressError={rawDirect || check.ok ? null : check.error} gateReason={gate} response={labResponse} requestNotice={notice} headingRef={labHeadingRef} onChooseCommand={()=>setLabPickerOpen(true)} onSend={sendLabCommand} onCopy={copy}/></CompactPanel>
       {labFeedbackOpen ? <aside className="lab-feedback-drawer" aria-label="详细电机反馈">
         <div className="lab-feedback-drawer__head"><strong>详细电机反馈</strong><button type="button" ref={feedbackCloseRef} onClick={()=>{setLabFeedbackOpen(false);feedbackTriggerRef.current?.focus();}}>关闭</button></div>
         {feedbackContent}
       </aside> : null}
-      </> : <ManualPanel device values={manual} errors={prediction.errors} onChange={(key,value)=>editManual({...manual,[key]:value})} motor={{enabled:current.enabled,positionTenths:current.positionDeg==null?null:current.positionDeg*10}} address={address || 1} prediction={prediction} limits={manualLimits} limitsConfirmed={limitsReady} bytes={moveEncoded.bytes || []} frames={moveFrames} annotations={moveFrames.map(f=>frameAnnotation(moveEncoded.bytes,moveEncoded.labels,f))} gateReason={manualGate} onSend={()=>{if(!manualGate)submit('/api/move',{id:address,angle:Number(manual.angle)*(Number(manual.dir)===1?-1:1),speed:manual.speed,accel:manual.accel,decel:manual.decel,current:manual.current});}} onStop={()=>{if(address)submit('/api/stop',{id:address},{stop:true});}} onCopy={copy} onGoToEnable={()=>{setTab('lab');choose('enable');}}/>}
+      </> : <ManualPanel device unverifiedMode={unverifiedMode === true} values={manual} errors={prediction.errors} onChange={(key,value)=>editManual({...manual,[key]:value})} motor={{enabled:current.enabled,positionTenths:current.positionDeg==null?null:current.positionDeg*10}} address={address || 1} prediction={prediction} limits={manualLimits} limitsConfirmed={limitsReady && unverifiedMode !== true} bytes={moveEncoded.bytes || []} frames={moveFrames} annotations={moveFrames.map(f=>frameAnnotation(moveEncoded.bytes,moveEncoded.labels,f))} gateReason={manualGate} onSend={()=>{if(!manualGate)submit('/api/move',{id:address,angle:Number(manual.angle)*(Number(manual.dir)===1?-1:1),speed:manual.speed,accel:manual.accel,decel:manual.decel,current:manual.current});}} onStop={()=>{if(address)submit('/api/stop',{id:address},{stop:true});}} onCopy={copy} onGoToEnable={()=>{setTab('lab');choose('enable');}}/>}
       {tab==='manual' ? <CompactPanel title="电机反馈与状态" preferenceKey="feedback-manual-layout" className="compact-panel--feedback">{feedbackContent}</CompactPanel> : null}
     </main>}
     {tab!=='scale' && <div className="device-trace">

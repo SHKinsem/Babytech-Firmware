@@ -26,9 +26,44 @@ import {
   queueProgressText,
   readMotorDistance,
   readQueueStatus,
+  readUnverifiedMode,
+  parseUnverifiedLogicalHex,
+  planUnverifiedManualMove,
+  encodeUnverifiedManualMove,
   supportReason,
   errorLabels,
 } from '../src/device-api.js';
+
+test('unverified mode is only trusted when the board reports a boolean',()=>{
+  assert.equal(readUnverifiedMode({unverifiedMode:true,persisted:true}),true);
+  assert.equal(readUnverifiedMode({unverifiedMode:false}),false);
+  assert.equal(readUnverifiedMode({unverifiedMode:'false'}),null);
+  assert.equal(readUnverifiedMode({}),null);
+});
+
+test('direct raw HEX preserves broadcast and unknown opcode bytes',()=>{
+  assert.deepEqual(parseUnverifiedLogicalHex('00 FF 66 6B').bytes,[0,0xff,0x66,0x6b]);
+  assert.equal(parseUnverifiedLogicalHex('00 A7 6B').ok,true);
+  assert.equal(parseUnverifiedLogicalHex('00 A7 00').ok,false);
+  assert.equal(parseUnverifiedLogicalHex('00 A7 6').ok,false);
+  assert.equal(parseUnverifiedLogicalHex(Array(31).fill('00').join(' ')).ok,false);
+});
+
+test('direct manual move keeps wire widths but ignores motion policy and duration',()=>{
+  const move=planUnverifiedManualMove({dir:1,angle:'5000',speed:'200',accel:'0',decel:'0',current:'0'});
+  assert.equal(move.ok,true);
+  assert.equal(move.plan.clk,50000);
+  assert.equal(move.plan.vel,2000);
+  assert.equal(move.durationMs,0); // unavailable estimate is not a refusal
+  assert.deepEqual(encodeUnverifiedManualMove(7,move.plan).bytes,
+    [7,0xcd,1,0,0,0,0,0x07,0xd0,0,0,0xc3,0x50,2,0,0,0,0x6b]);
+  assert.equal(planUnverifiedManualMove({dir:0,angle:'0',speed:'0',accel:'0',decel:'0',current:'0'}).ok,true);
+  assert.equal(planUnverifiedManualMove({dir:0,angle:'0.05',speed:'0',accel:'0',decel:'0',current:'0'}).ok,false);
+  assert.equal(planUnverifiedManualMove({dir:0,angle:'0',speed:'0.05',accel:'0',decel:'0',current:'0'}).ok,false);
+  assert.equal(planUnverifiedManualMove({dir:0,angle:'0',speed:'6553.6',accel:'0',decel:'0',current:'0'}).ok,false);
+  assert.equal(planUnverifiedManualMove({dir:0,angle:'0',speed:'0',accel:'65536',decel:'0',current:'0'}).ok,false);
+  assert.equal(planUnverifiedManualMove({dir:0,angle:'Infinity',speed:'0',accel:'0',decel:'0',current:'0'}).ok,false);
+});
 
 test('old firmware isolation refusal points to the new firmware',()=>{
   assert.match(errorLabels.sync_cache_isolation_unverified,/更新控制板固件/);
@@ -65,6 +100,40 @@ test('sync groups validate whole structure and preserve ordinary move semantics'
     'sync begin\nhex 01 CD 6B\nmove 2 90\nsync end']) assert.equal(validateProgram(program).ok,false,program);
   assert.equal(buildActionLine('sync',{boundary:'end'}).line,'sync end');
   assert.equal(buildActionLine('sync',{boundary:'begin trigger'}).line,'sync begin trigger');
+});
+
+test('unverified queue accepts wire-width values without changing normal validation',()=>{
+  const move='move 1 0 deg 6553.5 0 0 65535 await';
+  assert.equal(validateProgram(move).ok,false);
+  const direct=validateProgram(move,{unverified:true});
+  assert.equal(direct.ok,true);
+  assert.match(direct.preview[0].summary,/发送后继续，不判定到位/);
+  assert.equal(validateProgram('velocity 2 0 0 0 65535',{unverified:true}).ok,true);
+  assert.equal(validateProgram('torque 3 -65535 0 6553.5 65535',{unverified:true}).ok,true);
+  assert.equal(validateProgram('enable 0\nhome 0 255\nwait 1000000000',{unverified:true}).ok,true);
+  assert.equal(validateProgram('enable 0\nhome 0 255\nwait 1000000000').ok,false);
+  assert.equal(validateProgram('wait 1000000001',{unverified:true}).ok,false);
+  assert.equal(validateProgram('torque 3 0 1000000000',{unverified:true}).ok,true);
+  assert.equal(validateProgram('hex 00 FF 66 6B',{unverified:true}).ok,true);
+  assert.equal(validateProgram('hex 00 FF 66 00',{unverified:true}).ok,false);
+  assert.equal(validateProgram('hex 00 FF 66 00').ok,true);
+  assert.equal(validateProgram('move 1 0 deg 6553.6 0 0 0',{unverified:true}).ok,false);
+  assert.equal(validateProgram('move 1 0.05 deg 10 0 0 0',{unverified:true}).ok,false);
+  assert.equal(validateProgram('move 1 0.05 rev 10 0 0 0',{unverified:true}).ok,true);
+  assert.equal(validateProgram('move 1 1 deg 0.05 0 0 0',{unverified:true}).ok,false);
+  assert.equal(validateProgram('velocity 1 0.05',{unverified:true}).ok,false);
+  assert.equal(validateProgram('torque 1 0 0 0.05',{unverified:true}).ok,false);
+  assert.equal(validateProgram('move 1 0 deg 0 0 0 65536',{unverified:true}).ok,false);
+  assert.equal(validateProgram('move 1 214748364.8 deg 0 0 0 0',{unverified:true}).ok,false);
+  const sync='sync begin\nmove 1 10 deg 0 0 0 0\nmove 2 10 deg 0 0 0 0\nsync end';
+  assert.equal(validateProgram(sync).ok,false);
+  assert.equal(validateProgram(sync,{unverified:true}).ok,true);
+  assert.equal(validateProgram('sync begin\nmove 0 10\nmove 2 10\nsync end',{unverified:true}).ok,false);
+  assert.equal(validateProgram('sync begin\nmove 1 10\nsync end',{unverified:true}).ok,false);
+  assert.equal(buildActionLine('move',{...builderDefaults('move'),value:'0',rpm:'6553.5',accel:'0',decel:'0',current:'65535'},{unverified:true}).ok,true);
+  assert.equal(checkRepeat('1001').ok,false);
+  assert.equal(checkRepeat('1001',{unverified:true}).ok,true);
+  assert.equal(checkRepeat('2147483648',{unverified:true}).ok,false);
 });
 test('helix requires explicit geometry and limits, counts expanded steps, and uses board linear conversion',()=>{
   const line='helix 1 2 3 2 1 1 -1 1 60 60 800 0.1';

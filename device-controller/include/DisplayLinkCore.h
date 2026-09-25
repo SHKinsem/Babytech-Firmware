@@ -19,7 +19,8 @@ public:
         const bool accepted = intent == babytech::display::DisplayIntent::StartFeeding
             ? flow_.start(now)
             : intent == babytech::display::DisplayIntent::Initialize &&
-                (flow_.stage() == babytech::display::DisplayStage::NotReady ||
+                (flow_.unverifiedMode() ||
+                 flow_.stage() == babytech::display::DisplayStage::NotReady ||
                  flow_.stage() == babytech::display::DisplayStage::Error) && flow_.initialize(now);
         history_[cursor_] = {true, frame.sequence, accepted, intent};
         cursor_ = (cursor_ + 1) % history_.size();

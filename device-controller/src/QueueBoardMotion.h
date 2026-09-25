@@ -9,14 +9,16 @@ class QueueBoardMotion : public BoardMotion {
 public:
     QueueBoardMotion(motion::MotorControl& motor, motion::CommandQueue& queue, motion::DeviceAPI& api)
         : BoardMotion(motor, api), queue_(queue), api_(api) {}
-    bool busy() const override { return queue_.active() || BoardMotion::busy(); }
+    bool busy() const override { return !unverifiedMode() && (queue_.active() || BoardMotion::busy()); }
     babytech::v2::Reason enable(uint8_t id, bool enabled) override {
         // A disable preempts the queue so later steps cannot re-enable motion.
-        if (!enabled && queue_.active()) api_.cancelProgram("uart_disable");
+        if (!unverifiedMode() && !enabled && queue_.active()) api_.cancelProgram("uart_disable");
         return BoardMotion::enable(id, enabled);
     }
     void stop() override {
-        if (queue_.active()) api_.cancelProgram("uart_stop");
+        // In unverified mode DeviceAPI::requestStopAll cancels the queue and
+        // sends the stop. Avoid a duplicate abort/FE transmission here.
+        if (!unverifiedMode() && queue_.active()) api_.cancelProgram("uart_stop");
         BoardMotion::stop();
     }
 private:

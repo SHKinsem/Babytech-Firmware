@@ -1,14 +1,15 @@
 #pragma once
 // Board queue: ordered command sender with opt-in completion observation.
 // Plain commands advance after transmission. Only move/home with a trailing
-// await enters the runner's Motion phase; wait and legacy timed torque/velocity
-// use runner timers.
+// await enters the runner's Motion phase in verified mode; in unverified mode
+// it advances after TX. wait and legacy timed torque/velocity use runner timers.
 // Await observes driver evidence without invoking manual controller policy:
 // no implicit enable, retry, timeout stop, or automatic fault latching.
 // Missing feedback leaves await pending; explicit driver rejection fails it.
 // Cancel remains an explicit broadcast abort/stop operation.
-// Opt-in sync/helix groups instead own fresh preflight, a shared trajectory,
-// cache confirmation, one trigger and independent completion/fault stops.
+// Verified sync/helix groups own preflight, shared trajectory, cache and motion
+// evidence. Unverified groups send the requested cached CD frames in order and
+// exactly one FF trigger, with no response-derived stop or completion claim.
 //
 // Memory: the plan is a fixed array of 64 QueueStep values held by
 // the queue object in .bss, plus one function-local static scratch buffer of the
@@ -47,20 +48,31 @@ public:
     // is still going, 503 when the bus cannot transmit at all.
     Result start(const char* text, size_t length, long repeat,
                  const QueueRotationSource& rotation, uint32_t now);
-    // Prevalidated demo scripts preserve feedback and require positive homing
-    // proof; the ordinary direct queue retains its existing behavior.
+    // Prevalidated Demo scripts use strict homing proof in verified mode and
+    // submit their frames without feedback gates in unverified mode.
     Result startDemo(const QueueProgram& program, uint32_t now);
 
     // Cancels the run (if any) and stops everything: broadcast 9C then the FE
     // broadcast stop. Returns 202 when a run was cancelled, 200 when idle.
     Result cancel(const char* reason);
 
+    // Relinquish all pending queue steps without transmitting CAN. Used after
+    // a separately submitted explicit stop/disable, or when changing modes.
+    // True means a queue or Sync group was active before the cancellation.
+    bool cancelLocal(const char* reason);
+
     // Explicit operator reset: cancel pending steps and attempt stop exactly
     // once, then clear queue/controller ownership even if stop cannot be sent.
-    // The result reports stop transmission only, never physical completion.
+    // In unverified mode reset is local only and sends no CAN frame.
+    // A supervised result reports stop transmission, never physical completion.
     Result clearControlState();
 
     bool active() const { return runner_.active() || sync_.active(); }
+    // CD cache frames and the one FF trigger form an indivisible queue group
+    // for external command routing. Explicit stop/disable may preempt it.
+    bool unverifiedSyncInFlight() const {
+        return unverifiedSync_.active || (motor_.unverifiedMode() && sync_.active());
+    }
     bool containsRaw() const { return program_.hasRaw; }
     QueueState state() const { return runner_.state(); }
     uint32_t runId() const { return runner_.runId(); }
@@ -94,6 +106,19 @@ private:
     bool syncStop(uint8_t id) override;
     void syncObserve(uint8_t id,bool value) override;
     void pollSync(uint32_t now);
+    void pollUnverifiedSync(uint32_t now);
+    void beginUnverifiedSync(uint8_t groupSize, uint8_t alreadySent, uint32_t lastSentAt);
+    void completeUnverifiedSync(uint32_t now);
+
+    struct UnverifiedSync {
+        bool active = false;
+        bool keepPreparedProfile = false;
+        uint8_t groupSize = 0;
+        uint8_t cacheIndex = 0;
+        uint32_t lastSentAt = 0;
+        uint16_t speed[8] = {}, accel[8] = {}, decel[8] = {};
+    } unverifiedSync_;
+    bool lastSyncUnverified_ = false;
 
     MotorControl& motor_;
     SyncSettings syncSettings_;

@@ -298,6 +298,10 @@ body.device-body {min-width:0;}
 
 /* One compact row for identity, connection and global controls on desktop. */
 .device-toolbar__bitrate{color:var(--muted);font-size:12px;}
+.device-mode-toggle{height:34px;min-width:134px;padding:0 10px;border:1px solid #8491a6;border-radius:7px;background:#fff;color:#33445f;font-size:12px;font-weight:700;white-space:nowrap;cursor:pointer;}
+.device-mode-toggle.is-on{border-color:#af252d;background:#af252d;color:#fff;box-shadow:0 0 0 2px #af252d28;}
+.device-mode-toggle:disabled{opacity:.7;cursor:wait;}
+.device-mode-toggle:focus-visible{outline:3px solid #edaa54;outline-offset:2px;}
 .device-toolbar__actions-label{display:none;}
 .device-toolbar__stop{border-color:var(--red)!important;background:var(--red)!important;color:#fff!important;font-weight:600;}
 .device-toolbar__stop:hover{background:#bd3237!important;}
@@ -319,6 +323,7 @@ body.device-body {min-width:0;}
 }
 @media(min-width:1101px) and (max-width:1320px){
  .device-toolbar__context .chip--soft,.device-toolbar__bitrate,.device-app .device-network-note{display:none;}
+ .device-mode-toggle{min-width:123px;padding:0 6px;font-size:11px;}
 }
 /* Wrappers disappear from the desktop layout; every pane remains mounted. */
 .device-app .compact-panel,.device-app .compact-panel__body {display:contents;}

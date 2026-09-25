@@ -51,7 +51,7 @@ git switch -c codex/your-task
 
 直发队列、执行诊断、全局查询预算及同步/螺旋动作见 [电机编排队列](docs/motor-queue.md)。软件验证和待实测项目见 [同步开发与验收记录](docs/motion-sync-development.md)；已完成部分低速、小幅及多圈同步实测，完整负载与机械验收仍待完成。
 
-新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
+新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。设备板可选的持久「不校验模式」及其 HTTP、UART、Demo 范围见 [设备板不校验模式](docs/device-unverified-mode.md)。
 
 默认 DISPLAY 构建已接入产品显示板 UART v3、非阻塞流程、阶段调试和内置 JSON 配置；上电不自动运动。见 [演示操作说明](docs/motion-display-demo.md) 与 [开发验收计划](docs/motion-display-demo-plan.md)。Brain/Motion v2 需显式以 `-DMOTION_UART_PEER=1` 编译；机械与双板实机验收尚未完成。
 

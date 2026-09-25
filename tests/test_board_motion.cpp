@@ -2,6 +2,7 @@
 #include "fake_x42s.h"
 #include <cassert>
 #include <cstdio>
+#include <vector>
 using namespace babytech::v2;
 using namespace fakecan;
 struct Rig {
@@ -24,6 +25,26 @@ struct Rig {
         Writer w(q.payload,kMaxPayload);w.put(9,8);w.put(kStage,1);w.put(1,2);w.put(1,2);w.put(1,4);q.length=w.size();return q;
     }
 };
+static Frame unverifiedWrite(uint32_t seq,uint32_t revision,uint16_t field,uint32_t value) {
+    Frame q;q.cmd=Cmd::Write;q.session=7;q.sequence=seq;
+    Writer w(q.payload,kMaxPayload);w.put(9,8);w.put(revision,4);w.put(1,1);
+    w.put(kStage,1);w.put(kMoveStage,2);w.put(field,2);w.put(4,2);w.put(value,4);
+    q.length=w.size();return q;
+}
+static Frame unverifiedEnable(uint32_t seq,uint16_t id) {
+    Frame q;q.cmd=Cmd::Exec;q.session=7;q.sequence=seq;
+    Writer w(q.payload,kMaxPayload);w.put(9,8);w.put(kMotor,1);
+    w.put(id,2);w.put(kEnable,2);w.put(0,4);q.length=w.size();return q;
+}
+static std::vector<uint8_t> logicalFromRawPackets(uint8_t id) {
+    std::vector<uint8_t> logical{id};
+    for (const auto& packet : capturedTX) {
+        if (uint8_t(packet.identifier>>8)!=id) continue;
+        if (logical.size()==1) logical.push_back(packet.data[0]);
+        for (uint8_t i=1;i<packet.length;++i) logical.push_back(packet.data[i]);
+    }
+    return logical;
+}
 int main() {
     {
         Rig r;Frame response,event;assert(capturedTX.empty());
@@ -76,6 +97,38 @@ int main() {
         Rig r;setMillis(10);assert(r.bridge.enable(1,true)==Reason::None);
         setMillis(1600);r.motor.poll();Reason reason;
         assert(r.bridge.operation(reason)==Outcome::Failed && reason==Reason::Timeout);
+    }
+    {
+        Rig r;Frame response,event;Outcome outcome;Reason reason;
+        // Historical fault and absent ACK/position/velocity no longer gate the
+        // UART command once the persistent board mode has been enabled.
+        busState=CanControllerState::BusOff;setMillis(1);r.motor.poll();
+        assert(r.motor.hasFault() && capturedTX.empty());
+        busState=CanControllerState::Running;r.motor.setUnverifiedMode(true);
+        auto q=unverifiedWrite(1,999,2,uint32_t(-1234567890));
+        r.endpoint.handle(q,2,response);result(response,outcome,reason);assert(outcome==Outcome::Ok);
+        q=unverifiedWrite(2,0,3,1234);
+        r.endpoint.handle(q,3,response);result(response,outcome,reason);assert(outcome==Outcome::Ok);
+        const auto move=r.run(3);setMillis(4);r.endpoint.handle(move,4,response);
+        assert(result(response,outcome,reason) && outcome==Outcome::Done && reason==Reason::None);
+        const std::vector<uint8_t> expected={
+            1,0xCD,1,0,10,0,10,0x04,0xD2,0x49,0x96,0x02,0xD2,2,0,0x03,0x20,0x6B};
+        assert(logicalFromRawPackets(1)==expected);
+        const size_t sent=capturedTX.size();
+        r.endpoint.handle(move,5,response);assert(capturedTX.size()==sent);
+        setMillis(5000);assert(!r.endpoint.tick(5000,event));assert(capturedTX.size()==sent);
+        const auto enable=unverifiedEnable(4,1);
+        r.endpoint.handle(enable,5001,response);
+        assert(result(response,outcome,reason) && outcome==Outcome::Done && reason==Reason::None);
+        assert(capturedTX.size()==sent+1 && capturedTX.back().data[0]==0xF3);
+        assert(capturedTX.back().data[1]==0xAB && capturedTX.back().data[2]==1);
+        assert(capturedTX.back().data[3]==0 && capturedTX.back().data[4]==0x6B);
+        const size_t beforeRead=capturedTX.size();
+        const auto motorRead=readField(7,5,9,kMotor,1,1);
+        r.endpoint.handle(motorRead,5002,response);
+        assert(result(response,outcome,reason) && outcome==Outcome::Ok);
+        r.motor.poll();
+        assert(capturedTX.size()==beforeRead); // Brain READ observes cache only
     }
     std::puts("PASS: UART endpoint + actual motor controller: ACK, completion, external stop, link loss, feedback and faults");
 }

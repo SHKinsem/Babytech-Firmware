@@ -68,7 +68,7 @@ bool syncDelimiter(const std::string& line, const char* delimiter) {
 }
 bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
                       bool initializing, const std::array<int32_t, 256>& zeros,
-                      QueueProgram& out, std::string& error) {
+                      QueueProgram& out, std::string& error, bool unverified) {
     out.count = 0; out.hasRaw = false;
     ConfigRotation rotation(config);
     std::unique_ptr<QueueProgram> one(new QueueProgram);
@@ -83,7 +83,7 @@ bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
                 if (syncDelimiter(script.commands[end], "end")) break;
             }
             QueueError qe;
-            if (!parseQueueProgram(group.c_str(), group.size(), rotation, *one, qe)) {
+            if (!parseQueueProgram(group.c_str(), group.size(), rotation, *one, qe, unverified)) {
                 error = "command_" + std::to_string(i + (qe.line ? qe.line : 1)) + ":" + qe.message;
                 return false;
             }
@@ -117,7 +117,7 @@ bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
             line = "move " + id + " 1 deg " + speed + " " + accel + " " + decel + " " + current + " await";
         }
         QueueError qe;
-        if (!parseQueueProgram(line.c_str(), line.size(), rotation, *one, qe) || one->count != 1) {
+        if (!parseQueueProgram(line.c_str(), line.size(), rotation, *one, qe, unverified) || one->count != 1) {
             error = std::string("command_") + std::to_string(i + 1) + ":" + qe.message; return false;
         }
         auto step = one->steps[0];
@@ -140,7 +140,8 @@ bool buildDemoProgram(const DemoScript& script, const DemoConfig& config,
     }
     return true;
 }
-bool parseDemoConfig(const char* json, size_t length, DemoConfig& out, std::string& error) {
+bool parseDemoConfig(const char* json, size_t length, DemoConfig& out, std::string& error,
+                     bool unverified) {
     error = "invalid_demo_json";
     if (!json || !length || length > kDemoMaxJsonBytes) return false;
     // Bound parser recursion before allocating. Reject embedded NUL strings.
@@ -198,18 +199,19 @@ bool parseDemoConfig(const char* json, size_t length, DemoConfig& out, std::stri
         if (index < 0 || seen[index] || !script(s, config.stages[index])) return false;
         seen[index] = true;
     }
-    config.configured = !config.axes.empty() && cJSON_GetArraySize(zeroAxes) > 0 && !config.initialization.commands.empty();
+    config.configured = !config.axes.empty() && !config.initialization.commands.empty() &&
+        (unverified || cJSON_GetArraySize(zeroAxes) > 0);
     std::unique_ptr<QueueProgram> program(new QueueProgram);
     std::array<int32_t, 256> zeros{};
-    if (!buildDemoProgram(config.initialization, config, true, zeros, *program, error)) return false;
-    for (const auto& axis : config.axes) if (axis.zero) {
+    if (!buildDemoProgram(config.initialization, config, true, zeros, *program, error, unverified)) return false;
+    for (const auto& axis : config.axes) if (axis.zero && !unverified) {
         bool homed = false;
         for (uint8_t i = 0; i < program->count; ++i)
             if (program->steps[i].id == axis.id && program->steps[i].action == QueueAction::Home) homed = true;
         if (!homed) config.configured = false;
     }
     for (const auto& s : config.stages) {
-        if (!buildDemoProgram(s, config, false, zeros, *program, error)) return false;
+        if (!buildDemoProgram(s, config, false, zeros, *program, error, unverified)) return false;
         if (!program->count) config.configured = false;
     }
     out = std::move(config);

@@ -48,6 +48,7 @@ public:
     uint8_t queryInflight() const { return bus_.queryInflight(); }
     bool demandQuery(uint8_t id, uint8_t field, CanQueryScheduler::Owner owner,
                      uint32_t periodMs, uint32_t leaseMs, uint8_t priority, uint32_t now) {
+        if (unverifiedMode_) return false;
         return bus_.demandQuery(id, field, owner, periodMs, leaseMs, priority, now);
     }
     void releaseQueries(CanQueryScheduler::Owner owner) { bus_.releaseQueries(owner); }
@@ -63,13 +64,23 @@ public:
     void setAutoQueriesEnabled(bool enabled);
     bool autoQueriesEnabled() const { return autoQueriesEnabled_; }
 
+    // Transport-only mode submits logical frames without software evidence or
+    // motion-policy admission checks. Submission never proves motor completion.
+    void setUnverifiedMode(bool enabled);
+    bool unverifiedMode() const { return unverifiedMode_; }
+    // Sticky evidence for status/OTA only. It never blocks motor commands.
+    bool unverifiedMotionOutstanding() const { return unverifiedMotionOutstanding_; }
+    // A writer outside MotorControl (the board queue) may have already sent a
+    // motion frame when this mode is selected. This records that uncertainty.
+    void noteUnverifiedMotionPossiblyOutstanding() { unverifiedMotionOutstanding_ = true; }
+
     // Selects the address the module tracks (1..255). Selecting a new id never
     // consumes a slot: queries always cover the selected id, the active job and
     // any node with a pending enable/stop.
     void watch(uint8_t id);
 
-    // Requests the firmware enable state. Result is 202 queued; the enable is
-    // only reported as true after matching F3 ACK and fresh enabled 3A flags.
+    // In supervised mode, enable is only reported as true after matching F3
+    // ACK and fresh enabled 3A flags. Unverified mode reports CAN TX only.
     Result enable(uint8_t id, bool enabled);
     Result broadcastEnable(bool enabled);
 
@@ -130,8 +141,8 @@ public:
     bool setDebugLimits(const DebugLimits& limits);
 
     // --- Raw transport for the board queue (see queue-contract.md) ----------
-    // Both require a ready bus and no active supervised operation, and neither
-    // stops nor enables anything implicitly. They report transmission only:
+    // Supervised mode also requires no active operation. Neither path stops or
+    // enables anything implicitly. They report transmission only:
     // no motion completion or parameter policy. Known 4C logical frames are
     // tracked separately through ACK and 22 readback before queue advancement.
     bool rawLogical(const uint8_t* bytes, uint8_t length);
@@ -327,6 +338,9 @@ private:
     bool sendStop(uint8_t id);
     bool sendHomeTrigger(uint8_t id, uint8_t mode);
     bool sendHomeInterrupt(uint8_t id);
+    bool sendUnverifiedLogical(const uint8_t* bytes, uint8_t length);
+    Result submitUnverifiedLogical(const uint8_t* bytes, uint8_t length);
+    static bool unverifiedLogicalMayMove(const uint8_t* bytes, uint8_t length);
 
     // Feedback helpers.
     bool freshPosition(uint8_t id, uint32_t now, int32_t& out) const;
@@ -398,6 +412,8 @@ private:
     bool faultGlobal_ = false;
 
     bool autoQueriesEnabled_ = true;
+    bool unverifiedMode_ = false;
+    bool unverifiedMotionOutstanding_ = false;
 
     // Bounded on-demand 0x33 refresh. `targetPollId_` is 0 when nothing is being
     // refreshed; the window and global budget keep a quiet node from turning into

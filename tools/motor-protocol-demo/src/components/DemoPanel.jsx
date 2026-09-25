@@ -8,7 +8,7 @@ const draftKey = 'babytech.demo-json.v1';
 const readDraft = () => { try { return localStorage.getItem(draftKey) || ''; } catch { return ''; } };
 const canonical = text => { try { return JSON.stringify(JSON.parse(text)); } catch { return null; } };
 
-export function DemoPanel() {
+export function DemoPanel({unverifiedMode = false}) {
   const [draft,setDraft] = useState(readDraft);
   const [applied,setApplied] = useState('');
   const [selected,setSelected] = useState('initialization');
@@ -58,7 +58,9 @@ export function DemoPanel() {
       if (!alive.current) return;
       setStatus(next); setOnline(true);
       if (appliedText !== undefined) setApplied(appliedText);
-      setMessage(appliedText !== undefined ? '配置已应用到 RAM；未启动电机。' : '请求已接受，请观察板端状态。');
+      setMessage(appliedText !== undefined ? '配置已应用到 RAM；未启动电机。' : unverifiedMode
+        ? '请求已接受；不校验模式只报告指令提交，实际运动状态请自行核对。'
+        : '请求已接受，请观察板端状态。');
     } catch (error) {
       if (!alive.current) return;
       setMessage(error.uncertain ? '请求结果未知；未自动重发。请核对板端状态或使用顶部“全部停止”。' : `板端拒绝：${error.message}`);
@@ -93,11 +95,11 @@ export function DemoPanel() {
     <section className="panel demo-status">
       <h2 className="panel__title">屏幕流程演示</h2>
       <p>仅供演示，产物不得用于喂养。水量与温度为配置值。</p>
-      <p role="status">{!online ? '状态未连接' : !status?.available ? '当前为 BRAIN 固件，请编译 DISPLAY 分支。' : status.initializing ? '正在初始化找零' : stageNames[status.stage] || status.stage}</p>
+      <p role="status">{!online ? '状态未连接' : !status?.available ? '当前为 BRAIN 固件，请编译 DISPLAY 分支。' : status.initializing ? unverifiedMode ? '正在发送初始化脚本' : '正在初始化找零' : unverifiedMode && status.stage==='complete' ? '脚本发送结束（实际运动未知）' : stageNames[status.stage] || status.stage}</p>
       <dl><dt>软件参考</dt><dd>{online && status?.referenceValid ? '有效' : '无有效确认'}</dd><dt>流程配置</dt><dd>{status?.configured ? '已配置' : '需要填写脚本和轴配置'}</dd><dt>板端原因</dt><dd>{status?.reason || '—'}</dd><dt>Error</dt><dd>{status?.error || '—'}</dd></dl>
       <button className="button button--outline" disabled={locked || dirty || !status?.configured} onClick={()=>post('/api/demo/action',{action:'initialize'})}>复位 / 初始化</button>
-      <button className="button button--primary" disabled={locked || dirty || !status?.startEnabled} onClick={()=>post('/api/demo/action',{action:'start'})}>完整流程运行</button>
-      <p>上电不运动。首次点击初始化才找零；后续从屏幕 Start 启动。停止请使用顶部“全部停止”。</p>
+      <button className="button button--primary" disabled={locked || dirty || (unverifiedMode ? !status?.configured : !status?.startEnabled)} onClick={()=>post('/api/demo/action',{action:'start'})}>完整流程运行</button>
+      <p>{unverifiedMode ? '不校验模式按脚本提交可编码指令，不等待零点或到位确认；“发送结束”不证明机械完成。停止请使用顶部“全部停止”。' : '上电不运动。首次点击初始化才找零；后续从屏幕 Start 启动。停止请使用顶部“全部停止”。'}</p>
       <p>开盖 → 加水 → 加粉 → 关盖 → 混合（先回软件零点）→ Complete 3 秒 → Ready</p>
       {message && <p className="device-notice" role="alert">{message}</p>}
     </section>
@@ -105,8 +107,8 @@ export function DemoPanel() {
       <h2 className="panel__title">阶段脚本</h2>
       <label>阶段<select className="input" value={selected} onChange={e=>setSelected(e.target.value)}>{stages.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label>
       <textarea aria-label="阶段脚本" spellCheck={false} value={script?.commands?.join('\n') || ''} disabled={!script || pending} onChange={e=>updateScript(e.target.value)}/>
-      <button className="button button--outline" disabled={locked || dirty || !status?.referenceValid || status?.stage==='error' || selected==='initialization'} onClick={()=>post('/api/demo/action',{action:'stage',stage:selected})}>运行所选阶段</button>
-      <p>脚本修改保留在右侧 JSON，Apply 后才能运行。move/home 必须显式 await；加水、加粉可以填写 wait 毫秒数进行模拟。</p>
+      <button className="button button--outline" disabled={locked || dirty || !script || selected==='initialization' || (!unverifiedMode && (!status?.referenceValid || status?.stage==='error'))} onClick={()=>post('/api/demo/action',{action:'stage',stage:selected})}>运行所选阶段</button>
+      <p>{unverifiedMode ? '脚本修改保留在右侧 JSON，Apply 后才能运行。move/home 的 await 不等待运动反馈；wait 毫秒数仍按脚本计时。' : '脚本修改保留在右侧 JSON，Apply 后才能运行。move/home 必须显式 await；加水、加粉可以填写 wait 毫秒数进行模拟。'}</p>
       <p>混合脚本内使用 <code>zero ID RPM ACCEL DECEL CURRENT</code> 回到本次初始化记录的软件零点，再执行混合。初始化采用 <code>home ID 2 await</code>，碰撞参数须提前在驱动器上确认。</p>
     </section>
     <section className="panel demo-json">
