@@ -6,8 +6,7 @@ namespace motion {
 namespace {
 
 // --- Limits of the sender ---------------------------------------------------
-// Raw frames retain the documented minimum gap; sync has its own state machine.
-constexpr uint32_t kRawSpacingMs = 2;
+// Sync has its own state machine; ProgramRunner owns raw-frame pacing.
 // Default arguments of the readable DSL.
 constexpr double kDefaultMoveRpm = 30.0;
 constexpr long kDefaultMoveAccel = 60;
@@ -204,17 +203,6 @@ const char* queueActionName(QueueAction action) {
         case QueueAction::None: break;
     }
     return "none";
-}
-
-const char* queueStateName(QueueState state) {
-    switch (state) {
-        case QueueState::Idle: return "idle";
-        case QueueState::Running: return "running";
-        case QueueState::Done: return "done";
-        case QueueState::Failed: return "failed";
-        case QueueState::Cancelled: return "cancelled";
-    }
-    return "idle";
 }
 
 // ---------------------------------------------------------------------------
@@ -687,15 +675,11 @@ bool parseQueueProgram(const char* text, size_t length,
 // ---------------------------------------------------------------------------
 
 const QueueStep* CommandQueue::currentStep() const {
-    if (stepIndex_ >= program_.count) return nullptr;
-    return &program_.steps[stepIndex_];
+    return runner_.currentStep();
 }
 
 void CommandQueue::setMessage(const char* text) {
-    if (text == nullptr) text = "";
-    size_t i = 0;
-    for (; text[i] != '\0' && i + 1 < sizeof(message_); ++i) message_[i] = text[i];
-    message_[i] = '\0';
+    runner_.note(text);
 }
 
 Result CommandQueue::start(const char* text, size_t length, long repeat,
@@ -716,8 +700,7 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     if (!parseQueueProgram(text, length, rotation, scratch, error)) {
         // The previous run's state is left alone: this start was simply refused.
         // Nothing was sent and nothing was cleared.
-        errorLine_ = error.line;
-        setMessage(error.message);
+        runner_.recordValidationFailure(error.line, error.message);
         return Result{400, error.message};
     }
     for(uint8_t i=0;i<scratch.count;++i) {
@@ -726,7 +709,7 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
         SyncSettings settings=syncSettings_;
         if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
         const char* reason=sync_.validate(scratch.steps+i+1,step.groupSize,settings,nullptr,step.syncTriggerOnly);
-        if(reason) {errorLine_=step.line;setMessage(reason);return Result{400,reason};}
+        if(reason) {runner_.recordValidationFailure(step.line,reason);return Result{400,reason};}
     }
 
     // The plan is a fixed-size copy and stays immutable until the run ends. Only
@@ -734,25 +717,12 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     // software supervisor without discarding observed hardware state or
     // sending anything on CAN.
     program_ = scratch;
-    strictHome_ = false;
-    programHash_=2166136261u;
-    for(size_t i=0;i<length;++i) programHash_=(programHash_^uint8_t(text[i]))*16777619u;
+    uint32_t programHash=2166136261u;
+    for(size_t i=0;i<length;++i) programHash=(programHash^uint8_t(text[i]))*16777619u;
     sync_.reset();
     motor_.takeQueueControl();
-    repeat_ = static_cast<uint32_t>(repeat);
-    runId_++;
-    motor_.queueDiagnostics_.beginRun(runId_);
-    state_ = QueueState::Running;
-    phase_ = kPhaseIdle;
-    phaseAt_ = now;
-    deadlineAt_ = 0;
-    stepIndex_ = 0;
-    iteration_ = 0;
-    lastRawAt_ = 0;
-    errorLine_ = 0;
-    setMessage("running");
-    motionComplete_=false;
-    unconfirmedMotion_=false;
+    runner_.begin(program_,programHash,static_cast<uint32_t>(repeat),false,now);
+    motor_.queueDiagnostics_.beginRun(runner_.runId());
     return Result{202, "queue_started"};
 }
 
@@ -768,32 +738,20 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
             settings.tolerance.progress = fmin(settings.tolerance.progress, step.syncToleranceProgress);
         const char* reason = sync_.validate(program.steps + i + 1, step.groupSize,
                                             settings, nullptr, step.syncTriggerOnly);
-        if (reason) { errorLine_ = step.line; setMessage(reason); return Result{400, reason}; }
+        if (reason) { runner_.recordValidationFailure(step.line, reason); return Result{400, reason}; }
     }
     program_ = program;
-    strictHome_ = true;
     sync_.reset();
-    programHash_ = 0;  // Demo programs have no DSL source text.
-    motionComplete_ = false;
-    unconfirmedMotion_ = false;
     helixTravelMm_ = helixGeometryErrorMm_ = 0;
-    motor_.queueDiagnostics_.beginRun(runId_ + 1);
-    repeat_ = 1; ++runId_; state_ = QueueState::Running;
-    phase_ = kPhaseIdle; phaseAt_ = now; deadlineAt_ = 0;
-    stepIndex_ = 0; iteration_ = 0; lastRawAt_ = 0; errorLine_ = 0;
-    setMessage("running");
+    runner_.begin(program_,0,1,true,now); // Demo has no DSL source text.
+    motor_.queueDiagnostics_.beginRun(runner_.runId());
     return Result{202, "queue_started"};
 }
 
 Result CommandQueue::cancel(const char* reason) {
     motor_.queueObserveId_ = 0;
     motor_.releaseQueries(CanQueryScheduler::Await);
-    const bool wasRunning = state_ == QueueState::Running;
-    if (wasRunning) {
-        state_ = QueueState::Cancelled;
-        setMessage(reason != nullptr ? reason : "cancelled");
-        phase_ = kPhaseIdle;
-    }
+    const bool wasRunning = runner_.cancel(reason);
     if(sync_.active()) {
         sync_.abort(reason ? reason : "cancelled",millis());
         // A prior direct move or raw command may still be running outside the
@@ -815,43 +773,28 @@ bool CommandQueue::stopEverything() {
 
 Result CommandQueue::clearControlState() {
     const Result stopped = cancel("control_state_cleared");
-    state_ = QueueState::Idle;
-    phase_ = kPhaseIdle;
     program_.count = 0;
     program_.hasRaw = false;
-    stepIndex_ = iteration_ = 0;
-    repeat_ = 1;
-    errorLine_ = 0;
-    phaseAt_ = deadlineAt_ = lastRawAt_ = 0;
-    setMessage("control_state_cleared");
+    runner_.clear();
     motor_.clearControlState();
     return stopped;
 }
 
-void CommandQueue::finish(QueueState state, const char* message) {
-    motor_.queueObserveId_ = 0;
-    motor_.releaseQueries(CanQueryScheduler::Await);
-    state_ = state;
-    setMessage(message);
-    phase_ = kPhaseIdle;
-}
-
 void CommandQueue::fail(uint32_t now, const char* reason, uint16_t line) {
-    if (state_ != QueueState::Running) return;  // the first error is kept
-    if (errorLine_ == 0) errorLine_ = line;
+    if (!runner_.active()) return;  // the first error is kept
     // A send failure ends the run where it happened and reports the reason and
     // the source line. Nothing else is transmitted: no automatic stop broadcast
     // and no retry, because the operator asked for a plain sender.
-    finish(QueueState::Failed, reason != nullptr ? reason : "failed");
+    motor_.queueObserveId_ = 0;
+    motor_.releaseQueries(CanQueryScheduler::Await);
+    runner_.fail(reason,line);
     (void)now;
 }
 
 void CommandQueue::advance(uint32_t now) {
     motor_.queueObserveId_ = 0;
     motor_.releaseQueries(CanQueryScheduler::Await);
-    ++stepIndex_;
-    phase_ = kPhaseIdle;
-    phaseAt_ = now;
+    runner_.advance(now);
 }
 
 // One FE frame for one address: explicit/timed stops, or an opt-in sync fault.
@@ -866,18 +809,15 @@ bool CommandQueue::sendStopFrame(uint8_t id) {
 // supervised controller call is ever made from here, so no hidden enable, job,
 // fault or config transaction can come back to life.
 void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
-    if(step.action!=QueueAction::Wait) motionComplete_=false;
-    if((!step.awaitCompletion && (step.action==QueueAction::Move || step.action==QueueAction::Home ||
-       step.action==QueueAction::Torque || step.action==QueueAction::Velocity)) ||
-       step.action==QueueAction::Hex || step.action==QueueAction::Can) unconfirmedMotion_=true;
+    runner_.noteDispatch(step.action,step.awaitCompletion);
     if(step.action==QueueAction::SyncBegin) {
         SyncSettings settings=syncSettings_;
         if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
         helixTravelMm_=step.helixTravelMm;
         helixGeometryErrorMm_=step.helixGeometryErrorMm;
-        const char* reason=sync_.start(program_.steps+stepIndex_+1,step.groupSize,settings,now,step.syncTriggerOnly);
+        const char* reason=sync_.start(program_.steps+runner_.stepIndex()+1,step.groupSize,settings,now,step.syncTriggerOnly);
         if(reason) {fail(now,reason,step.line);return;}
-        phase_=kPhaseSync;setMessage("sync_checking");return;
+        runner_.syncStep();return;
     }
     if (step.awaitCompletion) {
         motor_.queueObserveId_ = step.id;
@@ -899,7 +839,7 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
         doneSamples_ = 0;
         observedAckAt_ = donePosAt_ = doneVelAt_ = now;
         homeProofAt_ = 0;
-        phaseAt_ = now;
+        // The runner anchors fresh completion evidence to the dispatch time.
     }
     const bool sent = encodeAndSend(step);
     uint8_t function = 0;
@@ -916,7 +856,7 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
     const uint8_t diagnosticId=step.action==QueueAction::Hex?step.raw[0]:
         step.action==QueueAction::Can?uint8_t(step.canId>>8):step.id;
     if(raw) function=step.action==QueueAction::Hex?step.raw[1]:step.canLength?step.canData[0]:0;
-    motor_.queueDiagnostics_.submit(runId_, iteration_+1, step.line, diagnosticId,
+    motor_.queueDiagnostics_.submit(runner_.runId(), runner_.iteration()+1, step.line, diagnosticId,
                                     function, now, sent,raw);
     if (step.action == QueueAction::Hex || step.action == QueueAction::Can)
         motor_.queueDiagnostics_.invalidate(0);
@@ -927,24 +867,21 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
         return;
     }
     if (step.action == QueueAction::Wait) {
-        phase_ = kPhaseWait;
-        deadlineAt_ = now + step.waitMs;
+        runner_.waitStep(now,step.waitMs);
         return;
     }
     if (step.awaitCompletion) {
-        phase_ = kPhaseMotion;
-        setMessage(step.action == QueueAction::Move ? "waiting_position" : "waiting_home");
+        runner_.awaitStep(now,step.action == QueueAction::Move ? "waiting_position" : "waiting_home");
         return;
     }
     if (step.durationMs != 0 &&
         (step.action == QueueAction::Torque || step.action == QueueAction::Velocity)) {
         // Legacy timed form: the user's own duration, then one FE, then the next
         // step. No feedback is awaited: this is timing, not supervision.
-        phase_ = kPhaseTimed;
-        deadlineAt_ = now + step.durationMs;
+        runner_.timedStep(now,step.durationMs);
         return;
     }
-    if (step.action == QueueAction::Hex || step.action == QueueAction::Can) lastRawAt_ = now;
+    if (step.action == QueueAction::Hex || step.action == QueueAction::Can) runner_.rawSent(now);
     advance(now);
 }
 
@@ -1058,25 +995,11 @@ bool CommandQueue::encodeAndSend(const QueueStep& step,bool synchronized) {
 // documented minimum gap between raw frames (the motor needs a moment between
 // packets). Only explicitly awaited move/home steps inspect driver evidence.
 void CommandQueue::beginStep(uint32_t now) {
-    if (stepIndex_ >= program_.count) {
-        // One iteration finished. The next one starts on the next poll, so an
-        // action never starts twice in one poll.
-        ++iteration_;
-        if (iteration_ >= repeat_) {
-            // Raw steps only ever mean "frames submitted": the run must not
-            // report a mechanical completion it cannot know about.
-            finish(QueueState::Done,motionComplete_ ? "sync_motion_complete" : program_.hasRaw ? "raw_frames_submitted" : "done");
-            return;
-        }
-        stepIndex_ = 0;
-        return;
-    }
-
-    const QueueStep& step = program_.steps[stepIndex_];
-    if ((step.action == QueueAction::Hex || step.action == QueueAction::Can) &&
-        uint32_t(now - lastRawAt_) < kRawSpacingMs) {
-        return;  // keep raw frames apart
-    }
+    // ProgramRunner has already selected the current step, observed iteration
+    // boundaries and enforced raw spacing before requesting Dispatch.
+    const QueueStep* selected = currentStep();
+    if (!selected) { fail(now,"internal_step",0); return; }
+    const QueueStep& step = *selected;
     if (step.action == QueueAction::Move && step.awaitCompletion) {
         // An awaited relative move needs a fresh starting position. Otherwise
         // an unchanged old target and old position could masquerade as arrival.
@@ -1096,41 +1019,30 @@ void CommandQueue::beginStep(uint32_t now) {
 }
 
 void CommandQueue::poll(uint32_t now) {
-    if(sync_.active() || phase_==kPhaseSync) {pollSync(now);return;}
-    if (state_ != QueueState::Running) return;
+    if(sync_.active()) {pollSync(now);return;}
 
     // No board state is consulted here: no fault, no pending stop, no feedback
     // freshness and no controller verdict. The sender's only hard requirement is
     // that the bus can transmit at all - otherwise nothing could be sent and the
     // run must say so instead of pretending.
-    switch (phase_) {
-        case kPhaseSync:
-            pollSync(now);return;
-        case kPhaseMotion:
-            observeMotion(now);
-            return;
-        case kPhaseIdle:
-            beginStep(now);
-            return;
-        case kPhaseWait:
-            if (int32_t(now - deadlineAt_) < 0) return;
-            advance(now);
-            return;
-        case kPhaseTimed: {
-            if (int32_t(now - deadlineAt_) < 0) return;
+    switch (runner_.tick(now)) {
+        case ProgramRunner::Action::None: return;
+        case ProgramRunner::Action::PollSync: pollSync(now); return;
+        case ProgramRunner::Action::ObserveMotion: observeMotion(now); return;
+        case ProgramRunner::Action::Dispatch: beginStep(now); return;
+        case ProgramRunner::Action::TimedStop: {
             // Legacy timed form: the user asked for this duration, so one FE
             // frame goes out now and the next step follows immediately. It is not
             // a stop confirmation and nothing waits for one.
             const QueueStep* step = currentStep();
             const uint8_t id = step != nullptr ? step->id : 0;
             const bool sent=sendStopFrame(id);
-            motor_.queueDiagnostics_.submit(runId_,iteration_+1,step ? step->line : 0,id,0xFE,now,sent);
+            motor_.queueDiagnostics_.submit(runner_.runId(),runner_.iteration()+1,step ? step->line : 0,id,0xFE,now,sent);
             if (!sent) { fail(now, "tx_failed", step != nullptr ? step->line : 0); return; }
             advance(now);
             return;
         }
     }
-    fail(now, "internal_phase", 0);
 }
 
 SyncFeedback CommandQueue::syncFeedback(uint8_t id) const {
@@ -1155,7 +1067,7 @@ bool CommandQueue::syncSendMove(const QueueStep& step) {
     auto& n=motor_.nodes_[step.id];n.syncAck=0;n.targetValid=false;
     const uint32_t now=millis();
     const bool sent=encodeAndSend(step,true);
-    motor_.queueDiagnostics_.submit(runId_,iteration_+1,step.line,step.id,0xCD,now,sent);
+    motor_.queueDiagnostics_.submit(runner_.runId(),runner_.iteration()+1,step.line,step.id,0xCD,now,sent);
     return sent;
 }
 bool CommandQueue::syncTrigger() {
@@ -1166,7 +1078,7 @@ bool CommandQueue::syncStop(uint8_t id) {
     const bool sent=sendStopFrame(id);
     uint16_t line=currentStep()?currentStep()->line:0;
     for(uint8_t i=0;i<sync_.plan().count;++i) if(sync_.plan().axes[i].id==id) line=sync_.plan().axes[i].line;
-    motor_.queueDiagnostics_.submit(runId_,iteration_+1,line,id,0xFE,millis(),sent);
+    motor_.queueDiagnostics_.submit(runner_.runId(),runner_.iteration()+1,line,id,0xFE,millis(),sent);
     return sent;
 }
 void CommandQueue::syncObserve(uint8_t id,bool value) {motor_.syncObserve_[id]=value;}
@@ -1174,14 +1086,14 @@ void CommandQueue::pollSync(uint32_t now) {
     if(sync_.active() && !motor_.ready()) sync_.abort("can_unavailable",now);
     sync_.poll(now);
     if(sync_.phase()==SyncRuntime::Phase::Failed) {
-        if(state_==QueueState::Running) fail(now,sync_.error(),currentStep()?currentStep()->line:0);
-        else phase_=kPhaseIdle;
+        if(runner_.active()) fail(now,sync_.error(),currentStep()?currentStep()->line:0);
     } else if(sync_.phase()==SyncRuntime::Phase::Complete) {
-        if(state_!=QueueState::Running) {phase_=kPhaseIdle;return;}
+        if(!runner_.active()) return;
         const QueueStep* step=currentStep();
         if(!step || step->action!=QueueAction::SyncBegin) {fail(now,"sync_internal_step",0);return;}
-        stepIndex_+=step->groupSize+1; // advance() then skips the closing delimiter
-        advance(now);motionComplete_=!unconfirmedMotion_;setMessage("sync_motion_complete");
+        motor_.queueObserveId_ = 0;
+        motor_.releaseQueries(CanQueryScheduler::Await);
+        runner_.completeSync(step->groupSize,now);
     } else {
         setMessage(sync_.error()?sync_.error():SyncRuntime::phaseName(sync_.phase()));
     }
@@ -1218,11 +1130,11 @@ void CommandQueue::observeMotion(uint32_t now) {
             fail(now, code == 0xE2 ? "driver_rejected" : "driver_command_error", step->line);
             return;
         }
-        if (strictHome_ && home && (code == 0x12 || code == 0x22)) {
+        if (runner_.strictHome() && home && (code == 0x12 || code == 0x22)) {
             fail(now, "home_no_motion", step->line); return;
         }
         if (code == 2 || code == 0x9F || (home && (code == 0x12 || code == 0x22))) {
-            if (!accepted_) { accepted_ = true; phaseAt_ = n.queueAckMs; }
+            if (!accepted_) { accepted_ = true; runner_.markAccepted(n.queueAckMs); }
             if (home && code != 2 && !homeComplete_) {
                 homeComplete_ = true;
                 homeProofAt_ = n.queueAckMs;
@@ -1236,8 +1148,8 @@ void CommandQueue::observeMotion(uint32_t now) {
         // Fast homing may finish before any running sample is captured.
         // After a 1 s startup grace, accept a fresh idle/no-failure status.
         // Latch its first timestamp so later idle polls do not reset settling.
-        if (!strictHome_ && accepted_ && !n.queueHomeComplete && n.homeFlagsValid &&
-            newer(n.homeFlagsMs, phaseAt_) && uint32_t(n.homeFlagsMs - phaseAt_) >= 1000 &&
+        if (!runner_.strictHome() && accepted_ && !n.queueHomeComplete && n.homeFlagsValid &&
+            newer(n.homeFlagsMs, runner_.phaseAt()) && uint32_t(n.homeFlagsMs - runner_.phaseAt()) >= 1000 &&
             uint32_t(now - n.homeFlagsMs) < 1000 && !(n.homeFlags & 0x3C)) {
             n.queueHomeComplete = true;
             n.queueHomeProofMs = n.homeFlagsMs;
@@ -1248,7 +1160,7 @@ void CommandQueue::observeMotion(uint32_t now) {
     }
     // Anchor to the completion transition, NOT each subsequent idle response.
     // Otherwise the 3B/36/35 query cycle resets the stationary pair count forever.
-    const uint32_t proofAt = home && homeComplete_ ? homeProofAt_ : phaseAt_;
+    const uint32_t proofAt = home && homeComplete_ ? homeProofAt_ : runner_.phaseAt();
     const bool fresh = n.positionValid && n.velocityValid &&
         newer(n.positionMs, proofAt) && newer(n.velocityMs, proofAt) &&
         now-n.positionMs < 1000 && now-n.velocityMs < 1000;
@@ -1259,7 +1171,7 @@ void CommandQueue::observeMotion(uint32_t now) {
         (int64_t(n.targetTenths) - expectedMoveTargetTenths_ <= 5 &&
          int64_t(n.targetTenths) - expectedMoveTargetTenths_ >= -5);
     bool reached = home ? accepted_ && homeComplete_ :
-        accepted_ && n.targetValid && newer(n.targetMs, phaseAt_) &&
+        accepted_ && n.targetValid && newer(n.targetMs, runner_.phaseAt()) &&
         expectedTargetSeen &&
         int64_t(n.positionTenths)-n.targetTenths <= 1 &&
         int64_t(n.positionTenths)-n.targetTenths >= -1;
@@ -1270,7 +1182,7 @@ void CommandQueue::observeMotion(uint32_t now) {
         else doneSamples_ = 0;
         if (doneSamples_ >= 2) { advance(now); setMessage("running"); return; }
     }
-    setMessage(now-phaseAt_ > 2000 && !fresh ? "waiting_feedback" :
+    setMessage(now-runner_.phaseAt() > 2000 && !fresh ? "waiting_feedback" :
         (home ? "waiting_home" : "waiting_position"));
     if (home) {
         setMessage(!accepted_ ? "home_wait_ack" :
@@ -1278,7 +1190,7 @@ void CommandQueue::observeMotion(uint32_t now) {
             !fresh ? "home_wait_fresh_feedback" :
             (n.velocityTenths < -5 || n.velocityTenths > 5) ? "home_wait_stationary" :
             "home_confirming_stationary");
-    } else if (accepted_ && n.targetValid && newer(n.targetMs, phaseAt_) &&
+    } else if (accepted_ && n.targetValid && newer(n.targetMs, runner_.phaseAt()) &&
                !expectedTargetSeen) {
         setMessage("waiting_move_target");
     }
@@ -1288,7 +1200,7 @@ void CommandQueue::observeMotion(uint32_t now) {
     demand(0x36,200); demand(0x35,200);
     if (home && !homeComplete_) demand(0x3B,300);
     else motor_.releaseQuery(step->id,0x3B,CanQueryScheduler::Await);
-    if (!home && (!n.targetValid || !newer(n.targetMs,phaseAt_))) demand(0x33,500);
+    if (!home && (!n.targetValid || !newer(n.targetMs,runner_.phaseAt()))) demand(0x33,500);
     else motor_.releaseQuery(step->id,0x33,CanQueryScheduler::Await);
 }
 
@@ -1306,41 +1218,41 @@ void appendEscaped(String& json, const char* text) {
 String CommandQueue::statusJson() const {
     // The reported step/action describe where the run is now: the step still in
     // flight, or the one about to start after an advance. Before any run it is 0.
-    const bool hasPlan = runId_ != 0 && program_.count != 0;
+    const bool hasPlan = runner_.runId() != 0 && program_.count != 0;
     const uint16_t stepNumber = !hasPlan ? 0
-        : static_cast<uint16_t>(stepIndex_ >= program_.count ? program_.count : stepIndex_ + 1);
+        : static_cast<uint16_t>(runner_.stepIndex() >= program_.count ? program_.count : runner_.stepIndex() + 1);
     const uint16_t actionIndex = program_.count == 0 ? 0
-        : (stepIndex_ >= program_.count ? static_cast<uint16_t>(program_.count - 1)
-                                        : stepIndex_);
+        : (runner_.stepIndex() >= program_.count ? static_cast<uint16_t>(program_.count - 1)
+                                                 : runner_.stepIndex());
 
     String json;
     json.reserve(256);
     json += "{\"state\":\"";
-    json += queueStateName(state_);
+    json += queueStateName(runner_.state());
     json += "\",\"runId\":";
-    json += static_cast<unsigned long>(runId_);
+    json += static_cast<unsigned long>(runner_.runId());
     json += ",\"active\":";json += active()?"true":"false";
-    json += ",\"programHash\":";json += static_cast<unsigned long>(programHash_);
+    json += ",\"programHash\":";json += static_cast<unsigned long>(runner_.programHash());
     json += ",\"step\":";
     json += static_cast<unsigned int>(stepNumber);
     json += ",\"total\":";
     json += static_cast<unsigned int>(program_.count);
     json += ",\"iteration\":";
     json += static_cast<unsigned int>(
-        runId_ == 0 ? 0 : (iteration_ >= repeat_ ? repeat_ : iteration_ + 1));
+        runner_.runId() == 0 ? 0 : (runner_.iteration() >= runner_.repeat() ? runner_.repeat() : runner_.iteration() + 1));
     json += ",\"repeat\":";
-    json += static_cast<unsigned long>(repeat_);
+    json += static_cast<unsigned long>(runner_.repeat());
     json += ",\"line\":";
-    json += static_cast<unsigned int>(errorLine_ != 0 ? errorLine_
+    json += static_cast<unsigned int>(runner_.errorLine() != 0 ? runner_.errorLine()
         : (program_.count == 0 ? 0 : program_.steps[actionIndex].line));
     json += ",\"action\":\"";
     json += queueActionName(program_.count == 0 ? QueueAction::None
                                                 : program_.steps[actionIndex].action);
     json += "\",\"message\":\"";
-    appendEscaped(json, message_);
+    appendEscaped(json, runner_.message());
     json += "\",\"raw\":";
     json += program_.hasRaw ? "true" : "false";
-    json += ",\"motionComplete\":";json += motionComplete_?"true":"false";
+    json += ",\"motionComplete\":";json += runner_.motionComplete()?"true":"false";
     json += ",\"sync\":{\"phase\":\"";json += SyncRuntime::phaseName(sync_.phase());
     json += "\",\"mode\":\"";json += sync_.triggerOnly()?"trigger_only":"progress_guarded";
     json += "\",\"error\":\"";appendEscaped(json,sync_.error());

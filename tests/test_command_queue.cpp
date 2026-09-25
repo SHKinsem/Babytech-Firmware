@@ -1100,6 +1100,66 @@ static void test_user_wait_is_the_only_wait() {
     CHECK(opcodeFrames(0xCD) == 2);
 }
 
+static void test_run_timers_wrap_without_early_can_or_arrival_claim() {
+    QueueRig rig;
+    rig.begin();
+    const uint32_t start = 0xfffffff0u;
+    CHECK(startQueue(rig, "wait 32\nmove 1 10 deg\n", 1, start).code == 202);
+    CHECK(rig.queue.runId() == 1);
+    tick(rig, start);           // dispatch wait, which must not transmit
+    CHECK(opcodeFrames(0xCD) == 0);
+    tick(rig, 0x0000000fu);    // one millisecond before wrapped deadline
+    CHECK(opcodeFrames(0xCD) == 0);
+    tick(rig, 0x00000010u);    // timer expires, but only one step per poll
+    CHECK(opcodeFrames(0xCD) == 0);
+    tick(rig, 0x00000010u);    // now the move is sent without an implicit await
+    CHECK(opcodeFrames(0xCD) >= 1);
+    tick(rig, 0x00000011u);    // no driver RX or reached evidence was supplied
+    CHECK(has(status(rig), "\"state\":\"done\""));
+    CHECK(has(status(rig), "\"motionComplete\":false"));
+    CHECK(opcodeFrames(0xFE) == 0);
+
+    QueueRig timed;
+    timed.begin();
+    CHECK(startQueue(timed, "torque 1 300 32\n", 1, start).code == 202);
+    tick(timed, start);
+    CHECK(opcodeFrames(0xC5) == 1);
+    tick(timed, 0x0000000fu);
+    CHECK(opcodeFrames(0xFE) == 0);
+    tick(timed, 0x00000010u);
+    CHECK(opcodeFrames(0xFE) == 1);
+    tick(timed, 0x00000011u);
+    CHECK(has(status(timed), "\"state\":\"done\""));
+}
+
+static void test_raw_gap_wraps_and_cancel_prevents_next_dispatch() {
+    QueueRig rig;
+    rig.begin();
+    const uint32_t start = 0xffffffffu;
+    CHECK(startQueue(rig, "hex 01 F3 AB 01 00 6B\nhex 02 F3 AB 01 00 6B\n", 1, start).code == 202);
+    tick(rig, start);
+    CHECK(opcodeFrames(0xF3) == 1);
+    tick(rig, 0x00000000u);    // only 1 ms since the first raw frame
+    CHECK(opcodeFrames(0xF3) == 1);
+    tick(rig, 0x00000001u);    // documented minimum gap is 2 ms
+    CHECK(opcodeFrames(0xF3) == 2);
+    tick(rig, 0x00000002u);
+    CHECK(has(status(rig), "\"state\":\"done\""));
+    CHECK(has(status(rig), "\"message\":\"raw_frames_submitted\""));
+
+    QueueRig cancelled;
+    cancelled.begin();
+    CHECK(startQueue(cancelled, "move 1 10 deg\nmove 1 20 deg\n", 1, 40).code == 202);
+    tick(cancelled, 40);
+    CHECK(opcodeFrames(0xCD) >= 1);
+    const uint32_t beforeCancel = opcodeFrames(0xCD);
+    CHECK(cancelled.queue.cancel("operator_cancel").code == 202);
+    tick(cancelled, 60);
+    tick(cancelled, 80);
+    CHECK(opcodeFrames(0xCD) == beforeCancel);
+    CHECK(has(status(cancelled), "\"state\":\"cancelled\""));
+}
+
 static void test_legacy_timed_forms_stop_after_the_duration_only() {
     QueueRig rig;
     rig.begin();
@@ -1561,6 +1621,8 @@ int main() {
         {"direct program sends without any RX", test_direct_program_sends_without_any_rx},
         {"move frames keep the big-endian wire layout", test_move_frames_keep_big_endian_layout},
         {"only a user wait waits", test_user_wait_is_the_only_wait},
+        {"wrapped wait never sends early or claims arrival", test_run_timers_wrap_without_early_can_or_arrival_claim},
+        {"wrapped raw gap and cancellation gate dispatch", test_raw_gap_wraps_and_cancel_prevents_next_dispatch},
         {"legacy timed forms stop after the duration only", test_legacy_timed_forms_stop_after_the_duration_only},
         {"repeat still repeats and cancel still cancels", test_repeat_and_cancel_still_work},
         {"TX failure ends the run without extra CAN", test_tx_failure_stops_the_run_without_extra_can},
