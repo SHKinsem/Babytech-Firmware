@@ -148,6 +148,7 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
         for (uint16_t id = 1; id < kNodeCount; ++id) {
             NodeState& node = nodes_[id];
             node.enablePending = false;
+            node.recoverFaultPending = false;
             node.enableConfirmed = false;
             node.enableDesired = false;
             if (id == activeId || id == selectedId_ || node.stopRequested) {
@@ -349,6 +350,12 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
                 bool(node.flags & 1) == node.enableDesired) {
                 node.enableConfirmed = node.enableDesired;
                 node.enablePending = false;
+                // A recovery request clears its latched diagnosis only after
+                // both the F3 answer and this post-request 3A observation
+                // agree. CAN replies have no transaction ID, so an older
+                // delayed reply remains a protocol-level ambiguity.
+                if (node.enableConfirmed && node.recoverFaultPending) clearFault(id);
+                node.recoverFaultPending = false;
             }
             break;
         case FeedbackField::None:
@@ -407,6 +414,9 @@ void MotorControl::handleAck(
                 bool(node.flags & 1) == node.enableDesired) {
                 node.enableConfirmed = node.enableDesired;
                 node.enablePending = false;
+                // The 3A may have arrived before the F3 answer in this batch.
+                if (node.enableConfirmed && node.recoverFaultPending) clearFault(id);
+                node.recoverFaultPending = false;
             }
             if (!node.enableDesired) {
                 node.stopRequested = true;
@@ -441,6 +451,7 @@ void MotorControl::handleAck(
     node.enableConfirmed = false;
     node.enableDesired = false;
     node.enablePending = false;
+    node.recoverFaultPending = false;
     node.stopRequested = true;
     node.stopRequestedMs = now;
     if (manual_.moveActive() && manual_.moveId() == id) {
@@ -559,11 +570,12 @@ void MotorControl::latchFault(uint8_t id, const char* tag, bool global) {
     faultGlobal_ = global;
     // A latched fault invalidates the enable confirmation and cancels any
     // enable still in flight, so a late F3 ack cannot re-enable a faulted node:
-    // only a fresh explicit enable (after the fault clears) may do that.
+    // only a fresh explicit enable with later confirmation may clear the fault.
     for (uint16_t nodeId = 1; nodeId < kNodeCount; ++nodeId) {
         if (!global && nodeId != id) continue;
         NodeState& node = nodes_[nodeId];
         node.enablePending = false;
+        node.recoverFaultPending = false;
         node.enableConfirmed = false;
         syncEnableDesired(static_cast<uint8_t>(nodeId));
     }
@@ -588,6 +600,7 @@ void MotorControl::serviceEnableTimeouts(uint32_t now) {
         if (ageWithin(now, node.enablePendingMs, kEnableAckTimeoutMs)) continue;
         // No acknowledgement in time: the requested state was never confirmed.
         node.enablePending = false;
+        node.recoverFaultPending = false;
         if (node.enableDesired) node.enableConfirmed = false;
         node.lastAck = "enable_timeout";
         node.enableAck = false; node.enableTimedOut = true;
@@ -858,6 +871,9 @@ Result MotorControl::enable(uint8_t id, bool state) {
     const uint32_t now = millis();
     if (id == 0) return Result{kCodeInvalid, "id_reserved"};
     if (state && configPending()) return Result{kCodeBusy, "config_pending"};
+    // An operator's disable attempt withdraws recovery authority even if the
+    // CAN bus is already unavailable and the F3 disable cannot be sent.
+    if (!state) nodes_[id].recoverFaultPending = false;
     refreshBusStatus();
     if (!canReady()) {
         return Result{
@@ -916,12 +932,13 @@ Result MotorControl::enable(uint8_t id, bool state) {
     if (anyStopPending()) return Result{kCodeBusy, "stop_pending"};
     if (node.enablePending) return Result{kCodeBusy, "enable_pending"};
 
-    // Explicit enable is the recovery path out of a latched fault.
-    if (faultAppliesTo(id)) {
+    // Explicit enable may begin recovery when the target is freshly stationary.
+    // The fault stays latched until F3 acknowledgement AND a new enabled 3A.
+    const bool recoveringFault = faultAppliesTo(id);
+    if (recoveringFault) {
         if (!stationaryFeedback(id, now, 0)) {
             return Result{kCodeBusy, "fault_latched"};
         }
-        clearFault(id);
     }
 
     bus_.clearTransmissionError();
@@ -931,6 +948,7 @@ Result MotorControl::enable(uint8_t id, bool state) {
         bus_.clearTransmissionError();
         node.enableConfirmed = false;
         node.enablePending = false;
+        node.recoverFaultPending = false;
         return Result{kCodeUnavailable, "can_tx_failed"};
     }
 
@@ -938,6 +956,7 @@ Result MotorControl::enable(uint8_t id, bool state) {
     node.enableDesired = true;
     node.enableConfirmed = false;
     node.enablePending = true;
+    node.recoverFaultPending = recoveringFault;
         node.enableAck = false; node.enableTimedOut = false;
     node.enablePendingMs = now;
     return Result{kCodeQueued, "queued"};
@@ -1337,6 +1356,7 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
             node.enableConfirmed = false;
             node.enableDesired = id ? enabled : false;
             node.enablePending = id != 0;
+            node.recoverFaultPending = false;
             node.enableAck = false;
             node.enableTimedOut = false;
             node.enablePendingMs = millis();
@@ -1366,6 +1386,7 @@ void MotorControl::noteRawTransmission(uint8_t id) {
         if (id != 0 && nodeId != id) continue;
         NodeState& node = nodes_[nodeId];
         node.enablePending = false;
+        node.recoverFaultPending = false;
         node.enableConfirmed = false;
         syncEnableDesired(static_cast<uint8_t>(nodeId));
         // The position/velocity/flags confirmations describe the bus state
@@ -1423,6 +1444,7 @@ Result MotorControl::stop(uint8_t id) {
     // after every stop. Explicit disable and latched faults still clear it.
     node.enableAck = false; node.enableTimedOut = false;
     node.enablePending = false;
+    node.recoverFaultPending = false;
     // The desire follows the confirmation again: an enable that was only ever
     // requested (never confirmed) must not leave a phantom desire behind.
     syncEnableDesired(id);
@@ -1469,6 +1491,7 @@ Result MotorControl::stopAll() {
         // is still required to drop it. The desire follows the confirmation, so
         // a never-confirmed request leaves no phantom desire behind.
         node.enablePending = false;
+        node.recoverFaultPending = false;
         syncEnableDesired(static_cast<uint8_t>(id));
     }
 
@@ -1494,16 +1517,16 @@ Result MotorControl::stopAll() {
 Result MotorControl::broadcastEnable(bool enabled) {
     const uint8_t frame[] = {0, 0xF3, 0xAB, uint8_t(enabled ? 1 : 0), 0, 0x6B};
     if (enabled) {
+        // Even a reported TX failure can leave delivery uncertain. Withdraw
+        // earlier disable proof before trying a broadcast re-enable, and wait
+        // for new 3A + stationary feedback before releasing a stop wait.
+        for (uint16_t id = 1; id < kNodeCount; ++id) {
+            if (nodes_[id].broadcastDisablePending)
+                nodes_[id].broadcastDisableProofValid = false;
+            nodes_[id].recoverFaultPending = false;
+        }
         // Broadcast has no per-node acknowledgement; do not invent confirmations.
         const bool sent = queueSendLogical(frame, sizeof(frame));
-        if (sent) {
-            // Our own possible re-enable withdraws a previous disabled proof
-            // even before the next 3A reply arrives.
-            for (uint16_t id = 1; id < kNodeCount; ++id) {
-                if (nodes_[id].broadcastDisablePending)
-                    nodes_[id].broadcastDisableProofValid = false;
-            }
-        }
         return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
     }
 
@@ -1541,6 +1564,7 @@ Result MotorControl::broadcastEnable(bool enabled) {
         // An earlier confirmed enable remains true until real disabled flags
         // arrive: a failed broadcast might have left the driver enabled.
         node.enablePending = false;
+        node.recoverFaultPending = false;
         node.enableAck = false;
         node.enableTimedOut = false;
         node.enableDesired = false;
@@ -1578,6 +1602,9 @@ void MotorControl::takeQueueControl() {
     manual_.supersede();
     experimentId_ = 0;
     experimentStart_ = 0;
+    // Queue takeover relinquishes an operator's in-flight recovery intent.
+    for (uint16_t id = 1; id < kNodeCount; ++id)
+        nodes_[id].recoverFaultPending = false;
     // A failed broadcast disable is still unresolved hardware evidence. A
     // queue takeover must not erase the diagnostic while the driver may run.
     if (strcmp(faultTag_, kFaultDisableTxFailed) != 0) {
@@ -1594,7 +1621,16 @@ void MotorControl::takeQueueControl() {
 }
 
 void MotorControl::clearControlState() {
+    // Queue takeover retains its existing fault policy. An operator reset only
+    // releases software ownership, so keep the current diagnostic as evidence
+    // for the explicit, subsequently verified recovery path.
+    const char* faultTag = faultTag_;
+    const uint8_t faultId = faultId_;
+    const bool faultGlobal = faultGlobal_;
     takeQueueControl();
+    faultTag_ = faultTag;
+    faultId_ = faultId;
+    faultGlobal_ = faultGlobal;
     queueObserveId_ = 0;
     // This resets software ownership only. Confirmed enables, pending stops,
     // broadcast disable evidence and feedback describe hardware that this

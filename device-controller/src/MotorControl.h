@@ -287,6 +287,9 @@ private:
         bool enablePending = false;
         bool enableAck = false, enableTimedOut = false;
         uint32_t enablePendingMs = 0;
+        // Only explicit enable(true) owns recovery of a latched fault. Queue
+        // and raw F3 requests can confirm enable without clearing diagnosis.
+        bool recoverFaultPending = false;
 
         bool stopRequested = false;
         uint32_t stopRequestedMs = 0;

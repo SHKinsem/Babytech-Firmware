@@ -2355,6 +2355,178 @@ static void test_stop_all_does_not_invent_unseen_target() {
     CHECK(!rig.mc.operationBusy());
 }
 
+// A failed addressed disable latches a recoverable, per-node fault. Resolve
+// its stop wait with new stationary feedback, while retaining the diagnosis.
+static void prepareRecoverableEnableFault(Rig& rig) {
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    setMillis(60);
+    failNextEnableTx = true;
+    CHECK(rig.mc.enable(1, false).code == kCodeUnavailable);
+    CHECK(std::string(rig.mc.faultTag()) == "disable_tx_failed");
+    CHECK(rig.mc.snapshot(1).stopPending);
+    setMillis(80);
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.hasFault());
+}
+
+static void test_enable_recovery_keeps_fault_until_ack_and_flag() {
+    Rig rig;
+    prepareRecoverableEnableFault(rig);
+    setMillis(90);
+    failNextEnableTx = true;
+    CHECK(rig.mc.enable(1, true).code == kCodeUnavailable);
+    CHECK(rig.mc.hasFault());
+    CHECK(!rig.mc.snapshot(1).enabled);
+    CHECK(!rig.mc.snapshot(1).enablePending);
+
+    setMillis(100);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    CHECK(rig.mc.hasFault()); // Queued F3 is not recovery evidence.
+    setMillis(120);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault()); // Receive mode's 02 only accepts the request.
+    CHECK(!rig.mc.snapshot(1).enabled);
+    setMillis(140);
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.hasFault());
+    CHECK(rig.mc.snapshot(1).enabled);
+}
+
+static void test_enable_recovery_flag_first_and_timeout() {
+    Rig rig;
+    prepareRecoverableEnableFault(rig);
+    setMillis(100);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    setMillis(120);
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault()); // A driver flag alone does not own F3 acceptance.
+    CHECK(!rig.mc.snapshot(1).enabled);
+    setMillis(1700); // Past the existing 1500 ms F3 timeout.
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault());
+    CHECK(!rig.mc.snapshot(1).enablePending);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    setMillis(1720);
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault()); // Late ACK must not recover a timed-out request.
+
+    setMillis(1740);
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    setMillis(1750);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    setMillis(1770);
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault());
+    setMillis(1790);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.hasFault());
+    CHECK(rig.mc.snapshot(1).enabled);
+}
+
+static void test_failed_disable_withdraws_recovery_authority() {
+    Rig rig;
+    prepareRecoverableEnableFault(rig);
+    setMillis(100);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    busState = CanControllerState::Stopped;
+    setMillis(110);
+    CHECK(rig.mc.enable(1, false).code == kCodeUnavailable);
+    busState = CanControllerState::Running;
+    setMillis(120);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault());
+}
+
+static void test_control_reset_preserves_local_fault_evidence() {
+    Rig rig;
+    prepareRecoverableEnableFault(rig);
+    const size_t before = capturedTX.size();
+    rig.mc.clearControlState();
+    CHECK(capturedTX.size() == before); // Reset itself sends no CAN request.
+    CHECK(rig.mc.hasFault());
+    CHECK(std::string(rig.mc.faultTag()) == "disable_tx_failed");
+    CHECK(rig.mc.snapshot(1).fault);
+    CHECK(status(rig, 1).find("\"fault\":\"disable_tx_failed\"") != std::string::npos);
+
+    // A reset during a subsequent recovery attempt withdraws that attempt's
+    // authority. Its eventual ACK and flag can describe enable, not recovery.
+    setMillis(100);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    rig.mc.clearControlState();
+    setMillis(120);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).enabled);
+    CHECK(rig.mc.hasFault());
+}
+
+static void test_control_reset_preserves_ordinary_manual_fault() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    CHECK(startMove(rig, 1, 30.0f, 60).code == kCodeQueued);
+    setMillis(80);
+    injectRx(makeAck(1, kFrameMove, 0xE2));
+    rig.mc.poll(false);
+    CHECK(std::string(rig.mc.faultTag()) == "ack_rejected");
+    CHECK(rig.mc.snapshot(1).stopPending);
+    const size_t before = capturedTX.size();
+    rig.mc.clearControlState();
+    CHECK(capturedTX.size() == before);
+    CHECK(std::string(rig.mc.faultTag()) == "ack_rejected");
+    CHECK(rig.mc.snapshot(1).fault);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    CHECK(status(rig, 1).find("\"fault\":\"ack_rejected\"") != std::string::npos);
+}
+
+static void test_queue_f3_does_not_clear_operator_fault() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(1);
+    setMillis(10);
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    setMillis(30);
+    failNextMoveTx = true;
+    CHECK(rig.mc.broadcastEnable(false).code == kCodeUnavailable);
+    setMillis(50);
+    injectRx(makeFlags(1, 0));
+    rig.mc.poll(false);
+    setMillis(70);
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.hasFault());
+    rig.mc.takeQueueControl(); // Actual queue takeover preserves this global fault.
+    CHECK(rig.mc.hasFault());
+    const uint8_t rawEnable[] = {1, 0xF3, 0xAB, 1, 0, 0x6B};
+    setMillis(100);
+    CHECK(rig.mc.queueSendLogical(rawEnable, sizeof(rawEnable)));
+    setMillis(120);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).enabled); // Queue's own F3 can be confirmed.
+    CHECK(rig.mc.hasFault()); // It cannot authorize fault recovery.
+    CHECK(std::string(rig.mc.faultTag()) == "disable_tx_failed");
+}
+
 static void test_broadcast_disable_waits_for_driver_and_stop_proof() {
     Rig rig;
     CHECK(rig.mc.begin(4, 5, 500000));
@@ -2660,6 +2832,39 @@ static void test_broadcast_disable_proof_withdrawn_by_reenable_or_bus_off() {
     CHECK(rig.mc.hasFault()); // Bus-off diagnosis needs explicit recovery.
 }
 
+static void test_failed_broadcast_reenable_withdraws_disable_proof() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(10);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    setMillis(30);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(50);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+
+    setMillis(60);
+    failNextMoveTx = true;
+    CHECK(rig.mc.broadcastEnable(true).code == 503);
+    setMillis(80);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    setMillis(100);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    setMillis(120);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+}
+
 static void test_failed_broadcast_disable_retains_fault_and_stop_waits() {
     Rig rig;
     CHECK(rig.mc.begin(4, 5, 500000));
@@ -2732,9 +2937,14 @@ static void test_failed_broadcast_disable_retains_fault_and_stop_waits() {
     CHECK(otaMotionGate());
     CHECK(rig.mc.hasFault()); // Fault is diagnostic until explicit recovery.
 
-    // Fresh stationary evidence now permits the existing explicit enable
-    // recovery path to clear the fault and start a new request.
+    // Fresh stationary evidence permits explicit recovery, but F3 submission
+    // alone cannot clear the global diagnostic.
     CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    CHECK(rig.mc.hasFault());
+    setMillis(250);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
     CHECK(!rig.mc.hasFault());
 }
 
@@ -2808,6 +3018,7 @@ int main() {
         {"new broadcast disable resets proof across millis wrap", test_broadcast_disable_new_request_resets_proof_across_millis_wrap},
         {"stale disabled flags refresh before stop proof releases", test_broadcast_disable_requires_fresh_flags_at_release},
         {"re-enable and bus-off withdraw broadcast disable proof", test_broadcast_disable_proof_withdrawn_by_reenable_or_bus_off},
+        {"failed broadcast re-enable also withdraws disable proof", test_failed_broadcast_reenable_withdraws_disable_proof},
         {"failed broadcast disable retains fault, waits and OTA gate", test_failed_broadcast_disable_retains_fault_and_stop_waits},
         {"broadcast disable tracks an observed selected node", test_broadcast_disable_tracks_observed_selection_without_enable},
         {"broadcast disable aborts home before F3", test_broadcast_disable_aborts_home_before_f3},
@@ -2822,6 +3033,12 @@ int main() {
         {"global query budget and repeated demands past 600ms", test_query_global_budget_and_repeats_past_600ms},
         {"shared query budget: selected + active, no periodic current", test_query_budget_selected_and_active_without_current},
         {"enable confirmed only after F3 02", test_enable_confirmed_only_after_f3_02},
+        {"recovery retains fault until F3 ACK and enabled flag", test_enable_recovery_keeps_fault_until_ack_and_flag},
+        {"recovery handles flag-first order and timed-out ACK", test_enable_recovery_flag_first_and_timeout},
+        {"failed disable withdraws recovery authority", test_failed_disable_withdraws_recovery_authority},
+        {"control reset preserves local fault evidence", test_control_reset_preserves_local_fault_evidence},
+        {"control reset preserves ordinary manual fault", test_control_reset_preserves_ordinary_manual_fault},
+        {"queue F3 confirmation cannot clear operator fault", test_queue_f3_does_not_clear_operator_fault},
         {"late F3 ack after stop does not enable", test_late_f3_ack_after_stop_does_not_enable},
         {"move requires fresh feedback + enable", test_move_requires_fresh_feedback_and_enable},
         {"move completion: CD ack + two distinct pairs", test_move_completion_needs_cd_ack_and_two_distinct_pairs},

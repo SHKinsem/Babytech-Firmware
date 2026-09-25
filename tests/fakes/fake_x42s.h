@@ -51,6 +51,7 @@ extern CanControllerState busState;          // what getBusStatus() reports
 extern bool busStatusAvailable;              // false -> getBusStatus() fails
 extern uint32_t txErrorCounter;              // reported TX error counter
 extern bool failNextMoveTx;                  // make the next move TX set an error
+extern bool failNextEnableTx;                // make the next addressed F3 TX fail
 
 // Resets clocks, queues, captured traffic and controller state.
 void fakeReset();

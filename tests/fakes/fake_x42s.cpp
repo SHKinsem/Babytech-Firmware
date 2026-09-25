@@ -16,6 +16,7 @@ CanControllerState busState = CanControllerState::Running;
 bool busStatusAvailable = true;
 uint32_t txErrorCounter = 0;
 bool failNextMoveTx = false;
+bool failNextEnableTx = false;
 
 namespace {
 uint32_t g_millis = 0;
@@ -38,6 +39,7 @@ void fakeReset() {
     busStatusAvailable = true;
     txErrorCounter = 0;
     failNextMoveTx = false;
+    failNextEnableTx = false;
     g_millis = 0;
 }
 
@@ -247,6 +249,12 @@ void X42sProtocol::enableControl(uint8_t addr, bool state, bool sync) {
     rec.enableState = state;
     rec.sync = sync;
     fakecan::emit(addr, data, sizeof(data), rec);
+    if (fakecan::failNextEnableTx) {
+        // The helper is void, so the controller observes this through its
+        // transmission-error latch. Delivery remains uncertain to the caller.
+        fakecan::failNextEnableTx = false;
+        transmissionError_ = true;
+    }
     // The real helper sends through sendCommand(), which traces its TX frame.
     if (traceSink_) traceSink_(traceContext_, fakecan::capturedTX.back(), true);
 }
