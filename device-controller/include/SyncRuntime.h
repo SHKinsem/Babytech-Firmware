@@ -65,6 +65,13 @@ public:
         if(active()) return;
         phase_=Phase::Idle;plan_.count=0;error_=nullptr;triggerOnly_=false;
     }
+    // Relinquish a verified group when the operator switches to unverified
+    // sending. Do not issue fault stops or wait for driver feedback. The caller
+    // must account for any CD/FF frames already sent before calling this.
+    void releaseWithoutStop() {
+        if(active()) release();
+        phase_=Phase::Idle;plan_.count=0;error_=nullptr;triggerOnly_=false;
+    }
     const char* validate(const QueueStep* axes,uint8_t count,const SyncSettings& settings,
                          SyncPlan* output=nullptr,bool triggerOnly=false) {
         static SyncPlan scratch;

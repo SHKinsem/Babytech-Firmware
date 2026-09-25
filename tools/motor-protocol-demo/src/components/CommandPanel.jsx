@@ -107,6 +107,7 @@ function FieldRow({ field, value, error, onChange, inputId }) {
 
 export function CommandPanel({
   device = false,
+  unverifiedMode = false,
   item,
   variantKey,
   onVariantChange,
@@ -151,7 +152,7 @@ export function CommandPanel({
         <h2 className="panel__title" ref={headingRef} tabIndex={headingRef ? -1 : undefined}>{item.name}</h2>
         <span className="chip chip--code">0x{hexByte(variant.opcode)}</span>
         <span className={`chip ${baseInterface ? 'chip--ok' : 'chip--muted'}`}>
-          {device ? '板端校验' : item.custom ? '自定义' : baseInterface ? '基础接口' : '驱动已实现'}
+          {device ? unverifiedMode ? '不校验直发' : '板端校验' : item.custom ? '自定义' : baseInterface ? '基础接口' : '驱动已实现'}
         </span>
         <span className="chip chip--soft">{item.groupName}</span>
         {onChooseCommand ? <button type="button" className="command__change-command" onClick={onChooseCommand}>更换指令</button> : null}
@@ -296,12 +297,12 @@ export function CommandPanel({
               <span className="raw__meta">
                 {rawDirty
                   ? identifiedItem
-                    ? `已匹配到「${identifiedItem.name}」：按匹配指令校验。${
+                    ? `已匹配到「${identifiedItem.name}」：${unverifiedMode ? 'HEX 按原样提交，仅检查报文格式。' : '按匹配指令校验。'}${
                       model.bytes[0] === address
                         ? ''
                         : `（地址字节为 0x${hexByte(model.bytes[0])}，与顶部 CAN ID 设置不同）`
                     }`
-                    : '未匹配到已知功能码；实机模式禁止发送。'
+                    : unverifiedMode ? '未匹配到已知功能码；不校验模式可按原始 HEX 提交。' : '未匹配到已知功能码；实机模式禁止发送。'
                   : '未修改：与左侧参数表单保持一致。'}
               </span>
               <span className="raw__actions">
@@ -380,12 +381,12 @@ export function CommandPanel({
         ) : (
           <p className="actions__hint">
             <GlyphInfo />
-            <span>指令提交后等待电机应答；收到应答不等于机械动作完成。</span>
+            <span>{unverifiedMode ? '仅提交可编码的原始指令；发送成功不代表驱动接收或机械动作完成。' : '指令提交后等待电机应答；收到应答不等于机械动作完成。'}</span>
           </p>
         )}
         {device && response ? <div className="command-result" role="status" aria-label="本次指令反馈">
           <div className="command-result__head"><strong>最近发送 · 电机 {response.address} · 0x{hexByte(response.opcode)}</strong>
-            <span>{response.phase === 'sending' ? '正在提交' : response.phase === 'queued' ? '请求已入队' : response.phase === 'unknown' ? '请求结果未知' : response.phase === 'restarted' ? '板端已重启' : '板端拒绝'}</span></div>
+            <span>{response.phase === 'sending' ? '正在提交' : response.phase === 'queued' ? unverifiedMode ? '已提交发送' : '请求已入队' : response.phase === 'unknown' ? '请求结果未知' : response.phase === 'restarted' ? '板端已重启' : '板端拒绝'}</span></div>
           {response.phase === 'rejected' ? <p>板端拒绝：{response.detail}</p> : response.phase === 'restarted' ? <p>{response.detail}</p> : <>
             {response.phase === 'unknown' && response.detail ? <p>{response.detail}</p> : null}
             <p>{response.txSeen ? 'CAN TX 已在板端记录' : '尚未在板端记录看到 CAN TX'} · {response.rxCount ? `收到 ${response.rxCount} 包同地址/功能码 RX` : '尚未收到同地址/功能码 RX'}</p>

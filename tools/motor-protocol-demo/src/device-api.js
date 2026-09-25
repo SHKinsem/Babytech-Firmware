@@ -314,7 +314,97 @@ export const isMotionOpcode = (op) => MOTION_OPS.includes(op);
 export const LIMIT_DEPENDENT_OPS = [...MOTION_OPS, 0x45];
 export const isLimitDependentOpcode = (op) => LIMIT_DEPENDENT_OPS.includes(op);
 
-export const stateLabels = { idle:'已使能 · 静止', disabled:'未使能', enabled:'已使能', moving:'运动中', homing:'回零中', stop_requested:'等待停止反馈', enable_pending:'等待使能应答', fault:'故障', experiment_running:'试验运行中' };
+export const stateLabels = { idle:'板端未报告受监督动作', disabled:'板端未确认使能', enabled:'已使能', moving:'运动中', homing:'回零中', stop_requested:'等待停止反馈', enable_pending:'等待使能应答', fault:'故障', experiment_running:'试验运行中' };
+
+/** A missing or malformed mode answer must never be mistaken for "off". */
+export function readUnverifiedMode(payload) {
+  return typeof payload?.unverifiedMode === 'boolean' ? payload.unverifiedMode : null;
+}
+
+/** Raw laboratory command for direct-send mode: retain every byte, including
+ * broadcast address 00 and unknown opcodes. HTTP /api/command accepts 3..30
+ * bytes; the final 6B is part of the X logical-frame wire shape. */
+export function parseUnverifiedLogicalHex(raw) {
+  const source = String(raw ?? '').replace(/[\s,]+/g,'');
+  const errors = [];
+  if (!source || /[^0-9a-fA-F]/.test(source) || source.length % 2) errors.push('请输入完整的十六进制字节（每字节两位）');
+  const bytes = errors.length ? [] : Array.from({length:source.length / 2},(_,i)=>parseInt(source.slice(i*2,i*2+2),16));
+  if (!errors.length && (bytes.length < 3 || bytes.length > 30)) errors.push('逻辑指令需要 3..30 字节');
+  if (!errors.length && bytes.at(-1) !== 0x6b) errors.push('X 逻辑指令末字节必须是 6B');
+  return {ok:errors.length===0,errors,bytes};
+}
+
+export const UNVERIFIED_MANUAL_LIMITS = {
+  minAbsAngleDeg:0, maxAbsAngleDeg:0xffffffff / 10,
+  minSpeedRpm:0, maxSpeedRpm:0xffff / 10,
+  minAccelRpmS:0, maxAccelRpmS:0xffff,
+  minCurrentMa:0, maxCurrentMa:0xffff,
+  maxExpectedDurationMs:0, // a duration is never used to gate direct send
+};
+
+/**
+ * The direct-send manual form keeps only field syntax and CD wire widths. It
+ * deliberately does not use saved board limits, feedback, or a time estimate
+ * as permission to send. The board sends these exact encoded values.
+ */
+export function planUnverifiedManualMove(input) {
+  const errors = {};
+  const field = (key, label, scale, max, integer = false) => {
+    const raw = String(input?.[key] ?? '').trim();
+    const value = Number(raw);
+    if (!raw || !Number.isFinite(value) || value < 0 || (integer && !Number.isInteger(value))) {
+      errors[key] = `${label}需为${integer ? '非负整数' : '非负有限数字'}`;
+      return null;
+    }
+    const encoded = value * scale;
+    if (!Number.isSafeInteger(encoded) || value > max / scale || encoded > max) {
+      errors[key] = `${label}必须精确落在协议单位上，且不超过 ${max / scale}`;
+      return null;
+    }
+    return encoded;
+  };
+  const clk = field('angle', '相对角度', 10, 0xffffffff);
+  const vel = field('speed', '速度', 10, 0xffff);
+  const accel = field('accel', '加速度', 1, 0xffff, true);
+  const decel = field('decel', '减速度', 1, 0xffff, true);
+  const maxCurrentMa = field('current', '电流上限', 1, 0xffff, true);
+  const dir = Number(input?.dir) === 1 ? 1 : 0;
+  if (Object.keys(errors).length) return {ok:false, errors, plan:null, deltaTenths:0, durationMs:0};
+  return {
+    ok:true, errors:{},
+    plan:{dir, accel, decel, vel, clk, motionMode:2, sync:0, maxCurrentMa},
+    deltaTenths:dir ? -clk : clk,
+    // Observation only. Zero means the estimate is unavailable, never refused.
+    durationMs:expectedDurationMs(clk, vel, accel, decel),
+  };
+}
+
+/** CD immediate position command, using the accepted wire values verbatim. */
+export function encodeUnverifiedManualMove(address, plan) {
+  if (!Number.isInteger(address) || address < 1 || address > 255 || !plan) return {bytes:[], labels:[]};
+  const word = n => [(n >>> 8) & 0xff, n & 0xff];
+  const long = n => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+  return {
+    bytes:[address, 0xcd, plan.dir, ...word(plan.accel), ...word(plan.decel), ...word(plan.vel), ...long(plan.clk), 2, 0, ...word(plan.maxCurrentMa), 0x6b],
+    labels:[],
+  };
+}
+
+/** The enable bit can outlive a stop or broadcast-disable request. Give the
+ * unresolved operation priority over that last confirmed bit in the UI. */
+export function enableStatusPresentation(status, connected) {
+  if (!connected) return { text:'使能未知', confirmed:false };
+  if (status?.fault === 'disable_tx_failed' || status?.control?.fault === 'disable_tx_failed')
+    return { text:'失能发送失败 · 使能状态待核对', confirmed:false };
+  if (status?.state === 'stop_requested')
+    return { text:'停止待确认 · 使能状态待核对', confirmed:false };
+  if (status?.state === 'enable_pending')
+    return { text:'使能应答待确认', confirmed:false };
+  if (!status?.online) return { text:'使能反馈待刷新', confirmed:false };
+  return status.enabled
+    ? { text:'使能已确认', confirmed:true }
+    : { text:'使能未确认', confirmed:false };
+}
 
 /**
  * Homing outcome reported by the controller (`status.homeOutcome`, frozen names
@@ -525,6 +615,7 @@ export function queueConflictReason(bytes, { running = false, unknown = false } 
 }
 
 export const errorLabels = {
+  control_mode_busy:'队列或内置 Demo 正在运行，请等待脚本发送结束或先停止，再关闭不校验模式',
   sync_cache_isolation_unverified:'旧版固件要求人工隔离确认；请更新控制板固件。当前页面无需勾选人工许可。',
   driver_disabled:'驱动器反馈已失能，运动已终止',
   move_timeout:'在配置的单步时长内未确认到位，请查看失败时的目标与实际位置',
@@ -538,6 +629,7 @@ export const errorLabels = {
   enable_ack_timeout:'未确认本次使能：需 F3 应答与新的 3A 实际状态',
   wifi_busy:'Wi-Fi 正忙，请稍后再试', busy:'设备忙，请先停止并关闭使能',
   not_enabled:'尚未收到使能确认', can_unavailable:'CAN 控制器不可用', can_tx_failed:'CAN 发送失败，检查接线与终端电阻',
+  disable_tx_failed:'广播失能发送失败；电机可能仍使能，请检查 CAN 与逐台反馈',
   feedback_unavailable:'缺少新鲜位置／速度反馈', feedback_stale:'电机反馈中断', stop_pending:'等待真实静止反馈',
   enable_and_wait_for_stationary_feedback:'请先使能，并等待静止反馈',
   disable_and_wait_for_stationary_feedback:'配置前请关闭使能，并等待真实静止反馈',
@@ -562,7 +654,7 @@ export const errorLabels = {
   motion_mode_invalid:'运动模式只能是 0（相对上一输入目标）／1（绝对坐标零点）／2（相对当前位置）',
   direct_sync_not_supported:'板端只监督立即执行的直通位置（FB/CB）；缓存待 FF 触发的方式未接入，可用队列的原始帧下发',
   // 清除板端状态 (POST /api/control/reset)
-  control_state_cleared_stop_unconfirmed:'板端已清除内部状态，但停止发送未确认：不要假定电机已停止，请先看反馈，再显式重新使能',
+  control_state_cleared_stop_unconfirmed:'软件控制占用已清理，但停止帧发送未确认；板端保留使能、待停止与故障证据，请核对 CAN 与电机反馈',
   control_reset_unavailable:'板端没有 /api/control/reset 接口（固件未更新）：该按钮需要较新的固件',
   // Homing parameter writes (0x4C) and homing supervision (0x9A).
   home_current_out_of_range:'碰撞检测电流超出板端当前电流策略，请查看「调试限制」',

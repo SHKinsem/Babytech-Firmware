@@ -79,6 +79,9 @@ struct Parameters {
     bool set(uint16_t field, uint32_t value);
 };
 bool validParameters(const Parameters& p);
+// Structural limits of the UART stage-to-CAN bridge. This deliberately omits
+// motion policy and feedback assumptions but rejects values that would narrow.
+bool representableParameters(const Parameters& p);
 Frame readField(uint64_t session, uint32_t seq, uint64_t boot,
                 uint8_t object, uint16_t instance, uint16_t field);
 } }

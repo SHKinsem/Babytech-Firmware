@@ -6,16 +6,18 @@
 #include <vector>
 using namespace babytech::v2;
 struct Fake : Backend {
-    bool busyValue=false,faultValue=false,stoppedValue=false;
+    bool busyValue=false,faultValue=false,stoppedValue=false,stopSentValue=false;
+    bool stopTransmit=true,unverifiedValue=false;
     int moves=0,stops=0,enables=0; Outcome op=Outcome::Accepted;
+    bool unverifiedMode()const override{return unverifiedValue;}
     bool busy()const override{return busyValue;}
     bool fault()const override{return faultValue;}
     bool motorsAvailable()const override{return true;}
     Reason startMove(const Parameters&)override{++moves;op=Outcome::Accepted;return Reason::None;}
     Reason enable(uint8_t,bool)override{++enables;op=Outcome::Accepted;return Reason::None;}
     Outcome operation(Reason& r)const override{r=Reason::None;return op;}
-    void stop()override{++stops;op=Outcome::Cancelled;}
-    bool stopped()const override{return stoppedValue;}
+    void stop()override{++stops;op=Outcome::Cancelled;stopSentValue=stopTransmit;}
+    bool stopped()const override{return unverifiedValue ? stopSentValue : stoppedValue;}
     void watch(uint8_t)override{}
     size_t motorFeedback(uint8_t,uint8_t* p,size_t)const override{std::memset(p,0,23);return 23;}
 };
@@ -116,6 +118,96 @@ void lifecycle() {
     for(uint32_t seq=3;seq<15;++seq)e2.handle(write(seq,1,3,0),3000+seq,out);
     e2.handle(q,4000,out);expect(out,Outcome::Rejected,Reason::ResultExpired);assert(b2.moves==1);
 }
+void unverifiedEndpoint() {
+    Fake b;b.unverifiedValue=true;b.busyValue=true;b.faultValue=true;
+    Endpoint e(b);e.begin(9);Frame out,event;
+    // Revision, fault, busy and strict travel/speed policy do not block writes.
+    auto q=write(1,999,3,65535);
+    e.handle(q,0,out);expect(out,Outcome::Ok);
+    assert(e.parameters().speed==65535 && e.status(0).revision==2);
+    q=write(2,0,5,0);e.handle(q,1,out);expect(out,Outcome::Ok);
+    q=write(3,0,1,255);e.handle(q,2,out);expect(out,Outcome::Ok);
+    q=write(4,0,2,0x80000000u);e.handle(q,3,out);expect(out,Outcome::Ok);
+    assert(e.parameters().angle==INT32_MIN);
+    // An integer that cannot fit a CAN field is still invalid; no narrowing.
+    q=write(5,0,6,65536);e.handle(q,4,out);
+    expect(out,Outcome::Rejected,Reason::InvalidParam);
+    q=write(6,0,1,256);e.handle(q,5,out);
+    expect(out,Outcome::Rejected,Reason::InvalidParam);
+    const auto move=run(7);e.handle(move,6,out);expect(out,Outcome::Done);
+    assert(b.moves==1 && !e.busy());
+    assert(!e.tick(kLinkTimeoutMs+7,event) && b.stops==0);
+    e.handle(move,kLinkTimeoutMs+8,out);expect(out,Outcome::Done);assert(b.moves==1);
+    auto another=run(8);another.payload[13]=0; // stale revision is accepted
+    e.handle(another,kLinkTimeoutMs+9,out);expect(out,Outcome::Done);assert(b.moves==2);
+    auto conflict=move;conflict.payload[13]^=1;
+    e.handle(conflict,kLinkTimeoutMs+10,out);
+    expect(out,Outcome::Rejected,Reason::RequestConflict);assert(b.moves==2);
+    auto wrongBoot=run(9);wrongBoot.payload[0]^=1;
+    e.handle(wrongBoot,kLinkTimeoutMs+10,out);
+    expect(out,Outcome::Rejected,Reason::BootMismatch);assert(b.moves==2);
+    auto malformed=run(10);malformed.length++;
+    e.handle(malformed,kLinkTimeoutMs+10,out);
+    expect(out,Outcome::Rejected,Reason::InvalidParam);assert(b.moves==2);
+    const auto stopRequest=stop(11);
+    e.handle(stopRequest,kLinkTimeoutMs+11,out);expect(out,Outcome::Done);
+    assert(b.stops==1);
+    e.handle(stopRequest,kLinkTimeoutMs+12,out);expect(out,Outcome::Done);assert(b.stops==1);
+    // A verified request already on the wire is settled on mode change, not
+    // timed out or stopped for lack of feedback/heartbeats.
+    Fake switching;Endpoint switched(switching);switched.begin(9);
+    switched.handle(run(),0,out);expect(out,Outcome::Accepted);
+    switching.unverifiedValue=true;
+    switched.handle(run(),1,out);expect(out,Outcome::Done);assert(switching.moves==1);
+    switched.handle(run(2),2,out);expect(out,Outcome::Done);assert(switching.moves==2);
+    assert(switched.tick(kLinkTimeoutMs+1,event));expect(event,Outcome::Done);
+    assert(switching.stops==0 && !switched.busy());
+    switched.handle(run(),kLinkTimeoutMs+2,out);expect(out,Outcome::Done);
+    assert(switching.moves==2);
+
+    // A STOP already Accepted before the switch keeps its own terminal event.
+    Fake stopSwitch;Endpoint stops(stopSwitch);stops.begin(9);
+    stops.handle(stop(1),0,out);expect(out,Outcome::Accepted);
+    stopSwitch.unverifiedValue=true;
+    stops.handle(stop(1),1,out);expect(out,Outcome::Done);
+    stops.handle(stop(2),2,out);expect(out,Outcome::Done);
+    assert(stopSwitch.stops==2); // old pending STOP did not block a new one
+    assert(stops.tick(3,event));expect(event,Outcome::Done);
+    assert(event.sequence==1 && !stops.tick(4,event));
+    stops.handle(stop(1),5,out);expect(out,Outcome::Done);
+    assert(stopSwitch.stops==2);
+
+    Fake mixedStops;mixedStops.stopTransmit=false;
+    Endpoint independent(mixedStops);independent.begin(9);
+    independent.handle(stop(1),0,out);expect(out,Outcome::Accepted);
+    mixedStops.unverifiedValue=true;mixedStops.stopTransmit=true;
+    independent.handle(stop(2),1,out);expect(out,Outcome::Done);
+    independent.handle(stop(1),2,out);expect(out,Outcome::Failed,Reason::NotReady);
+    assert(independent.tick(3,event));expect(event,Outcome::Failed,Reason::NotReady);
+    assert(event.sequence==1 && !independent.tick(4,event));
+    independent.handle(stop(1),5,out);expect(out,Outcome::Failed,Reason::NotReady);
+    assert(mixedStops.stops==2);
+
+    // An already accepted STOP cancels the old supervised motion owner. Mode
+    // switching must emit both terminal events rather than lose either one.
+    Fake both;Endpoint combined(both);combined.begin(9);
+    combined.handle(run(),0,out);expect(out,Outcome::Accepted);
+    combined.handle(stop(2),1,out);expect(out,Outcome::Accepted);
+    both.unverifiedValue=true;
+    combined.handle(run(),2,out);expect(out,Outcome::Cancelled);
+    assert(combined.tick(3,event));expect(event,Outcome::Cancelled);
+    assert(event.sequence==1);
+    assert(combined.tick(4,event));expect(event,Outcome::Done);
+    assert(event.sequence==2 && !combined.tick(5,event));
+
+    Fake lateStop;Endpoint stoppedMove(lateStop);stoppedMove.begin(9);
+    stoppedMove.handle(run(),0,out);expect(out,Outcome::Accepted);
+    lateStop.unverifiedValue=true;
+    stoppedMove.handle(stop(2),1,out);expect(out,Outcome::Done);
+    stoppedMove.handle(run(),2,out);expect(out,Outcome::Cancelled);
+    assert(stoppedMove.tick(3,event));expect(event,Outcome::Cancelled);
+    assert(event.sequence==1 && !stoppedMove.tick(4,event));
+}
 void clientTests() {
     {
         Client rejected; rejected.begin(99); Frame query, next;
@@ -145,4 +237,4 @@ void clientTests() {
     // STOP is available while disconnected, repeated submits preserve its key.
     q=stop();assert(c.submit(q,20000));Frame again=stop();assert(c.submit(again,20001));assert(sameRequest(q,again));
 }
-int main(){framing();endpointTests();lifecycle();clientTests();std::puts("PASS: v2 framing, atomic writes, lifecycle, dedup, stop, reconnect and client recovery");}
+int main(){framing();endpointTests();lifecycle();unverifiedEndpoint();clientTests();std::puts("PASS: v2 framing, atomic writes, lifecycle, unverified send outcome, dedup, stop, reconnect and client recovery");}

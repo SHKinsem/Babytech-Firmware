@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix="babytech-demo-") as directory:
         "display-protocol": [model, protocol, str(core / "tests/test_display_protocol.cpp")],
         "demo-flow": [model, protocol, str(root / "device-controller/src/DemoFlowController.cpp"), str(root / "tests/test_demo_flow.cpp")],
         "demo-config": hardware + [str(cjson), str(root / "device-controller/src/DemoFlowConfig.cpp"), str(root / "tests/test_demo_config.cpp")],
-        "demo-motor": hardware + [str(cjson), str(root / "device-controller/src/DemoFlowConfig.cpp"), str(root / "device-controller/src/DemoFlowController.cpp"), str(root / "tests/test_demo_motor.cpp")],
+        "demo-motor": hardware + [str(root / "device-controller/src/DeviceAPI.cpp"), str(cjson), str(root / "device-controller/src/DemoFlowConfig.cpp"), str(root / "device-controller/src/DemoFlowController.cpp"), str(root / "tests/test_demo_motor.cpp")],
     }
     for name, sources in suites.items():
         output = directory / name

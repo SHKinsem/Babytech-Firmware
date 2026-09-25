@@ -7,11 +7,12 @@ using namespace motion;
 using namespace babytech::display;
 
 struct Fake : DemoExecutor {
-    bool ok = true, free = true, fresh = true, stationary = true;
+    bool ok = true, free = true, fresh = true, stationary = true, unverified = false;
     std::array<bool, 256> missingFeedback{};
     int starts = 0, stops = 0, resets = 0;
     int32_t position = 100;
     DemoExecution state = DemoExecution::Done;
+    bool unverifiedMode() const override { return unverified; }
     bool healthy() const override { return ok; }
     bool available() const override { return free; }
     DemoEvidence evidence(uint8_t id) const override {
@@ -38,6 +39,93 @@ void ready(DemoFlowController& f, Fake& e, uint32_t now = 10) {
     assert(f.stage() == DisplayStage::Ready && f.referenceValid());
 }
 int main() {
+    {
+        Fake e; e.unverified = true; e.ok = false; e.fresh = false; e.stationary = false;
+        DemoFlowController f(e);
+        auto c = config();
+        c.initialization.commands = {"home 1 2 await"};
+        for (auto& script : c.stages) script.commands = {"wait 20"};
+        assert(f.apply(c));
+        DisplayLinkCore link(f);
+        auto send = [&](DisplayIntent intent, uint32_t seq, uint32_t now) {
+            uint8_t payload[96], frame[108], reply[108];
+            const auto p = encodeDisplayIntentPayload(intent, payload, sizeof(payload));
+            const auto n = encodeDisplayFrame(DisplayMessageType::Intent, seq, payload, p,
+                                              frame, sizeof(frame));
+            size_t count = 0;
+            for (size_t i = 0; i < n; ++i) count = link.receive(frame[i], now, reply, sizeof(reply));
+            assert(count > 0);
+            DisplayFrame decoded; DisplayFrameParser parser;
+            for (size_t i = 0; i < count; ++i) parser.push(reply[i], decoded);
+            DisplayAck ack; assert(decodeDisplayAckPayload(decoded, ack));
+            return ack.accepted;
+        };
+        assert(!f.startEnabled()); // Screen offers Initialize before the script is sent.
+        assert(send(DisplayIntent::StartFeeding, 1, 9)); // A UART intent itself is not gated by physical Ready.
+        f.cancelLocal("test"); // No frame was sent; release only local script ownership.
+        assert(send(DisplayIntent::Initialize, 2, 10)); f.tick(10); assert(e.starts == 1);
+        e.state = DemoExecution::Done; f.tick(11);
+        assert(f.stage() == DisplayStage::Idle && !f.referenceValid());
+        assert(f.snapshot().stage == DisplayStage::Idle && f.snapshot().startEnabled);
+        assert(std::strcmp(f.reason(), "initialization_commands_sent") == 0);
+        assert(send(DisplayIntent::StartFeeding, 3, 12));
+        for (uint32_t stage = 0; stage < 5; ++stage) {
+            const auto now = 13 + stage * 10;
+            f.tick(now); e.state = DemoExecution::Done; f.tick(now + 1);
+        }
+        assert(f.stage() == DisplayStage::Idle && !f.busy() && e.starts == 6);
+        assert(f.snapshot().stage == DisplayStage::Idle); // Never claim physical Complete on UART.
+        assert(std::strcmp(f.reason(), "scripts_sent") == 0 && e.stops == 0);
+        assert(send(DisplayIntent::Initialize, 4, 65)); // Adapter must allow explicit reinitialize in Idle.
+        f.tick(65); e.state = DemoExecution::Done; f.tick(66);
+        assert(e.starts == 7 && f.stage() == DisplayStage::Idle);
+        assert(f.single(2, 70)); f.tick(70); assert(e.starts == 8);
+        e.state = DemoExecution::Done; f.tick(71);
+        assert(std::strcmp(f.reason(), "script_commands_sent") == 0);
+        e.ok = true;
+        f.stop(72); assert(std::strcmp(f.reason(), "stop_command_sent") == 0);
+        assert(e.stops == 1);
+        assert(f.start(73)); f.tick(73); assert(e.starts == 9);
+        e.state = DemoExecution::Cancelled; f.tick(74);
+        assert(f.stage() == DisplayStage::NotReady && !f.busy());
+        assert(std::strcmp(f.reason(), "script_cancelled") == 0 && e.stops == 1);
+        f.tick(75); assert(e.starts == 9); // external Stop cannot launch the next stage
+    }
+    {
+        Fake e; e.unverified = true;
+        DemoFlowController f(e);
+        auto c = config();
+        for (auto& script : c.stages) script.commands = {"wait 1"};
+        assert(f.apply(c));
+        assert(f.start(10)); f.tick(10); assert(e.starts == 1);
+        e.state = DemoExecution::Done; f.tick(11); // stage 0 done, stage 1 launch pending
+        assert(f.busy() && e.starts == 1);
+        f.cancelLocal("stopped");
+        for (uint32_t now = 12; now < 100; ++now) f.tick(now);
+        assert(e.starts == 1 && e.stops == 0);
+        assert(f.stage() == DisplayStage::NotReady && !f.busy());
+        assert(std::strcmp(f.reason(), "script_cancelled") == 0);
+    }
+    {
+        Fake e; DemoFlowController f(e); ready(f, e);
+        e.unverified = true;
+        assert(f.stage() == DisplayStage::Idle && f.snapshot().stage == DisplayStage::Idle);
+        f.invalidate(); // Mode handler clears a previously proven reference without CAN.
+        assert(!f.referenceValid() && f.stage() == DisplayStage::NotReady);
+        e.unverified = false;
+        assert(f.stage() == DisplayStage::NotReady && !f.startEnabled());
+    }
+    {
+        Fake e; e.unverified = true;
+        DemoFlowController f(e);
+        auto c = config();
+        c.stages[0].commands = {"zero 1 10 20 20 100"};
+        assert(f.apply(c));
+        assert(!f.start(0));
+        assert(!f.single(0, 0));
+        assert(std::strcmp(f.reason(), "zero_reference_unavailable") == 0);
+        assert(e.starts == 0 && e.stops == 0);
+    }
     {
         Fake e; DemoFlowController f(e); DisplayLinkCore link(f);
         auto send = [&](DisplayIntent intent, uint32_t seq, uint32_t now) {

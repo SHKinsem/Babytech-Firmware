@@ -9,22 +9,18 @@ namespace motion {
 namespace {
 
 // Feedback is considered fresh for this long after the frame arrived.
-constexpr uint32_t kFeedbackFreshMs = 600;
-// How long an enable or a move acknowledgement may take before it is treated
-// as missing. Neither timeout ever implies success.
-constexpr uint32_t kEnableAckTimeoutMs = 1500;
-constexpr uint32_t kMoveAckTimeoutMs = 1500;
+constexpr uint32_t kFeedbackFreshMs = ManualOperationSupervisor::kFeedbackFreshMs;
+// How long an enable acknowledgement may take before it is treated as missing.
+// Manual move/home acknowledgement timing belongs to ManualOperationSupervisor.
+constexpr uint32_t kEnableAckTimeoutMs = ManualOperationSupervisor::kAckTimeoutMs;
 // Bounded RX work per poll() call.
 constexpr uint32_t kMaxFramesPerPoll = 16;
 // "Approximately stopped" / "at target" tolerances.
-constexpr int32_t kStopSpeedTenths = 5;        // 0.5 RPM
+constexpr int32_t kStopSpeedTenths = ManualOperationSupervisor::kStoppedSpeedTenths;
 constexpr int32_t kTargetToleranceTenths = 5;  // 0.5 degree, capped per move
 // A zero-travel direct command has no travel to halve, so it is judged with the
 // single feedback count the driver can actually resolve (0.1 degree).
 constexpr int32_t kNoOpToleranceTenths = 1;
-// A move only finishes after this many DISTINCT good feedback samples (two
-// separate post-command position/velocity pairs).
-constexpr uint8_t kRequiredDoneUpdates = 2;
 // Bounded on-demand refresh of the driver's target sample (0x33): the poll stops
 // after this long, within the single query scheduler's budget.
 constexpr uint32_t kTargetPollWindowMs = 1500;
@@ -36,18 +32,11 @@ constexpr uint8_t kFrameHomeInterrupt = 0x9C;
 constexpr uint8_t kFrameHomeStatus = 0x3B;
 constexpr uint8_t kHomeStatusRunning = 0x04;      // Org_SF: homing in progress
 constexpr uint8_t kHomeStatusFailed = 0x08;       // Org_CF: homing failed
-constexpr uint8_t kHomeStatusOverTemp = 0x10;     // Otp_TF
-constexpr uint8_t kHomeStatusOverCurrent = 0x20;  // Ocp_TF
 // Manual p40: "triggering homing while already at the origin, or with the left /
 // right limit already triggered: the motor does not move". 12/22 are a finished
 // attempt without motion, never a completion and never a fault.
 constexpr uint8_t kStatusHomeAlreadyAtOriginA = 0x12;
 constexpr uint8_t kStatusHomeAlreadyAtOriginB = 0x22;
-// Clearing bit2 is weaker evidence than an explicit 9A/9F completion, so the
-// inferred path needs the same two distinct post-start sample pairs a move
-// needs, while an explicit device completion is enough with one.
-constexpr uint8_t kRequiredHomeInferredUpdates = kRequiredDoneUpdates;
-constexpr uint8_t kRequiredHomeExplicitUpdates = 1;
 
 constexpr int kDefaultTxPin = 4;
 constexpr int kDefaultRxPin = 5;
@@ -74,6 +63,22 @@ const char* const kFaultHomeProtection = "home_protection";
 const char* const kFaultHomeTxFailed = "home_tx_failed";
 const char* const kFaultHomeStatusMissing = "home_status_missing";
 
+DeviceOperationFault operationFaultForTag(const char* tag) {
+    if (!tag) return DeviceOperationFault::None;
+    if (strcmp(tag, "driver_disabled") == 0) return DeviceOperationFault::DriverDisabled;
+    if (strcmp(tag, kFaultFeedbackStale) == 0) return DeviceOperationFault::FeedbackStale;
+    if (strcmp(tag, kFaultMoveAckTimeout) == 0) return DeviceOperationFault::MoveAckTimeout;
+    if (strcmp(tag, kFaultMoveTimeout) == 0) return DeviceOperationFault::MoveTimeout;
+    if (strcmp(tag, kFaultHomeAckTimeout) == 0) return DeviceOperationFault::HomeAckTimeout;
+    if (strcmp(tag, kFaultHomeStatusMissing) == 0) return DeviceOperationFault::HomeStatusMissing;
+    if (strcmp(tag, kFaultHomeFailed) == 0) return DeviceOperationFault::HomeFailed;
+    if (strcmp(tag, kFaultHomeProtection) == 0) return DeviceOperationFault::HomeProtection;
+    if (strcmp(tag, kFaultHomeTimeout) == 0) return DeviceOperationFault::HomeTimeout;
+    if (strcmp(tag, kFaultAckRejected) == 0) return DeviceOperationFault::AckRejected;
+    if (strcmp(tag, kFaultBusOff) == 0) return DeviceOperationFault::BusOff;
+    return DeviceOperationFault::None;
+}
+
 bool ageWithin(uint32_t now, uint32_t stamp, uint32_t window) {
     return static_cast<uint32_t>(now - stamp) <= window;
 }
@@ -83,6 +88,19 @@ bool ageWithin(uint32_t now, uint32_t stamp, uint32_t window) {
 // same-millisecond frame must not count as proof of the new state.
 bool isStrictlyNewerThan(uint32_t stamp, uint32_t since) {
     return static_cast<int32_t>(stamp - since) > 0;
+}
+
+// Typed values must fit the vendor's integer wire fields. Quantities that
+// would be rounded, clipped or wrapped are refused instead of silently changed.
+bool encodeWireQuantity(float value, double scale, uint32_t maximum, uint32_t& out) {
+    if (!isFiniteNumber(value) || value < 0) return false;
+    const double scaled = static_cast<double>(value) * scale;
+    if (scaled > static_cast<double>(maximum) + 0.05) return false;
+    const double rounded = floor(scaled + 0.5);
+    if (rounded > static_cast<double>(maximum) || fabs(scaled - rounded) > 0.05)
+        return false;
+    out = static_cast<uint32_t>(rounded);
+    return true;
 }
 
 const char* busStateName(CanControllerState state) {
@@ -99,16 +117,12 @@ const char* busStateName(CanControllerState state) {
 }  // namespace
 
 MotorControl::MotorControl()
-    : can_(kDefaultTxPin, kDefaultRxPin, kDefaultBitrate) {}
+    : bus_(kDefaultTxPin, kDefaultRxPin, kDefaultBitrate) {}
 
 bool MotorControl::begin(int tx, int rx, long bitrate) {
     // Reset software tracking only: no motor is enabled, moved or stopped here.
     // The selected id survives a re-init so a configured node stays selected.
-    job_ = MoveJob{};
-    home_ = HomeJob{};
-    homeOutcome_ = HomeOutcome::None;
-    homeId_ = 0;
-    homeMode_ = 0;
+    manual_.beginSession();
     faultTag_ = kFaultNone;
     faultId_ = 0;
     faultGlobal_ = false;
@@ -119,10 +133,10 @@ bool MotorControl::begin(int tx, int rx, long bitrate) {
     }
 
     experimentId_ = 0;
-    can_.setTraceSink(traceSink, this);
-    can_.end();
-    can_.configure(tx, rx, bitrate);
-    canReady_ = can_.begin();
+    bus_.setTraceSink(traceSink, this);
+    bus_.end();
+    bus_.configure(tx, rx, bitrate);
+    canReady_ = bus_.begin();
     refreshBusStatus();
     return canReady_;
 }
@@ -132,32 +146,43 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
     queueDiagnostics_.poll(now);
     refreshBusStatus();
 
+    if (unverifiedMode_) {
+        // RX remains available for display and raw diagnostics. No old manual
+        // deadline, stop proof or query lease is allowed to generate CAN work.
+        if (canReady()) drainRx(now);
+        return;
+    }
+
     if (busState_ == CanControllerState::BusOff) {
         // No auto-resume: latch the fault, invalidate every pending/confirmed
         // enable and cancel the jobs. Nothing resumes by itself.
+        // A configuration write must still reach its existing timeout state;
+        // otherwise bus-off leaves config_pending stuck indefinitely.
+        pollConfig(now);
         if (strcmp(faultTag_, kFaultBusOff) != 0) {
             latchFault(0, kFaultBusOff, true);
         }
-        const uint8_t activeId = job_.active ? job_.id : 0;
-        if (job_.active) moveOutcome_ = MoveOutcome::Failed;
-        job_ = MoveJob{};
-        if (home_.active) homeOutcome_ = HomeOutcome::Failed;
-        home_ = HomeJob{};
+        const uint8_t activeId = manual_.activeId();
+        manual_.failActiveWithoutSnapshot(ManualOperationSupervisor::Fault::BusOff);
         experimentId_ = 0;
         for (uint16_t id = 1; id < kNodeCount; ++id) {
             NodeState& node = nodes_[id];
             node.enablePending = false;
+            node.recoverFaultPending = false;
             node.enableConfirmed = false;
             node.enableDesired = false;
             if (id == activeId || id == selectedId_ || node.stopRequested) {
                 node.stopRequested = true;
                 node.stopRequestedMs = now;
+                // Bus state is unknown after bus-off. A previous disabled
+                // flag cannot prove the motor stayed disabled through it.
+                node.broadcastDisableProofValid = false;
             }
         }
         return;
     }
 
-    drainRx(now);
+    const bool rxDrained = drainRx(now);
     pollConfig(now);
     if (experimentId_) {
         int32_t pos = 0, vel = 0;
@@ -174,23 +199,59 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
     serviceJob(now);
     serviceHome(now);
     serviceStopConfirmations(now);
-    serviceQueries(now);
+    serviceQueries(now, rxDrained);
     if (dispatchAutomaticQueries) dispatchQueries();
 }
 
 void MotorControl::watch(uint8_t id) {
     if (id == 0) return;
     selectedId_ = id;
-    if (!autoQueriesEnabled_) return;
+    if (!autoQueriesEnabled_ || unverifiedMode_) return;
     const uint8_t fields[]={0x36,0x35,0x3A};
     for (uint8_t field:fields)
-        queries_.demand(id,field,CanQueryScheduler::Page,600,2000,0,millis());
+        bus_.demandQuery(id,field,CanQueryScheduler::Page,600,2000,0,millis());
 }
 
 void MotorControl::setAutoQueriesEnabled(bool enabled) {
     autoQueriesEnabled_ = enabled;
-    if (!enabled) queries_.release(CanQueryScheduler::Page);
+    if (!enabled) bus_.releaseQueries(CanQueryScheduler::Page);
     else if (selectedId_) watch(selectedId_);
+}
+
+void MotorControl::setUnverifiedMode(bool enabled) {
+    if (unverifiedMode_ == enabled) return;
+    if (enabled) {
+        if (hasActiveMotion() || operationBusy())
+            unverifiedMotionOutstanding_ = true;
+        // End local supervision without adding a stop/abort to the wire. The
+        // former handle is superseded, not reported as reached or physically
+        // stopped. Keep raw observations and historical diagnosis for display.
+        manual_.supersede();
+        experimentId_ = 0;
+        experimentStart_ = 0;
+        cancelConfig();
+        targetPollId_ = 0;
+        targetPollArmedMs_ = 0;
+        for (uint8_t owner = 0; owner < CanQueryScheduler::OwnerCount; ++owner)
+            bus_.releaseQueries(static_cast<CanQueryScheduler::Owner>(owner));
+        for (uint16_t id = 1; id < kNodeCount; ++id) {
+            NodeState& node = nodes_[id];
+            node.enablePending = false;
+            node.recoverFaultPending = false;
+            node.enableAck = false;
+            node.enableTimedOut = false;
+            node.enableConfirmed = false;
+            node.enableDesired = false;
+            node.stopRequested = false;
+            node.broadcastDisablePending = false;
+            node.broadcastDisableProofValid = false;
+            syncObserve_[id] = false;
+        }
+    }
+    unverifiedMode_ = enabled;
+    // Switching back does not invent a confirmed enable. The normal path must
+    // obtain its own fresh evidence. Outstanding motion remains sticky for OTA.
+    if (!enabled && autoQueriesEnabled_ && selectedId_) watch(selectedId_);
 }
 
 bool MotorControl::canReady() const {
@@ -199,7 +260,7 @@ bool MotorControl::canReady() const {
 
 void MotorControl::refreshBusStatus() {
     CanBusStatus status;
-    if (!can_.getBusStatus(status)) {
+    if (!bus_.getBusStatus(status)) {
         busState_ = CanControllerState::Unavailable;
         txErrorCounter_ = 0;
         return;
@@ -215,13 +276,16 @@ const char* MotorControl::busStateString() const { return busStateName(busState_
 
 uint32_t MotorControl::txErrorCount() const { return txErrorCounter_; }
 
-void MotorControl::drainRx(uint32_t now) {
-    if (!canReady()) return;
+bool MotorControl::drainRx(uint32_t now) {
+    if (!canReady()) return false;
     CanRawFrame frame;
     for (uint32_t i = 0; i < kMaxFramesPerPoll; ++i) {
-        if (!can_.receive(frame, 0)) break;
+        if (!bus_.receive(frame, 0)) return true;
         handleFrame(frame, now);
     }
+    // The 16-frame work limit might leave older packets buffered. In
+    // particular, do not send a fresh 0x22 read until an empty RX is observed.
+    return false;
 }
 
 void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
@@ -256,7 +320,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
         QueueDiagnostics::functionBit(frame.data[0])) {
         queueDiagnostics_.response(id, frame.data[0], frame.data[1], now);
     }
-    if (!nodeOfInterest(id)) return;
+    if (!unverifiedMode_ && !nodeOfInterest(id)) return;
 
     const uint8_t function = frame.data[0];
     // Control replies. 0xFB/0xCB replies are the documented FB/CB answers
@@ -276,7 +340,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
     // 0x3B homing status: its own bit table, kept out of the 0x3A motor flags.
     if (function == kFrameHomeStatus) {
         if (frame.length != 3 || frame.data[2] != kProtocolChecksum) return;
-        queries_.receive(id,function,now);
+        bus_.receiveQuery(id,function,now);
         node.seenEver = true;
         node.lastSeenMs = now;
         node.homeFlagsValid = true;
@@ -297,7 +361,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
 
     FeedbackSample sample;
     if (!decodeFeedback(frame.data, frame.length, sample)) return;
-    queries_.receive(id,function,now);
+    bus_.receiveQuery(id,function,now);
 
     node.seenEver = true;
     node.lastSeenMs = now;
@@ -326,6 +390,16 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.flagsValid = true;
             node.flags = static_cast<uint8_t>(sample.value);
             node.flagsMs = now;
+            if (unverifiedMode_) break;
+            if (node.broadcastDisablePending) {
+                if (node.flags & 1) {
+                    node.broadcastDisableProofValid = false;
+                } else if (!node.broadcastDisableProofValid &&
+                           isStrictlyNewerThan(now, node.stopRequestedMs)) {
+                    node.broadcastDisableProofValid = true;
+                    node.broadcastDisableProofMs = now;
+                }
+            }
             // A real disabled flag invalidates an old software confirmation.
             if (!(node.flags & 1)) node.enableConfirmed = false;
             if (node.enablePending && node.enableAck &&
@@ -333,6 +407,12 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
                 bool(node.flags & 1) == node.enableDesired) {
                 node.enableConfirmed = node.enableDesired;
                 node.enablePending = false;
+                // A recovery request clears its latched diagnosis only after
+                // both the F3 answer and this post-request 3A observation
+                // agree. CAN replies have no transaction ID, so an older
+                // delayed reply remains a protocol-level ambiguity.
+                if (node.enableConfirmed && node.recoverFaultPending) clearFault(id);
+                node.recoverFaultPending = false;
             }
             break;
         case FeedbackField::None:
@@ -345,6 +425,13 @@ void MotorControl::handleAck(
     uint8_t id, uint8_t function, uint8_t status, uint32_t now) {
     NodeState& node = nodes_[id];
     const AckStatus ack = classifyAck(status);
+    if (unverifiedMode_) {
+        // Record only an observation. Neither a positive nor a rejected reply
+        // owns a command transaction in this mode.
+        node.lastAck = ackStatusToString(ack);
+        node.lastAckMs = now;
+        return;
+    }
     if (status == 0xE2 || status == 0xEE) node.demoRejected = true;
     if (id == queueObserveId_ && function == node.queueExpectedFunction) {
         // Unrelated late ACKs must not replace this action's evidence. Preserve
@@ -371,7 +458,7 @@ void MotorControl::handleAck(
         (status == kStatusHomeAlreadyAtOriginA || status == kStatusHomeAlreadyAtOriginB)) {
         node.lastAck = "home_no_motion";
         node.lastAckMs = now;
-        if (home_.active && homeId_ == id) endHome(HomeOutcome::NoMotion);
+        manual_.noMotion(id);
         return;
     }
 
@@ -391,6 +478,9 @@ void MotorControl::handleAck(
                 bool(node.flags & 1) == node.enableDesired) {
                 node.enableConfirmed = node.enableDesired;
                 node.enablePending = false;
+                // The 3A may have arrived before the F3 answer in this batch.
+                if (node.enableConfirmed && node.recoverFaultPending) clearFault(id);
+                node.recoverFaultPending = false;
             }
             if (!node.enableDesired) {
                 node.stopRequested = true;
@@ -401,16 +491,13 @@ void MotorControl::handleAck(
             // Only the opcode the job was started with may confirm it. A 02 of
             // another command (or an unsolicited reached-report of another
             // opcode) never sets ackSeen for this job.
-            if (job_.active && job_.id == id && job_.opcode == function) {
-                job_.ackSeen = true;
-            }
-        } else if (function == kFrameHome && home_.active && homeId_ == id) {
+            manual_.acceptedAck(id, function, ack == AckStatus::Completed, now);
+        } else if (function == kFrameHome && manual_.homeActive() && manual_.homeId() == id) {
             // 0x02 only says the trigger was received. 0x9F is the documented
             // active completion reply (manual p40) and is the one ack that may
             // stand in for the 3B running-bit proof, still only together with
             // fresh post-start stationary feedback.
-            home_.ackSeen = true;
-            if (ack == AckStatus::Completed) home_.completedMs = now;
+            manual_.acceptedAck(id, function, ack == AckStatus::Completed, now);
         }
         // A stop acknowledgement still needs stationary feedback to clear.
         return;
@@ -421,22 +508,21 @@ void MotorControl::handleAck(
     // explicit state clear must not immediately recreate a phantom stop/fault.
     const bool owned = (function == kFrameEnable && node.enablePending) ||
         (function == kFrameStop && node.stopRequested) ||
-        (function == kFrameHome && home_.active && homeId_ == id) ||
-        (job_.active && job_.id == id && job_.opcode == function);
+        manual_.ownsAck(id, function);
     if (!owned) return;
 
     // Parameter / format / unknown status for the command we own is a fault.
     node.enableConfirmed = false;
     node.enableDesired = false;
     node.enablePending = false;
+    node.recoverFaultPending = false;
     node.stopRequested = true;
     node.stopRequestedMs = now;
-    if (job_.active && job_.id == id) {
+    if (manual_.moveActive() && manual_.moveId() == id) {
         sendStop(id);
-        moveOutcome_ = MoveOutcome::Failed;
-        job_ = MoveJob{};
+        manual_.failActiveWithoutSnapshot(ManualOperationSupervisor::Fault::AckRejected);
     }
-    if (home_.active && homeId_ == id) {
+    if (manual_.homeActive() && manual_.homeId() == id) {
         // A rejected trigger/abort answer fails the run: the 9C+FE abort is
         // best effort and the fault invalidates the enable. failHome latches
         // ack_rejected itself.
@@ -489,7 +575,7 @@ void MotorControl::invalidateTarget(uint8_t id) {
 void MotorControl::armTargetPoll(uint8_t id, uint32_t now) {
     targetPollId_ = id;
     targetPollArmedMs_ = now;
-    queries_.demand(id,0x33,CanQueryScheduler::Controller,500,
+    bus_.demandQuery(id,0x33,CanQueryScheduler::Controller,500,
                     kTargetPollWindowMs,2,now);
 }
 
@@ -527,11 +613,12 @@ bool MotorControl::nodeOfInterest(uint8_t id) const {
     if (id == selectedId_ || id == experimentId_ || id == queueObserveId_ || syncObserve_[id]) return true;
     const uint8_t fields[]={0x36,0x35,0x3A,0x33,0x3B};
     for (uint8_t field : fields)
-        if (queries_.evidence(id,field).pending) return true;
-    if (job_.active && job_.id == id) return true;
-    if (home_.active && homeId_ == id) return true;
+        if (bus_.queryEvidence(id,field).pending) return true;
+    if (manual_.moveActive() && manual_.moveId() == id) return true;
+    if (manual_.homeActive() && manual_.homeId() == id) return true;
     const NodeState& node = nodes_[id];
-    return node.enablePending || node.stopRequested || node.enableDesired;
+    return node.enablePending || node.stopRequested || node.enableDesired ||
+        node.broadcastDisablePending;
 }
 
 bool MotorControl::anyStopPending() const {
@@ -547,11 +634,12 @@ void MotorControl::latchFault(uint8_t id, const char* tag, bool global) {
     faultGlobal_ = global;
     // A latched fault invalidates the enable confirmation and cancels any
     // enable still in flight, so a late F3 ack cannot re-enable a faulted node:
-    // only a fresh explicit enable (after the fault clears) may do that.
+    // only a fresh explicit enable with later confirmation may clear the fault.
     for (uint16_t nodeId = 1; nodeId < kNodeCount; ++nodeId) {
         if (!global && nodeId != id) continue;
         NodeState& node = nodes_[nodeId];
         node.enablePending = false;
+        node.recoverFaultPending = false;
         node.enableConfirmed = false;
         syncEnableDesired(static_cast<uint8_t>(nodeId));
     }
@@ -576,261 +664,164 @@ void MotorControl::serviceEnableTimeouts(uint32_t now) {
         if (ageWithin(now, node.enablePendingMs, kEnableAckTimeoutMs)) continue;
         // No acknowledgement in time: the requested state was never confirmed.
         node.enablePending = false;
+        node.recoverFaultPending = false;
         if (node.enableDesired) node.enableConfirmed = false;
         node.lastAck = "enable_timeout";
         node.enableAck = false; node.enableTimedOut = true;
     }
 }
 
+ManualOperationSupervisor::Observation MotorControl::manualObservation(
+    uint8_t id, uint32_t now) const {
+    const NodeState& node = nodes_[id];
+    ManualOperationSupervisor::Observation o;
+    o.now = now;
+    o.enabled = node.enableConfirmed;
+    o.positionFresh = freshPosition(id, now, o.position);
+    o.velocityFresh = freshVelocity(id, now, o.velocity);
+    o.positionMs = node.positionMs;
+    o.velocityMs = node.velocityMs;
+    o.targetValid = node.targetValid;
+    o.target = node.targetTenths;
+    o.targetMs = node.targetMs;
+    o.homeFlagsFresh = freshHomeFlags(id, now, o.homeFlags);
+    o.homeFlagsMs = node.homeFlagsMs;
+    return o;
+}
+
 void MotorControl::serviceJob(uint32_t now) {
-    if (!job_.active) return;
-    NodeState& node = nodes_[job_.id];
-    if (!node.enableConfirmed) { failJob("driver_disabled", now); return; }
-
-    int32_t position = 0;
-    int32_t velocity = 0;
-    const bool posFresh = freshPosition(job_.id, now, position);
-    const bool velFresh = freshVelocity(job_.id, now, velocity);
-
-    // Essential freshness needs BOTH position and velocity. Once either has
-    // been silent past the grace window the job is a fault, not something to
-    // ride out.
-    if (!(posFresh && velFresh) &&
-        !ageWithin(now, job_.startMs, kFeedbackFreshMs)) {
-        failJob(kFaultFeedbackStale, now);
+    if (!manual_.moveActive()) return;
+    const uint8_t id = manual_.moveId();
+    const auto verdict = manual_.poll(manualObservation(id, now));
+    if (verdict.done) {
+        nodes_[id].stopRequested = false;
         return;
     }
-
-    if (!job_.ackSeen && !ageWithin(now, job_.startMs, kMoveAckTimeoutMs)) {
-        failJob(kFaultMoveAckTimeout, now);
-        return;
-    }
-
-    // A direct (FB/CB) job is additionally proven by the driver's OWN target
-    // sample: the target it reports must be the one this job resolved, and the
-    // sample must follow this command; it is retained until target invalidation.
-    // Position and velocity still need two distinct fresh pairs. A 02 ack alone
-    // is never completion, and neither is a single stationary pair.
-    int32_t reportedTarget = node.targetTenths;
-    const bool targetCounts = !job_.targetProof ||
-        (node.targetValid && isStrictlyNewerThan(node.targetMs, job_.startMs));
-
-    // "Done" needs an accepted ack plus two DISTINCT post-command sample pairs
-    // near the target with a near zero speed. The same sample evaluated twice
-    // never counts; each counted pair must be strictly newer than the last.
-    if (job_.ackSeen && posFresh && velFresh && targetCounts &&
-        isStrictlyNewerThan(node.positionMs, job_.startMs) &&
-        isStrictlyNewerThan(node.velocityMs, job_.startMs) &&
-        (isStrictlyNewerThan(node.positionMs, job_.lastDonePosMs) &&
-         isStrictlyNewerThan(node.velocityMs, job_.lastDoneVelMs))) {
-        job_.lastDonePosMs = node.positionMs;
-        job_.lastDoneVelMs = node.velocityMs;
-        const int64_t error = static_cast<int64_t>(position) - job_.targetTenths;
-        const int64_t absError = error < 0 ? -error : error;
-        const int64_t targetError =
-            static_cast<int64_t>(reportedTarget) - job_.targetTenths;
-        const int64_t absTargetError = targetError < 0 ? -targetError : targetError;
-        const bool targetMatches =
-            !job_.targetProof || absTargetError <= job_.toleranceTenths;
-        const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
-        if (absError <= job_.toleranceTenths && absSpeed <= kStopSpeedTenths &&
-            targetMatches) {
-            if (job_.doneUpdates < 0xFF) job_.doneUpdates++;
-            if (job_.doneUpdates >= kRequiredDoneUpdates) {
-                moveOutcome_ = MoveOutcome::Done;
-                node.stopRequested = false;
-                job_ = MoveJob{};
-                return;
-            }
-        } else {
-            job_.doneUpdates = 0;
-        }
-    }
-
-    if (!ageWithin(now, job_.startMs, job_.deadlineMs)) {
-        failJob(kFaultMoveTimeout, now);
+    switch (verdict.fault) {
+        case ManualOperationSupervisor::Fault::DriverDisabled:
+            failJob("driver_disabled", now, id); break;
+        case ManualOperationSupervisor::Fault::FeedbackStale:
+            failJob(kFaultFeedbackStale, now, id); break;
+        case ManualOperationSupervisor::Fault::MoveAckTimeout:
+            failJob(kFaultMoveAckTimeout, now, id); break;
+        case ManualOperationSupervisor::Fault::MoveTimeout:
+            failJob(kFaultMoveTimeout, now, id); break;
+        default: break;
     }
 }
 
 void MotorControl::serviceHome(uint32_t now) {
-    if (!home_.active) return;
-    const uint8_t id = homeId_;
-    NodeState& node = nodes_[id];
-
-    int32_t position = 0;
-    int32_t velocity = 0;
-    const bool posFresh = freshPosition(id, now, position);
-    const bool velFresh = freshVelocity(id, now, velocity);
-    // A homing run has no requested target angle, so only the freshness of the
-    // position matters here; the value itself is never compared to anything.
-    (void)position;
-
-    // Same grace rule as a move: once position and velocity have both been
-    // silent past the window, the supervised run is a fault, not something to
-    // ride out.
-    if (!(posFresh && velFresh) && !ageWithin(now, home_.startMs, kFeedbackFreshMs)) {
-        failHome(kFaultFeedbackStale, now);
+    if (!manual_.homeActive()) return;
+    const uint8_t id = manual_.homeId();
+    const auto verdict = manual_.poll(manualObservation(id, now));
+    if (verdict.done) {
+        nodes_[id].stopRequested = false;
+        // Homing may redefine the origin; the next query must refresh these.
+        nodes_[id].positionValid = false;
+        nodes_[id].velocityValid = false;
         return;
     }
-    if (!home_.ackSeen && !ageWithin(now, home_.startMs, kMoveAckTimeoutMs)) {
-        failHome(kFaultHomeAckTimeout, now);
-        return;
-    }
-
-    // 0x3B homing status. Only samples strictly after the trigger count, and
-    // bit2 must have been OBSERVED set before its clearing can mean anything:
-    // the power-on default is also "not homing" (00), so a lone 00 says nothing
-    // about this run.
-    uint8_t flags = 0;
-    const bool flagsFresh = freshHomeFlags(id, now, flags);
-    const bool postStartFlags =
-        flagsFresh && isStrictlyNewerThan(node.homeFlagsMs, home_.startMs);
-    if (postStartFlags) {
-        if (flags & kHomeStatusFailed) { failHome(kFaultHomeFailed, now); return; }
-        if (flags & (kHomeStatusOverTemp | kHomeStatusOverCurrent)) {
-            failHome(kFaultHomeProtection, now);
-            return;
-        }
-        if (flags & kHomeStatusRunning) {
-            // Homing is running right now: any earlier "stopped" observation is
-            // withdrawn. The inferred proof is a state transition, never a latch.
-            home_.runningSeen = true;
-            home_.stoppedMs = 0;
-            home_.doneUpdates = 0;
-        } else if (home_.runningSeen && home_.stoppedMs == 0) {
-            // First post-running "not homing, no failure" observation. Keeping
-            // the FIRST timestamp (not the newest refresh of the same state) is
-            // what lets two distinct stationary samples accumulate afterwards.
-            home_.stoppedMs = node.homeFlagsMs;
-        }
-    } else if (home_.completedMs == 0 && home_.ackSeen &&
-               !ageWithin(now, home_.startMs, kFeedbackFreshMs)) {
-        // An acknowledged run with no homing status evidence cannot be judged:
-        // fail instead of riding the deadline out. The explicit 9A/9F completion
-        // is the only path that does not need 0x3B at all.
-        failHome(kFaultHomeStatusMissing, now);
-        return;
-    }
-
-    // The inferred proof is only current while the status byte is fresh, so a
-    // stale "not homing" reading can never complete a later run.
-    const uint32_t proofMs = home_.completedMs != 0
-        ? home_.completedMs
-        : (flagsFresh ? home_.stoppedMs : 0);
-
-    // Completion needs the run proof — an explicit documented 9A/9F completion,
-    // or the running bit observed set and then cleared — AND fresh stationary
-    // feedback that is strictly NEWER than the proof. The inferred path needs two
-    // distinct sample pairs (like a move); an explicit device completion is
-    // enough with one.
-    if (proofMs != 0 && posFresh && velFresh &&
-        isStrictlyNewerThan(node.positionMs, proofMs) &&
-        isStrictlyNewerThan(node.velocityMs, proofMs) &&
-        isStrictlyNewerThan(node.positionMs, home_.lastDonePosMs) &&
-        isStrictlyNewerThan(node.velocityMs, home_.lastDoneVelMs)) {
-        home_.lastDonePosMs = node.positionMs;
-        home_.lastDoneVelMs = node.velocityMs;
-        const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
-        if (absSpeed <= kStopSpeedTenths) {
-            if (home_.doneUpdates < 0xFF) home_.doneUpdates++;
-            const uint8_t required = home_.completedMs != 0
-                ? kRequiredHomeExplicitUpdates
-                : kRequiredHomeInferredUpdates;
-            if (home_.doneUpdates >= required) {
-                endHome(HomeOutcome::Done);
-                node.stopRequested = false;
-                // Homing can redefine the origin, so the pre-homing position is
-                // not reused as if it were the new one: the next query
-                // refreshes position and velocity.
-                node.positionValid = false;
-                node.velocityValid = false;
-                return;
-            }
-        } else {
-            home_.doneUpdates = 0;
-        }
-    }
-
-    // The overall budget is the configured move duration: no extra hardcoded
-    // homing timeout exists.
-    if (!ageWithin(now, home_.startMs, home_.deadlineMs)) {
-        failHome(kFaultHomeTimeout, now);
+    switch (verdict.fault) {
+        case ManualOperationSupervisor::Fault::FeedbackStale:
+            failHome(kFaultFeedbackStale, now, id); break;
+        case ManualOperationSupervisor::Fault::HomeAckTimeout:
+            failHome(kFaultHomeAckTimeout, now, id); break;
+        case ManualOperationSupervisor::Fault::HomeStatusMissing:
+            failHome(kFaultHomeStatusMissing, now, id); break;
+        case ManualOperationSupervisor::Fault::HomeFailed:
+            failHome(kFaultHomeFailed, now, id); break;
+        case ManualOperationSupervisor::Fault::HomeProtection:
+            failHome(kFaultHomeProtection, now, id); break;
+        case ManualOperationSupervisor::Fault::HomeTimeout:
+            failHome(kFaultHomeTimeout, now, id); break;
+        default: break;
     }
 }
 
-void MotorControl::serviceStopConfirmations(uint32_t now) {    for (uint16_t id = 1; id < kNodeCount; ++id) {
+void MotorControl::serviceStopConfirmations(uint32_t now) {
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
         NodeState& node = nodes_[id];
         if (!node.stopRequested) continue;
-        if (job_.active && job_.id == id) continue;
+        if (manual_.moveActive() && manual_.moveId() == id) continue;
         // A stop only clears on a NEW stationary position/velocity sample, so a
         // stop or disable on a fresh target still has to be seen on the wire.
-        if (stationaryFeedback(static_cast<uint8_t>(id), now, node.stopRequestedMs)) {
-            node.stopRequested = false;
+        if (!stationaryFeedback(static_cast<uint8_t>(id), now, node.stopRequestedMs)) continue;
+        if (node.broadcastDisablePending) {
+            // F3 broadcast has no per-node ACK. A 3A received before this
+            // request cannot count, and stillness before the candidate
+            // disabled flag cannot prove the released shaft stopped coasting.
+            // The wire has no transaction ID: a delayed older 3A delivered
+            // after this request remains indistinguishable from a new reply.
+            if (!node.broadcastDisableProofValid || !node.flagsValid || (node.flags & 1) ||
+                !ageWithin(now, node.flagsMs, kFeedbackFreshMs)) continue;
+            if (!isStrictlyNewerThan(node.positionMs, node.broadcastDisableProofMs) ||
+                !isStrictlyNewerThan(node.velocityMs, node.broadcastDisableProofMs)) continue;
+            node.broadcastDisablePending = false;
+            node.broadcastDisableProofValid = false;
         }
+        node.stopRequested = false;
     }
 }
 
-void MotorControl::serviceQueries(uint32_t now) {
-    queries_.release(CanQueryScheduler::Controller);
+void MotorControl::serviceQueries(uint32_t now, bool rxDrained) {
+    bus_.releaseQueries(CanQueryScheduler::Controller);
     const auto demand = [this,now](uint8_t id,uint8_t field,uint32_t period,uint8_t priority) {
-        queries_.demand(id,field,CanQueryScheduler::Controller,period,1000,priority,now);
+        bus_.demandQuery(id,field,CanQueryScheduler::Controller,period,1000,priority,now);
     };
     for (uint16_t id=1; id<kNodeCount; ++id) {
-        const bool moving=(job_.active && job_.id==id) ||
-            (home_.active && homeId_==id) || experimentId_==id;
+        const bool moving=(manual_.moveActive() && manual_.moveId()==id) ||
+            (manual_.homeActive() && manual_.homeId()==id) || experimentId_==id;
         const auto& node=nodes_[id];
         if (moving || node.stopRequested) {
             demand(id,0x36,200,2); demand(id,0x35,200,2);
         }
-        if (moving || node.enablePending) demand(id,0x3A,500,1);
+        // Once disabled has been observed, spend no more 3A bandwidth until
+        // fresh stationary feedback is ready but the last disabled flag has
+        // aged out. Keep the first proof timestamp fixed across that refresh.
+        const bool needsFreshDisableFlag = node.broadcastDisablePending &&
+            node.broadcastDisableProofValid &&
+            !ageWithin(now, node.flagsMs, kFeedbackFreshMs) &&
+            stationaryFeedback(static_cast<uint8_t>(id), now, node.stopRequestedMs) &&
+            isStrictlyNewerThan(node.positionMs, node.broadcastDisableProofMs) &&
+            isStrictlyNewerThan(node.velocityMs, node.broadcastDisableProofMs);
+        if (moving || node.enablePending ||
+            (node.broadcastDisablePending && !node.broadcastDisableProofValid) ||
+            needsFreshDisableFlag)
+            demand(id,0x3A,500,1);
     }
-    if (home_.active) demand(homeId_,0x3B,300,2);
-    if (job_.active && job_.targetProof &&
-        (!nodes_[job_.id].targetValid || !isStrictlyNewerThan(nodes_[job_.id].targetMs,job_.startMs)))
-        demand(job_.id,0x33,500,2);
+    if (manual_.homeActive()) demand(manual_.homeId(),0x3B,300,2);
+    if (manual_.moveActive() && manual_.moveNeedsTargetProof() &&
+        (!nodes_[manual_.moveId()].targetValid || !isStrictlyNewerThan(nodes_[manual_.moveId()].targetMs,manual_.moveStartMs())))
+        demand(manual_.moveId(),0x33,500,2);
     if (targetPollId_ && ageWithin(now,targetPollArmedMs_,kTargetPollWindowMs)) {
         int32_t sample=0;
         if (!freshTarget(targetPollId_,now,sample)) demand(targetPollId_,0x33,500,1);
         else targetPollId_=0;
     }
-    if (config_.state==2 && !config_.readIssued) demand(config_.id,0x22,3000,3);
+    // The ACK may have been the last frame this poll could process. Hold the
+    // 0x22 demand until we observe an empty RX queue, or buffered old readback
+    // packets could be mistaken for the response to our new query.
+    if (rxDrained && config_.wantsReadQuery()) demand(config_.id(),0x22,3000,3);
 }
 
-bool MotorControl::sendQuery(void* context,uint8_t id,uint8_t field) {
+void MotorControl::querySent(void* context,uint8_t id,uint8_t field,bool sent) {
     auto& self=*static_cast<MotorControl*>(context);
-    const uint8_t bytes[]={id,field,0x6B};
-    self.can_.clearTransmissionError();
-    bool sent=false;
-    switch (field) {
-        case 0x36: sent=self.can_.probeReadSysParams(id,X42sSysParam::Cpos); break;
-        case 0x35: sent=self.can_.probeReadSysParams(id,X42sSysParam::Vel); break;
-        case 0x33: sent=self.can_.probeReadSysParams(id,X42sSysParam::Tpos); break;
-        case 0x3A: sent=self.can_.probeReadSysParams(id,X42sSysParam::Flag); break;
-        case 0x3B: sent=self.can_.probeReadSysParams(id,X42sSysParam::Org); break;
-        case 0x27: sent=self.can_.probeReadSysParams(id,X42sSysParam::Cpha); break;
-        case 0x22: sent=self.can_.sendRawLogical(bytes,sizeof(bytes)); break;
-        default: break;
+    if (self.config_.readQuerySent(id,field,sent,millis())) {
+        self.bus_.releaseQuery(id,field,CanQueryScheduler::Controller);
     }
-    self.can_.clearTransmissionError();
-    if (field==0x22 && self.config_.state==2) {
-        self.config_.readIssued=true;self.config_.readAt=millis();
-        if (!sent) self.config_.state=8;
-        self.queries_.release(id,field,CanQueryScheduler::Controller);
-    }
-    return sent;
 }
 
 void MotorControl::dispatchQueries() {
-    queries_.poll(millis());
-    if (canReady()) queries_.dispatch(millis(),sendQuery,this);
+    if (unverifiedMode_) return;
+    bus_.dispatchQueries(millis(),canReady(),querySent,this);
 }
 
 String MotorControl::queryStatusJson() const {
-    const auto& c=queries_.config();const auto& s=queries_.statistics();
+    const auto& c=bus_.queryBudget();const auto& s=bus_.queryStatistics();
     String j("{\"queriesPerSecond\":");j+=c.queriesPerSecond;
     j+=",\"gapMs\":";j+=c.gapMs;j+=",\"timeoutMs\":";j+=c.timeoutMs;
     j+=",\"cooldownMs\":";j+=c.cooldownMs;j+=",\"maxInflight\":";j+=c.maxInflight;
-    j+=",\"inflight\":";j+=queries_.inflight();
+    j+=",\"inflight\":";j+=bus_.queryInflight();
     j+=",\"queries\":";j+=static_cast<unsigned long>(s.queries);
     j+=",\"responses\":";j+=static_cast<unsigned long>(s.responses);
     j+=",\"unanswered\":";j+=static_cast<unsigned long>(s.unanswered);
@@ -846,18 +837,11 @@ String MotorControl::queryStatusJson() const {
     return j;
 }
 
-void MotorControl::failJob(const char* tag, uint32_t now) {
-    moveOutcome_ = MoveOutcome::Failed;
-    const uint8_t id = job_.id;
+void MotorControl::failJob(const char* tag, uint32_t now, uint8_t terminalId) {
+    const uint8_t id = terminalId ? terminalId : manual_.moveId();
     NodeState& node = nodes_[id];
-    moveFailure_.id = id;
-    moveFailure_.target = job_.targetTenths;
-    moveFailure_.positionValid = freshPosition(id, now, moveFailure_.position);
-    moveFailure_.velocityValid = freshVelocity(id, now, moveFailure_.velocity);
-    moveFailure_.elapsed = now - job_.startMs;
-    moveFailure_.deadline = job_.deadlineMs;
-    moveFailure_.enabled = node.enableConfirmed;
-    job_ = MoveJob{};
+    if (manual_.moveActive())
+        manual_.failMove(manualObservation(id, now), operationFaultForTag(tag));
     node.stopRequested = true;
     node.stopRequestedMs = now;
     // Best effort single stop; success is never assumed.
@@ -884,27 +868,20 @@ const char* MotorControl::homeOutcomeName(HomeOutcome outcome) {
     return "none";
 }
 
-void MotorControl::endHome(HomeOutcome outcome) {
-    // homeId_/homeMode_ are deliberately kept: a finished outcome stays
-    // attributable to the run that produced it.
-    home_.active = false;
-    homeOutcome_ = outcome;
-}
-
 void MotorControl::cancelHome(bool interruptWire, bool stopWire) {
-    if (!home_.active) return;
-    const uint8_t id = homeId_;
-    endHome(HomeOutcome::Cancelled);
+    if (!manual_.homeActive()) return;
+    const uint8_t id = manual_.homeId();
+    manual_.cancelHome(id);
     // 9C aborts the homing run itself, FE halts the motor. Both are best effort
     // and a cancel is never reported as a completion.
     if (interruptWire) sendHomeInterrupt(id);
     if (stopWire) sendStop(id);
 }
 
-void MotorControl::failHome(const char* tag, uint32_t now) {
-    if (!home_.active) return;
-    const uint8_t id = homeId_;
-    endHome(HomeOutcome::Failed);
+void MotorControl::failHome(const char* tag, uint32_t now, uint8_t terminalId) {
+    if (!manual_.homeActive() && !terminalId) return;
+    const uint8_t id = terminalId ? terminalId : manual_.homeId();
+    if (manual_.homeActive()) manual_.failHome(id, operationFaultForTag(tag));
     sendHomeInterrupt(id);
     sendStop(id);
     invalidateTarget(id);
@@ -922,10 +899,10 @@ bool MotorControl::sendHomeTrigger(uint8_t id, uint8_t mode) {
     // execution only: the cached form needs the FF trigger, which this board
     // does not supervise.
     const uint8_t frame[5] = {id, kFrameHome, mode, 0, kProtocolChecksum};
-    can_.clearTransmissionError();
-    const bool queued = can_.sendValidatedCommand(frame, sizeof(frame));
-    if (!queued || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    const bool queued = bus_.sendValidatedCommand(frame, sizeof(frame));
+    if (!queued || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -935,10 +912,10 @@ bool MotorControl::sendHomeInterrupt(uint8_t id) {
     if (!canReady()) return false;
     // [addr][0x9C][0x48][0x6B] (manual V1.0.5 p62): forced abort and exit.
     const uint8_t frame[4] = {id, kFrameHomeInterrupt, 0x48, kProtocolChecksum};
-    can_.clearTransmissionError();
-    const bool queued = can_.sendValidatedCommand(frame, sizeof(frame));
-    if (!queued || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    const bool queued = bus_.sendValidatedCommand(frame, sizeof(frame));
+    if (!queued || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -946,10 +923,10 @@ bool MotorControl::sendHomeInterrupt(uint8_t id) {
 
 bool MotorControl::sendStop(uint8_t id) {
     if (!canReady()) return false;
-    can_.clearTransmissionError();
-    can_.stopNow(id, false);
-    if (can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    bus_.stopNow(id, false);
+    if (bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -957,8 +934,16 @@ bool MotorControl::sendStop(uint8_t id) {
 
 Result MotorControl::enable(uint8_t id, bool state) {
     const uint32_t now = millis();
+    if (unverifiedMode_) {
+        const uint8_t frame[] = {id, kFrameEnable, 0xAB,
+                                 static_cast<uint8_t>(state ? 1 : 0), 0, kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (id == 0) return Result{kCodeInvalid, "id_reserved"};
     if (state && configPending()) return Result{kCodeBusy, "config_pending"};
+    // An operator's disable attempt withdraws recovery authority even if the
+    // CAN bus is already unavailable and the F3 disable cannot be sent.
+    if (!state) nodes_[id].recoverFaultPending = false;
     refreshBusStatus();
     if (!canReady()) {
         return Result{
@@ -971,20 +956,20 @@ Result MotorControl::enable(uint8_t id, bool state) {
 
     if (!state) {
         if (experimentId_ == id) experimentId_ = 0;
-        const bool wasActive = job_.active && job_.id == id;
+        const bool wasActive = manual_.moveActive() && manual_.moveId() == id;
         // An explicit disable also ends a homing run: 9C aborts it, and the F3
         // disable below drops the enable on the wire.
-        if (home_.active && homeId_ == id) cancelHome(true, false);
-        can_.clearTransmissionError();
-        can_.enableControl(id, false, false);
-        if (can_.hasTransmissionError()) {
+        if (manual_.homeActive() && manual_.homeId() == id) cancelHome(true, false);
+        bus_.clearTransmissionError();
+        bus_.enableControl(id, false, false);
+        if (bus_.hasTransmissionError()) {
             // The disable never reached the wire. Do not silently drop the job:
             // stop best effort, latch and invalidate the enable instead.
-            can_.clearTransmissionError();
+            bus_.clearTransmissionError();
             node.stopRequested = true;
             node.stopRequestedMs = now;
             sendStop(id);
-            if (wasActive) { moveOutcome_ = MoveOutcome::Cancelled; job_ = MoveJob{}; }
+            if (wasActive) manual_.cancelMove(id);
             node.enablePending = false;
             node.enableDesired = false;
             node.enableConfirmed = false;
@@ -992,7 +977,7 @@ Result MotorControl::enable(uint8_t id, bool state) {
             return Result{kCodeUnavailable, "can_tx_failed"};
         }
         // Disable accepted: only now is software tracking dropped.
-        if (wasActive) { moveOutcome_ = MoveOutcome::Cancelled; job_ = MoveJob{}; }
+        if (wasActive) manual_.cancelMove(id);
         node.enableDesired = false;
         node.enableConfirmed = false;
         node.enablePending = true;
@@ -1008,30 +993,32 @@ Result MotorControl::enable(uint8_t id, bool state) {
     // Enable true is rejected while any supervised action is live or any stop
     // is still waiting for confirmation.
     if (experimentId_) return Result{kCodeBusy, "experiment_active"};
-    if (job_.active) {
-        return Result{kCodeBusy, job_.id == id ? "busy" : "another_motor_active"};
+    if (manual_.moveActive()) {
+        return Result{kCodeBusy, manual_.moveId() == id ? "busy" : "another_motor_active"};
     }
-    if (home_.active) {
-        return Result{kCodeBusy, homeId_ == id ? "home_active" : "another_motor_active"};
+    if (manual_.homeActive()) {
+        return Result{kCodeBusy, manual_.homeId() == id ? "home_active" : "another_motor_active"};
     }
     if (anyStopPending()) return Result{kCodeBusy, "stop_pending"};
     if (node.enablePending) return Result{kCodeBusy, "enable_pending"};
 
-    // Explicit enable is the recovery path out of a latched fault.
-    if (faultAppliesTo(id)) {
+    // Explicit enable may begin recovery when the target is freshly stationary.
+    // The fault stays latched until F3 acknowledgement AND a new enabled 3A.
+    const bool recoveringFault = faultAppliesTo(id);
+    if (recoveringFault) {
         if (!stationaryFeedback(id, now, 0)) {
             return Result{kCodeBusy, "fault_latched"};
         }
-        clearFault(id);
     }
 
-    can_.clearTransmissionError();
-    can_.enableControl(id, true, false);
-    if (can_.hasTransmissionError()) {
+    bus_.clearTransmissionError();
+    bus_.enableControl(id, true, false);
+    if (bus_.hasTransmissionError()) {
         // A failed transmission can never mean enabled.
-        can_.clearTransmissionError();
+        bus_.clearTransmissionError();
         node.enableConfirmed = false;
         node.enablePending = false;
+        node.recoverFaultPending = false;
         return Result{kCodeUnavailable, "can_tx_failed"};
     }
 
@@ -1039,12 +1026,33 @@ Result MotorControl::enable(uint8_t id, bool state) {
     node.enableDesired = true;
     node.enableConfirmed = false;
     node.enablePending = true;
+    node.recoverFaultPending = recoveringFault;
         node.enableAck = false; node.enableTimedOut = false;
     node.enablePendingMs = now;
     return Result{kCodeQueued, "queued"};
 }
 
 Result MotorControl::move(const MoveRequest& request) {
+    if (unverifiedMode_) {
+        uint32_t angle = 0, speed = 0, accel = 0, decel = 0;
+        if (!isFiniteNumber(request.angleDeg) ||
+            !encodeWireQuantity(fabsf(request.angleDeg), 10.0, UINT32_MAX, angle) ||
+            !encodeWireQuantity(request.speedRpm, 10.0, UINT16_MAX, speed) ||
+            !encodeWireQuantity(request.accelRpmS, 1.0, UINT16_MAX, accel) ||
+            !encodeWireQuantity(request.decelRpmS, 1.0, UINT16_MAX, decel))
+            return Result{kCodeInvalid, "unrepresentable_value"};
+        const uint8_t frame[] = {
+            request.id, kFrameMove, static_cast<uint8_t>(request.angleDeg < 0 ? 1 : 0),
+            static_cast<uint8_t>(accel >> 8), static_cast<uint8_t>(accel),
+            static_cast<uint8_t>(decel >> 8), static_cast<uint8_t>(decel),
+            static_cast<uint8_t>(speed >> 8), static_cast<uint8_t>(speed),
+            static_cast<uint8_t>(angle >> 24), static_cast<uint8_t>(angle >> 16),
+            static_cast<uint8_t>(angle >> 8), static_cast<uint8_t>(angle),
+            kMotionModeRelativeToCurrent, 0,
+            static_cast<uint8_t>(request.currentMa >> 8), static_cast<uint8_t>(request.currentMa),
+            kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (configPending()) return Result{kCodeBusy, "config_pending"};
     const uint32_t now = millis();
     if (request.id == 0) return Result{kCodeInvalid, "id_reserved"};
@@ -1069,12 +1077,12 @@ Result MotorControl::move(const MoveRequest& request) {
     NodeState& node = nodes_[id];
     if (faultAppliesTo(id)) return Result{kCodeBusy, faultTag_};
     if (experimentId_) return Result{kCodeBusy, "experiment_active"};
-    if (job_.active) {
-        return Result{kCodeBusy, job_.id == id ? "busy" : "another_motor_active"};
+    if (manual_.moveActive()) {
+        return Result{kCodeBusy, manual_.moveId() == id ? "busy" : "another_motor_active"};
     }
     // A homing run owns the supervised slot just like a move does.
-    if (home_.active) {
-        return Result{kCodeBusy, homeId_ == id ? "home_active" : "another_motor_active"};
+    if (manual_.homeActive()) {
+        return Result{kCodeBusy, manual_.homeId() == id ? "home_active" : "another_motor_active"};
     }
     if (node.stopRequested) return Result{kCodeBusy, "stop_pending"};
     if (node.enablePending) return Result{kCodeBusy, "enable_pending"};
@@ -1087,9 +1095,11 @@ Result MotorControl::move(const MoveRequest& request) {
     }
     const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
+    if (!manual_.canStartOperation())
+        return Result{kCodeUnavailable, "operation_id_exhausted"};
 
-    can_.clearTransmissionError();
-    can_.positionControlWithCurrentLimit(
+    bus_.clearTransmissionError();
+    bus_.positionControlWithCurrentLimit(
         id,
         plan.direction,
         plan.speedTenths,
@@ -1099,10 +1109,10 @@ Result MotorControl::move(const MoveRequest& request) {
         plan.motionMode,
         plan.sync,
         plan.currentMa);
-    if (can_.hasTransmissionError()) {
+    if (bus_.hasTransmissionError()) {
         // A partial transmission may have reached the motor. Stop it best
         // effort and latch instead of returning a bare 503 with a live motor.
-        can_.clearTransmissionError();
+        bus_.clearTransmissionError();
         sendStop(id);
         node.stopRequested = true;
         node.stopRequestedMs = now;
@@ -1116,32 +1126,48 @@ Result MotorControl::move(const MoveRequest& request) {
     // The command on the wire changes what the driver considers its target.
     invalidateTarget(id);
 
-    job_ = MoveJob{};
-    job_.active = true;
-    moveOutcome_ = MoveOutcome::Running;
-    job_.id = id;
-    job_.opcode = kFrameMove;
-    job_.startTenths = position;
+    ManualOperationSupervisor::MoveStart start;
+    start.id = id;
+    start.opcode = kFrameMove;
+    start.startTenths = position;
     // int64 sum: the int32 position plus the delta cannot overflow.
-    job_.targetTenths = static_cast<int64_t>(position) + plan.deltaTenths;
+    start.targetTenths = static_cast<int64_t>(position) + plan.deltaTenths;
     // Tolerance is never allowed to reach the full travel: a tiny (0.1 degree)
     // move must not be declared done while the motor still sits at the start.
     const uint32_t halfMagnitude = plan.magnitudeTenths / 2;
-    job_.toleranceTenths = static_cast<int32_t>(
+    start.toleranceTenths = static_cast<int32_t>(
         halfMagnitude < static_cast<uint32_t>(kTargetToleranceTenths)
             ? halfMagnitude
             : static_cast<uint32_t>(kTargetToleranceTenths));
-    job_.expectedDurationMs = plan.expectedDurationMs;
-    job_.startMs = now;
-    job_.deadlineMs = limits_.maxMoveDurationMs;
-    job_.ackSeen = false;
-    job_.doneUpdates = 0;
-    job_.lastDonePosMs = now;
-    job_.lastDoneVelMs = now;
+    start.expectedDurationMs = plan.expectedDurationMs;
+    start.startMs = now;
+    start.deadlineMs = limits_.maxMoveDurationMs;
+    manual_.startMove(start);
     return Result{kCodeQueued, "queued"};
 }
 
 Result MotorControl::directPosition(const DirectPositionRequest& request) {
+    if (unverifiedMode_) {
+        // All typed fields are already wire-sized integers. Preserve direction,
+        // mode, sync and current bytes even when the supervised path rejects them.
+        uint8_t frame[] = {
+            request.id, request.withCurrentLimit ? kFrameDirectLimit : kFrameDirect,
+            request.direction,
+            static_cast<uint8_t>(request.speedTenths >> 8),
+            static_cast<uint8_t>(request.speedTenths),
+            static_cast<uint8_t>(request.angleTenths >> 24),
+            static_cast<uint8_t>(request.angleTenths >> 16),
+            static_cast<uint8_t>(request.angleTenths >> 8),
+            static_cast<uint8_t>(request.angleTenths),
+            request.motionMode, static_cast<uint8_t>(request.sync ? 1 : 0),
+            static_cast<uint8_t>(request.currentMa >> 8),
+            static_cast<uint8_t>(request.currentMa), kProtocolChecksum};
+        if (!request.withCurrentLimit) {
+            frame[11] = kProtocolChecksum;
+            return submitUnverifiedLogical(frame, 12);
+        }
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (configPending()) return Result{kCodeBusy, "config_pending"};
     const uint32_t now = millis();
     if (request.id == 0) return Result{kCodeInvalid, "id_reserved"};
@@ -1166,11 +1192,11 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     NodeState& node = nodes_[id];
     if (faultAppliesTo(id)) return Result{kCodeBusy, faultTag_};
     if (experimentId_) return Result{kCodeBusy, "experiment_active"};
-    if (job_.active) {
-        return Result{kCodeBusy, job_.id == id ? "busy" : "another_motor_active"};
+    if (manual_.moveActive()) {
+        return Result{kCodeBusy, manual_.moveId() == id ? "busy" : "another_motor_active"};
     }
-    if (home_.active) {
-        return Result{kCodeBusy, homeId_ == id ? "home_active" : "another_motor_active"};
+    if (manual_.homeActive()) {
+        return Result{kCodeBusy, manual_.homeId() == id ? "home_active" : "another_motor_active"};
     }
     if (node.stopRequested) return Result{kCodeBusy, "stop_pending"};
     if (node.enablePending) return Result{kCodeBusy, "enable_pending"};
@@ -1183,6 +1209,8 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     }
     const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
+    if (!manual_.canStartOperation())
+        return Result{kCodeUnavailable, "operation_id_exhausted"};
 
     // Mode 0 is relative to the target the DRIVER currently holds, so it needs a
     // fresh 0x33 read of that target (manual V1.0.5 p70, the target the last
@@ -1206,9 +1234,9 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
         return Result{kCodeInvalid, error != nullptr ? error : "invalid_request"};
     }
 
-    can_.clearTransmissionError();
+    bus_.clearTransmissionError();
     if (plan.withCurrentLimit) {
-        can_.passthroughPositionControlWithCurrentLimit(
+        bus_.passthroughPositionControlWithCurrentLimit(
             id,
             plan.direction,
             plan.speedTenths,
@@ -1219,7 +1247,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     } else {
         // FB carries no current field at all: it cannot impose a per-command
         // current limit, and none is invented for it.
-        can_.passthroughPositionControl(
+        bus_.passthroughPositionControl(
             id,
             plan.direction,
             plan.speedTenths,
@@ -1227,10 +1255,10 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
             plan.motionMode,
             false);
     }
-    if (can_.hasTransmissionError()) {
+    if (bus_.hasTransmissionError()) {
         // A partial transmission may have reached the motor. Stop it best
         // effort and latch instead of returning a bare 503 with a live motor.
-        can_.clearTransmissionError();
+        bus_.clearTransmissionError();
         sendStop(id);
         node.stopRequested = true;
         node.stopRequestedMs = now;
@@ -1244,41 +1272,41 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     // The command changed the driver's target: the previous sample is obsolete.
     invalidateTarget(id);
 
-    job_ = MoveJob{};
-    job_.active = true;
-    moveOutcome_ = MoveOutcome::Running;
-    job_.id = id;
-    job_.opcode = plan.withCurrentLimit ? kFrameDirectLimit : kFrameDirect;
-    job_.targetProof = true;
-    job_.startTenths = position;
-    job_.targetTenths = resolved.targetTenths;
+    ManualOperationSupervisor::MoveStart start;
+    start.id = id;
+    start.opcode = plan.withCurrentLimit ? kFrameDirectLimit : kFrameDirect;
+    start.operationKind = DeviceOperationKind::DirectPosition;
+    start.targetProof = true;
+    start.startTenths = position;
+    start.targetTenths = resolved.targetTenths;
     // Tolerance is never allowed to reach the full travel: a tiny (0.1 degree)
     // move must not be declared done while the motor still sits at the start. A
     // zero-travel no-op has no travel to halve, so it is judged with a single
     // feedback count instead of an exact match that drift could never satisfy.
     if (resolved.travelTenths == 0) {
-        job_.toleranceTenths = kNoOpToleranceTenths;
+        start.toleranceTenths = kNoOpToleranceTenths;
     } else {
         const uint32_t halfTravel = static_cast<uint32_t>(resolved.travelTenths / 2);
-        job_.toleranceTenths = static_cast<int32_t>(
+        start.toleranceTenths = static_cast<int32_t>(
             halfTravel < static_cast<uint32_t>(kTargetToleranceTenths)
                 ? halfTravel
                 : static_cast<uint32_t>(kTargetToleranceTenths));
     }
-    job_.expectedDurationMs = resolved.expectedDurationMs;
-    job_.startMs = now;
+    start.expectedDurationMs = resolved.expectedDurationMs;
+    start.startMs = now;
     // The configured policy duration is the deadline, not an invented ramp: the
     // driver plans this motion itself, so there is no acceleration profile here
     // to derive a tighter one from.
-    job_.deadlineMs = limits_.maxMoveDurationMs;
-    job_.ackSeen = false;
-    job_.doneUpdates = 0;
-    job_.lastDonePosMs = now;
-    job_.lastDoneVelMs = now;
+    start.deadlineMs = limits_.maxMoveDurationMs;
+    manual_.startMove(start);
     return Result{kCodeQueued, "queued"};
 }
 
 Result MotorControl::home(uint8_t id, uint8_t mode) {
+    if (unverifiedMode_) {
+        const uint8_t frame[] = {id, kFrameHome, mode, 0, kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
     if (configPending()) return Result{kCodeBusy, "config_pending"};
     const uint32_t now = millis();
     if (id == 0) return Result{kCodeInvalid, "id_reserved"};
@@ -1297,13 +1325,13 @@ Result MotorControl::home(uint8_t id, uint8_t mode) {
     NodeState& node = nodes_[id];
     if (faultAppliesTo(id)) return Result{kCodeBusy, faultTag_};
     if (experimentId_) return Result{kCodeBusy, "experiment_active"};
-    if (job_.active) {
-        return Result{kCodeBusy, job_.id == id ? "busy" : "another_motor_active"};
+    if (manual_.moveActive()) {
+        return Result{kCodeBusy, manual_.moveId() == id ? "busy" : "another_motor_active"};
     }
     // One supervised action at a time: a second homing run is rejected exactly
     // like a second move.
-    if (home_.active) {
-        return Result{kCodeBusy, homeId_ == id ? "home_active" : "another_motor_active"};
+    if (manual_.homeActive()) {
+        return Result{kCodeBusy, manual_.homeId() == id ? "home_active" : "another_motor_active"};
     }
     if (node.stopRequested) return Result{kCodeBusy, "stop_pending"};
     if (node.enablePending) return Result{kCodeBusy, "enable_pending"};
@@ -1319,6 +1347,8 @@ Result MotorControl::home(uint8_t id, uint8_t mode) {
     (void)position;
     const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
+    if (!manual_.canStartOperation())
+        return Result{kCodeUnavailable, "operation_id_exhausted"};
 
     if (!sendHomeTrigger(id, mode)) {
         // The trigger may or may not have reached the motor: stop best effort
@@ -1337,28 +1367,21 @@ Result MotorControl::home(uint8_t id, uint8_t mode) {
     // target sample describes a state that no longer holds.
     invalidateTarget(id);
 
-    home_ = HomeJob{};
-    home_.active = true;
-    home_.startMs = now;
     // Configured budget, not a new hardcoded timeout.
-    home_.deadlineMs = limits_.maxMoveDurationMs;
-    home_.lastDonePosMs = now;
-    home_.lastDoneVelMs = now;
-    homeId_ = id;
-    homeMode_ = mode;
-    homeOutcome_ = HomeOutcome::Running;
+    manual_.startHome(id, mode, now, limits_.maxMoveDurationMs);
     return Result{kCodeQueued, "queued_home"};
 }
 
 bool MotorControl::rawLogical(const uint8_t* bytes, uint8_t length) {
+    if (unverifiedMode_) return sendUnverifiedLogical(bytes, length);
     if (!bytes || length < 3 || length > 30) return false;
     // A raw frame must never interleave with a supervised operation, and the
     // bus must be healthy: nothing here stops or enables anything to make room.
     if (!canReady() || operationBusy()) return false;
-    can_.clearTransmissionError();
-    const bool sent = can_.sendRawLogical(bytes, length);
-    if (!sent || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    const bool sent = bus_.sendRawLogical(bytes, length);
+    if (!sent || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     // Known configuration writes keep their exact bytes, but retain independent
@@ -1369,105 +1392,81 @@ bool MotorControl::rawLogical(const uint8_t* bytes, uint8_t length) {
 }
 
 void MotorControl::startConfig(const uint8_t* b) {
-    const uint32_t next = config_.sequence + 1;
-    config_ = ConfigTransaction{};
-    config_.sequence = next;
-    config_.id = b[0];
-    config_.state = 1;
-    config_.started = millis();
-    memcpy(config_.expected, b + 4, 15);
+    config_.start(b, millis());
     watch(b[0]);
 }
 
 const char* MotorControl::configMessage() const {
-    switch (config_.state) {
-        case 1: return "config_wait_ack";
-        case 2: return "config_wait_readback";
-        case 3: return "config_verified";
-        case 4: return "config_rejected";
-        case 5: return "config_ack_timeout";
-        case 6: return "config_readback_timeout";
-        case 7: return "config_mismatch";
-        case 8: return "config_read_tx_failed";
-        case 9: return "config_cancelled";
-        default: return "none";
-    }
+    return config_.message();
 }
 
 bool MotorControl::configFrame(const CanRawFrame& f, uint32_t now) {
-    if (!configPending() || !f.extended || f.remote || f.length < 1 || f.length > 8 ||
-        (f.identifier >> 8) != config_.id) return false;
-    const uint8_t packet = uint8_t(f.identifier);
-    if (f.data[0] == 0x4C) {
-        if (packet != 0 || f.length != 3 || f.data[2] != 0x6B || config_.state != 1) return true;
-        config_.ack = f.data[1];
-        if (config_.ack != 0x02) { config_.state = 4; return true; }
-        config_.state = 2;
-        config_.readAt = now;
-        // pollConfig issues the read after this RX batch has drained, so a
-        // buffered response predating our request cannot enter the new assembly.
-        return true;
-    }
-    if (f.data[0] != 0x22 || config_.state != 2) return false;
-    if (!config_.readIssued) return true;
-    // Manual: logical reply [addr][22][15 parameter bytes][6B]. CAN repeats
-    // opcode for each 7-byte slice. Reject reordered/duplicate/truncated parts.
-    const uint8_t take = packet < 2 ? 7 : 2;
-    if (packet != config_.packet || packet > 2 || f.length != take + 1) return true;
-    memcpy(config_.actual + config_.received, f.data + 1, take);
-    config_.received += take;
-    ++config_.packet;
-    if (config_.received == 16) {
-        if (config_.actual[15] != 0x6B) { config_.packet = config_.received = 0; return true; }
-        queries_.receive(config_.id,0x22,now);
-        config_.state = memcmp(config_.expected, config_.actual, 15) == 0 ? 3 : 7;
-    }
-    return true;
+    const ConfigTransaction::FrameResult result = config_.acceptFrame(f, now);
+    if (result == ConfigTransaction::FrameResult::ReadbackComplete)
+        bus_.receiveQuery(config_.id(),0x22,now);
+    return result != ConfigTransaction::FrameResult::Ignored;
 }
 
 void MotorControl::pollConfig(uint32_t now) {
-    if (config_.state == 1 && uint32_t(now - config_.started) > 3000) config_.state = 5;
-    if (config_.state == 2 && uint32_t(now - config_.readAt) > 3000) config_.state = 6;
+    const bool awaitingRead = config_.wantsReadQuery();
+    config_.poll(now);
+    if (awaitingRead && !config_.pending())
+        bus_.releaseQuery(config_.id(),0x22,CanQueryScheduler::Controller);
+}
+
+void MotorControl::cancelConfig() {
+    if (config_.wantsReadQuery())
+        bus_.releaseQuery(config_.id(),0x22,CanQueryScheduler::Controller);
+    config_.cancel();
 }
 
 String MotorControl::configJson() const {
-    String j("{\"sequence\":"); j += config_.sequence;
-    j += ",\"id\":"; j += config_.id;
+    String j("{\"sequence\":"); j += config_.sequence();
+    j += ",\"id\":"; j += config_.id();
     j += ",\"opcode\":76,\"state\":\""; j += configMessage();
     j += "\",\"pending\":"; j += configPending() ? "true" : "false";
-    j += ",\"ack\":"; j += config_.ack;
+    j += ",\"ack\":"; j += config_.ack();
     j += ",\"expected\":[";
-    for (uint8_t i=0;i<15;++i) { if(i) j+=','; j+=config_.expected[i]; }
+    for (uint8_t i=0;i<15;++i) { if(i) j+=','; j+=config_.expected()[i]; }
     j += "],\"actual\":[";
-    for (uint8_t i=0;i<config_.received && i<15;++i) { if(i) j+=','; j+=config_.actual[i]; }
+    for (uint8_t i=0;i<config_.received() && i<15;++i) { if(i) j+=','; j+=config_.actual()[i]; }
     j += "]}";
     return j;
 }
 
 bool MotorControl::rawCanFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length) {
-    if (length > kMaxCanDataBytes) return false;
-    if (!canReady() || operationBusy()) return false;
-    can_.clearTransmissionError();
-    const bool sent = can_.sendRawFrame(id, extended, data, length);
-    if (!sent || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    if (length > kMaxCanDataBytes || (length && !data) ||
+        (extended ? id > 0x1FFFFFFFu : id > 0x7FFu)) return false;
+    refreshBusStatus();
+    if (!canReady() || (!unverifiedMode_ && operationBusy())) return false;
+    if (unverifiedMode_) unverifiedMotionOutstanding_ = true;
+    bus_.clearTransmissionError();
+    const bool sent = bus_.sendRawFrame(id, extended, data, length);
+    if (!sent || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
 }
 
 bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
+    if (unverifiedMode_) {
+        queueTransport_ = true;
+        const bool sent = sendUnverifiedLogical(bytes, length);
+        queueTransport_ = false;
+        return sent;
+    }
     // Same wire path as the manual raw transport, but the queue is the only
     // owner while it runs: the existence of a manual operation or a latched fault
     // must not stop a program the operator asked to send.
     if (!bytes || length < 3 || length > 30) return false;
     if (!canReady()) return false;
-    can_.clearTransmissionError();
+    bus_.clearTransmissionError();
     queueTransport_=true;
-    const bool sent = can_.sendRawLogical(bytes, length);
+    const bool sent = bus_.sendRawLogical(bytes, length);
     queueTransport_=false;
-    if (!sent || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    if (!sent || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     // Track a successfully submitted immediate F3 without claiming hardware
@@ -1482,6 +1481,7 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
             node.enableConfirmed = false;
             node.enableDesired = id ? enabled : false;
             node.enablePending = id != 0;
+            node.recoverFaultPending = false;
             node.enableAck = false;
             node.enableTimedOut = false;
             node.enablePendingMs = millis();
@@ -1492,14 +1492,17 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
 }
 
 bool MotorControl::queueSendFrame(uint32_t id, bool extended, const uint8_t* data, uint8_t length) {
-    if (length > kMaxCanDataBytes) return false;
+    if (length > kMaxCanDataBytes || (length && !data) ||
+        (extended ? id > 0x1FFFFFFFu : id > 0x7FFu)) return false;
+    refreshBusStatus();
     if (!canReady()) return false;
-    can_.clearTransmissionError();
+    if (unverifiedMode_) unverifiedMotionOutstanding_ = true;
+    bus_.clearTransmissionError();
     queueTransport_=true;
-    const bool sent = can_.sendRawFrame(id, extended, data, length);
+    const bool sent = bus_.sendRawFrame(id, extended, data, length);
     queueTransport_=false;
-    if (!sent || can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    if (!sent || bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return false;
     }
     return true;
@@ -1511,6 +1514,7 @@ void MotorControl::noteRawTransmission(uint8_t id) {
         if (id != 0 && nodeId != id) continue;
         NodeState& node = nodes_[nodeId];
         node.enablePending = false;
+        node.recoverFaultPending = false;
         node.enableConfirmed = false;
         syncEnableDesired(static_cast<uint8_t>(nodeId));
         // The position/velocity/flags confirmations describe the bus state
@@ -1525,26 +1529,18 @@ void MotorControl::noteRawTransmission(uint8_t id) {
     if (id == 0 || targetPollId_ == id) {
         targetPollId_ = 0;
     }
-    if (id == 0) {
-        job_ = MoveJob{};
-        moveOutcome_ = MoveOutcome::None;
-        home_ = HomeJob{};
-        homeOutcome_ = HomeOutcome::None;
-        experimentId_ = 0;
-    } else {
-        if (job_.active && job_.id == id) {
-            job_ = MoveJob{};
-            moveOutcome_ = MoveOutcome::None;
-        }
-        if (home_.active && homeId_ == id) {
-            home_ = HomeJob{};
-            homeOutcome_ = HomeOutcome::None;
-        }
-        if (experimentId_ == id) experimentId_ = 0;
-    }
+    manual_.rawInvalidation(id);
+    if (id == 0 || experimentId_ == id) experimentId_ = 0;
 }
 
 bool MotorControl::broadcastAbortAll() {
+    if (unverifiedMode_) {
+        const uint8_t interrupt[] = {0, kFrameHomeInterrupt, 0x48, kProtocolChecksum};
+        const uint8_t stopFrame[] = {0, kFrameStop, 0x98, 0, kProtocolChecksum};
+        const bool aborted = sendUnverifiedLogical(interrupt, sizeof(interrupt));
+        const bool stopped = sendUnverifiedLogical(stopFrame, sizeof(stopFrame));
+        return aborted && stopped;
+    }
     // Abort local supervision first (an addressed 9C goes out for a live home),
     // then broadcast 9C for anything this board never supervised (a raw step may
     // have started homing), then the FE broadcast stop. Every part is best
@@ -1552,26 +1548,30 @@ bool MotorControl::broadcastAbortAll() {
     cancelHome(true, false);
     if (canReady()) {
         const uint8_t frame[4] = {0, kFrameHomeInterrupt, 0x48, kProtocolChecksum};
-        can_.clearTransmissionError();
-        can_.sendRawLogical(frame, sizeof(frame));
-        can_.clearTransmissionError();
+        bus_.clearTransmissionError();
+        bus_.sendRawLogical(frame, sizeof(frame));
+        bus_.clearTransmissionError();
     }
     const Result stopped = stopAll();
     return stopped.code < 300;
 }
 
 Result MotorControl::stop(uint8_t id) {
-    if (configPending() && config_.id == id) config_.state = 9;
+    if (unverifiedMode_) {
+        const uint8_t frame[] = {id, kFrameStop, 0x98, 0, kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
+    if (configPending() && config_.id() == id) cancelConfig();
     if (experimentId_ == id) experimentId_ = 0;
     const uint32_t now = millis();
     if (id == 0) return Result{kCodeInvalid, "id_reserved"};
 
     // Software tracking is cleared unconditionally so a stop still takes effect
     // while the bus is down; only the wire stop is gated below.
-    if (job_.active && job_.id == id) { moveOutcome_ = MoveOutcome::Cancelled; job_ = MoveJob{}; }
+    manual_.cancelMove(id);
     // A homing run is interrupted too: 9C aborts homing, the FE below halts the
     // motor. A cancel is not a completion.
-    if (home_.active && homeId_ == id) cancelHome(true, false);
+    if (manual_.homeActive() && manual_.homeId() == id) cancelHome(true, false);
     // Selecting keeps the node in the query rotation so the stop can be seen.
     watch(id);
     NodeState& node = nodes_[id];
@@ -1583,6 +1583,7 @@ Result MotorControl::stop(uint8_t id) {
     // after every stop. Explicit disable and latched faults still clear it.
     node.enableAck = false; node.enableTimedOut = false;
     node.enablePending = false;
+    node.recoverFaultPending = false;
     // The desire follows the confirmation again: an enable that was only ever
     // requested (never confirmed) must not leave a phantom desire behind.
     syncEnableDesired(id);
@@ -1602,8 +1603,12 @@ Result MotorControl::stop(uint8_t id) {
 }
 
 Result MotorControl::stopAll() {
-    if (configPending()) config_.state = 9;
-    if (job_.active) moveOutcome_ = MoveOutcome::Cancelled;
+    if (unverifiedMode_) {
+        const uint8_t frame[] = {0, kFrameStop, 0x98, 0, kProtocolChecksum};
+        return submitUnverifiedLogical(frame, sizeof(frame));
+    }
+    cancelConfig();
+    if (manual_.moveActive()) manual_.cancelMove(manual_.moveId());
     experimentId_ = 0;
     const uint32_t now = millis();
 
@@ -1612,7 +1617,6 @@ Result MotorControl::stopAll() {
 
     // Cancel the job and the in-flight enables first: this holds even when the
     // broadcast cannot be sent.
-    job_ = MoveJob{};
     for (uint16_t id = 1; id < kNodeCount; ++id) {
         NodeState& node = nodes_[id];
         // Merely selecting a never-seen address in the UI must not create a
@@ -1630,6 +1634,7 @@ Result MotorControl::stopAll() {
         // is still required to drop it. The desire follows the confirmation, so
         // a never-confirmed request leaves no phantom desire behind.
         node.enablePending = false;
+        node.recoverFaultPending = false;
         syncEnableDesired(static_cast<uint8_t>(id));
     }
 
@@ -1641,10 +1646,10 @@ Result MotorControl::stopAll() {
     }
 
     // id 0 is the dedicated broadcast for stopAll.
-    can_.clearTransmissionError();
-    can_.stopNow(0, false);
-    if (can_.hasTransmissionError()) {
-        can_.clearTransmissionError();
+    bus_.clearTransmissionError();
+    bus_.stopNow(0, false);
+    if (bus_.hasTransmissionError()) {
+        bus_.clearTransmissionError();
         return Result{kCodeUnavailable, "can_tx_failed"};
     }
     // A broadcast stop can halt every node: no target sample survives it.
@@ -1654,46 +1659,190 @@ Result MotorControl::stopAll() {
 
 Result MotorControl::broadcastEnable(bool enabled) {
     const uint8_t frame[] = {0, 0xF3, 0xAB, uint8_t(enabled ? 1 : 0), 0, 0x6B};
-    // Broadcast has no per-node acknowledgement; do not invent confirmations.
-    const bool sent = queueSendLogical(frame, sizeof(frame));
-    if (!enabled) clearControlState();
-    return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
+    if (unverifiedMode_) return submitUnverifiedLogical(frame, sizeof(frame));
+    if (enabled) {
+        // Even a reported TX failure can leave delivery uncertain. Withdraw
+        // earlier disable proof before trying a broadcast re-enable, and wait
+        // for new 3A + stationary feedback before releasing a stop wait.
+        for (uint16_t id = 1; id < kNodeCount; ++id) {
+            if (nodes_[id].broadcastDisablePending)
+                nodes_[id].broadcastDisableProofValid = false;
+            nodes_[id].recoverFaultPending = false;
+        }
+        // Broadcast has no per-node acknowledgement; do not invent confirmations.
+        const bool sent = queueSendLogical(frame, sizeof(frame));
+        return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
+    }
+
+    // A broadcast disable can fail before it reaches any motor, and even a
+    // successful CAN submission is not proof that a motor has stopped or
+    // disabled. Cancel the local operation, but retain the last observations
+    // and require new stationary feedback for every known controlled node.
+    const uint32_t now = millis();
+    const uint8_t manualId = manual_.activeId();
+    const uint8_t homeId = manual_.homeActive() ? manual_.homeId() : 0;
+    const uint8_t trialId = experimentId_;
+    if (manual_.moveActive()) manual_.cancelMove(manual_.moveId());
+    if (homeId) manual_.cancelHome(homeId);
+    // Keep the terminal operation result, but clear the legacy current-stage
+    // view just as the old control reset did after a broadcast disable.
+    manual_.supersede();
+    experimentId_ = 0;
+    experimentStart_ = 0;
+    cancelConfig();
+    targetPollId_ = 0;
+    targetPollArmedMs_ = 0;
+    bus_.releaseQueries(CanQueryScheduler::Controller);
+    bus_.releaseQueries(CanQueryScheduler::Await);
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        NodeState& node = nodes_[id];
+        const bool touched = id == manualId || id == trialId ||
+            (id == selectedId_ && node.seenEver) || node.stopRequested ||
+            node.enablePending || node.enableDesired || node.enableConfirmed;
+        if (!touched) continue;
+        node.stopRequested = true;
+        node.stopRequestedMs = now;
+        node.broadcastDisablePending = true;
+        node.broadcastDisableProofValid = false;
+        // A pending addressed enable must not be confirmed by a late F3 ACK.
+        // An earlier confirmed enable remains true until real disabled flags
+        // arrive: a failed broadcast might have left the driver enabled.
+        node.enablePending = false;
+        node.recoverFaultPending = false;
+        node.enableAck = false;
+        node.enableTimedOut = false;
+        node.enableDesired = false;
+    }
+    invalidateTarget(0);
+
+    // F3 disables the driver but does not replace the documented 9C homing
+    // abort. Keep the same 9C -> disable ordering as addressed disable.
+    if (homeId) sendHomeInterrupt(homeId);
+
+    // Keep the queue's raw transport tracing behavior, without its addressed
+    // F3 bookkeeping (which would falsely drop every enable confirmation).
+    bool sent = false;
+    if (canReady()) {
+        bus_.clearTransmissionError();
+        queueTransport_ = true;
+        sent = bus_.sendRawLogical(frame, sizeof(frame));
+        queueTransport_ = false;
+        if (bus_.hasTransmissionError()) sent = false;
+        bus_.clearTransmissionError();
+    }
+    if (!sent) {
+        // A failed disable is a global safety fault. Retain the old confirmed
+        // enable values and stop waits; a best-effort FE cannot erase either.
+        faultTag_ = kFaultDisableTxFailed;
+        faultId_ = 0;
+        faultGlobal_ = true;
+        sendStop(0);
+        return Result{503, "can_tx_failed"};
+    }
+    return Result{202, "broadcast_sent"};
+}
+
+bool MotorControl::unverifiedLogicalMayMove(const uint8_t* bytes, uint8_t length) {
+    if (length == 3) {
+        switch (bytes[1]) {
+            case 0x1A: case 0x1F: case 0x20: case 0x21: case 0x24:
+            case 0x26: case 0x27: case 0x31: case 0x32: case 0x33:
+            case 0x34: case 0x35: case 0x36: case 0x37: case 0x39:
+            case 0x3A: case 0x3B: case 0x3C: case 0x3D:
+                return false;
+            default: break;
+        }
+    }
+    if (length == 4 && ((bytes[1] == 0x42 && bytes[2] == 0x6C) ||
+                        (bytes[1] == 0x43 && bytes[2] == 0x7A) ||
+                        (bytes[1] == kFrameHomeInterrupt && bytes[2] == 0x48)))
+        return false;
+    if (length == 5 && bytes[1] == kFrameStop && bytes[2] == 0x98 && bytes[3] == 0)
+        return false;
+    if (length == 6 && bytes[1] == kFrameEnable && bytes[2] == 0xAB &&
+        bytes[3] == 0 && bytes[4] == 0) return false;
+    // Unknown opcodes and parameter writes are conservative: they might start
+    // motion or alter a moving motor, and the wire has no physical stop proof.
+    return true;
+}
+
+bool MotorControl::sendUnverifiedLogical(const uint8_t* bytes, uint8_t length) {
+    if (!bytes || length < 3 || length > 30 ||
+        bytes[length - 1] != kProtocolChecksum) return false;
+    refreshBusStatus();
+    if (!canReady()) return false;
+    if (unverifiedLogicalMayMove(bytes, length)) {
+        // Set before trying TX: an error after a partial multi-packet command
+        // cannot prove that no motor saw the first packet.
+        unverifiedMotionOutstanding_ = true;
+        invalidateTarget(bytes[0]);
+    }
+    bus_.clearTransmissionError();
+    const bool sent = bus_.sendRawLogical(bytes, length);
+    const bool failed = !sent || bus_.hasTransmissionError();
+    bus_.clearTransmissionError();
+    return !failed;
+}
+
+Result MotorControl::submitUnverifiedLogical(const uint8_t* bytes, uint8_t length) {
+    if (!bytes || length < 3 || length > 30 ||
+        bytes[length - 1] != kProtocolChecksum)
+        return Result{kCodeInvalid, "invalid_logical_frame"};
+    refreshBusStatus();
+    if (!canReady()) return Result{kCodeUnavailable,
+        busState_ == CanControllerState::BusOff ? "bus_off" : "can_unavailable"};
+    return sendUnverifiedLogical(bytes, length)
+        ? Result{kCodeQueued, "sent_unverified"}
+        : Result{kCodeUnavailable, "can_tx_failed"};
 }
 
 void MotorControl::takeQueueControl() {
-    job_ = MoveJob{};
-    moveOutcome_ = MoveOutcome::None;
-    home_ = HomeJob{};
-    homeOutcome_ = HomeOutcome::None;
-    homeId_ = homeMode_ = 0;
+    manual_.supersede();
     experimentId_ = 0;
     experimentStart_ = 0;
-    faultTag_ = kFaultNone;
-    faultId_ = 0;
-    faultGlobal_ = false;
+    // Queue takeover relinquishes an operator's in-flight recovery intent.
+    for (uint16_t id = 1; id < kNodeCount; ++id)
+        nodes_[id].recoverFaultPending = false;
+    // A failed broadcast disable is still unresolved hardware evidence. A
+    // queue takeover must not erase the diagnostic while the driver may run.
+    if (strcmp(faultTag_, kFaultDisableTxFailed) != 0) {
+        faultTag_ = kFaultNone;
+        faultId_ = 0;
+        faultGlobal_ = false;
+    }
     // Keep terminal config evidence for diagnosis, but end a pending transaction.
-    if (configPending()) config_.state = 9;
+    cancelConfig();
     targetPollId_ = 0;
     targetPollArmedMs_ = 0;
-    queries_.release(CanQueryScheduler::Controller);
-    queries_.release(CanQueryScheduler::Await);
+    bus_.releaseQueries(CanQueryScheduler::Controller);
+    bus_.releaseQueries(CanQueryScheduler::Await);
 }
 
 void MotorControl::clearControlState() {
+    // Queue takeover retains its existing fault policy. An operator reset only
+    // releases software ownership, so keep the current diagnostic as evidence
+    // for the explicit, subsequently verified recovery path.
+    const char* faultTag = faultTag_;
+    const uint8_t faultId = faultId_;
+    const bool faultGlobal = faultGlobal_;
     takeQueueControl();
-    for (uint16_t id = 0; id < kNodeCount; ++id) nodes_[id] = NodeState{};
-    // limits_, trace_, config evidence, and lastMoveFailure remain available.
-    // A real bus fault will be observed again by the next poll.
+    faultTag_ = faultTag;
+    faultId_ = faultId;
+    faultGlobal_ = faultGlobal;
+    queueObserveId_ = 0;
+    // This resets software ownership only. Confirmed enables, pending stops,
+    // broadcast disable evidence and feedback describe hardware that this
+    // function cannot reset; clearing them could falsely open safeForOta().
 }
 
 const char* MotorControl::stateString(uint8_t id) const {
     if (experimentId_ == id) return "experiment_running";
     const NodeState& node = nodes_[id];
     if (faultAppliesTo(id)) return "fault";
-    if (home_.active && homeId_ == id) return "homing";
+    if (manual_.homeActive() && manual_.homeId() == id) return "homing";
     if (node.enablePending) return "enable_pending";
     if (node.stopRequested) return "stop_requested";
-    if (job_.active && job_.id == id) return "moving";
+    if (manual_.moveActive() && manual_.moveId() == id) return "moving";
     if (node.enableConfirmed) return "idle";
     return "disabled";
 }
@@ -1714,6 +1863,10 @@ String MotorControl::statusJson(uint8_t id) const {
     json += static_cast<unsigned int>(id);
     json += ",\"autoQueriesEnabled\":";
     json += autoQueriesEnabled_ ? "true" : "false";
+    json += ",\"unverifiedMode\":";
+    json += unverifiedMode_ ? "true" : "false";
+    json += ",\"unverifiedMotionOutstanding\":";
+    json += unverifiedMotionOutstanding_ ? "true" : "false";
     json += ",\"canReady\":";
     json += canReady() ? "true" : "false";
     json += ",\"busState\":\"";
@@ -1723,7 +1876,7 @@ String MotorControl::statusJson(uint8_t id) const {
     json += ",\"activeId\":";
     // The node the board currently supervises: a move, a trial or a homing run.
     json += static_cast<unsigned int>(
-        job_.active ? job_.id : (experimentId_ ? experimentId_ : (home_.active ? homeId_ : 0)));
+        manual_.moveActive() ? manual_.moveId() : (experimentId_ ? experimentId_ : (manual_.homeActive() ? manual_.homeId() : 0)));
     json += ",\"state\":\"";
     json += stateString(id);
     json += "\",\"fault\":\"";
@@ -1778,13 +1931,13 @@ String MotorControl::statusJson(uint8_t id) const {
     // attribute the last run, and the 0x3B fields are this node's latest homing
     // status byte with its documented bit meanings.
     json += ",\"homeOutcome\":\"";
-    json += homeOutcomeName(homeOutcome_);
+    json += homeOutcomeName(manual_.homeOutcome());
     json += "\",\"homeActive\":";
-    json += (home_.active && homeId_ == id) ? "true" : "false";
+    json += (manual_.homeActive() && manual_.homeId() == id) ? "true" : "false";
     json += ",\"homeId\":";
-    json += static_cast<unsigned int>(homeId_);
+    json += static_cast<unsigned int>(manual_.homeId());
     json += ",\"homeMode\":";
-    if (homeId_ != 0) json += static_cast<unsigned int>(homeMode_); else json += "null";
+    if (manual_.homeId() != 0) json += static_cast<unsigned int>(manual_.homeMode()); else json += "null";
     const bool homeFreshFlags =
         node.homeFlagsValid && ageWithin(now, node.homeFlagsMs, kFeedbackFreshMs);
     json += ",\"homeOrg\":";
@@ -1798,16 +1951,16 @@ String MotorControl::statusJson(uint8_t id) const {
     json += ",\"lastAck\":\"";
     json += node.lastAck;
     json += "\",\"lastMoveFailure\":";
-    if (moveFailure_.id != id) json += "null";
+    if (manual_.moveFailure().id != id) json += "null";
     else {
-        json += "{\"targetDeg\":"; json += String(double(moveFailure_.target)/10.0,1);
+        json += "{\"targetDeg\":"; json += String(double(manual_.moveFailure().target)/10.0,1);
         json += ",\"positionDeg\":";
-        if (moveFailure_.positionValid) json += String(double(moveFailure_.position)/10.0,1); else json += "null";
+        if (manual_.moveFailure().positionValid) json += String(double(manual_.moveFailure().position)/10.0,1); else json += "null";
         json += ",\"speedRpm\":";
-        if (moveFailure_.velocityValid) json += String(double(moveFailure_.velocity)/10.0,1); else json += "null";
-        json += ",\"elapsedMs\":"; json += moveFailure_.elapsed;
-        json += ",\"deadlineMs\":"; json += moveFailure_.deadline;
-        json += ",\"enabled\":"; json += moveFailure_.enabled ? "true" : "false";
+        if (manual_.moveFailure().velocityValid) json += String(double(manual_.moveFailure().velocity)/10.0,1); else json += "null";
+        json += ",\"elapsedMs\":"; json += manual_.moveFailure().elapsed;
+        json += ",\"deadlineMs\":"; json += manual_.moveFailure().deadline;
+        json += ",\"enabled\":"; json += manual_.moveFailure().enabled ? "true" : "false";
         json += '}';
     }
     // Expose board-wide blockers, not only the selected motor's local state.
@@ -1830,9 +1983,9 @@ String MotorControl::statusJson(uint8_t id) const {
         json += "\",\"ageMs\":"; json += static_cast<unsigned long>(now - since);
         json += '}';
     };
-    if (configPending()) blocker(config_.id, "config_pending", config_.started);
-    if (job_.active) blocker(job_.id, "move_active", job_.startMs);
-    if (home_.active) blocker(homeId_, "home_active", home_.startMs);
+    if (configPending()) blocker(config_.id(), "config_pending", config_.started());
+    if (manual_.moveActive()) blocker(manual_.moveId(), "move_active", manual_.moveStartMs());
+    if (manual_.homeActive()) blocker(manual_.homeId(), "home_active", manual_.homeStartMs());
     if (experimentId_) blocker(experimentId_, "experiment_active", experimentStart_);
     for (uint16_t target = 1; target < kNodeCount; ++target) {
         const NodeState& pending = nodes_[target];
@@ -1845,12 +1998,12 @@ String MotorControl::statusJson(uint8_t id) const {
 }
 
 void MotorControl::demoProbe(uint8_t id, uint8_t field) {
-    if (!id || !canReady()) return;
+    if (unverifiedMode_ || !id || !canReady()) return;
     // Demo refresh shares the same budget as await and sync. Direct 20 ms
     // probes reset lastTraffic continually and starve the awaited 0x33 target
     // query whenever the configured gap exceeds 20 ms.
     const uint8_t fields[] = {0x36, 0x35, 0x3A, 0x3B};
-    queries_.demand(id, fields[field % 4], CanQueryScheduler::Demo,
+    bus_.demandQuery(id, fields[field % 4], CanQueryScheduler::Demo,
                     400, 1000, 0, millis());
 }
 
@@ -1887,14 +2040,14 @@ MotorControl::Snapshot MotorControl::snapshot(uint8_t id) const {
 }
 bool MotorControl::operationBusy() const {
     if (configPending()) return true;
-    if (job_.active || experimentId_ || home_.active) return true;
+    if (manual_.moveActive() || experimentId_ || manual_.homeActive()) return true;
     for (uint16_t id=1; id<kNodeCount; ++id)
         if (nodes_[id].enablePending || nodes_[id].stopRequested) return true;
     return false;
 }
 
 bool MotorControl::hasActiveMotion() const {
-    if (job_.active || experimentId_ || home_.active) return true;
+    if (manual_.moveActive() || experimentId_ || manual_.homeActive()) return true;
     for (uint16_t id = 1; id < kNodeCount; ++id) {
         const NodeState& n = nodes_[id];
         if (n.enablePending || n.stopRequested || n.enableConfirmed || n.enableDesired) return true;
@@ -1909,6 +2062,7 @@ bool MotorControl::setDebugLimits(const DebugLimits& limits) {
 }
 
 Result MotorControl::command(const uint8_t* b, uint8_t n) {
+    if (unverifiedMode_) return submitUnverifiedLogical(b, n);
     const CommandKind kind = validateCommand(b, n, limits_);
     if (kind == CommandKind::Invalid) {
         // A well-formed 0x4C write that only failed a policy bound gets its own
@@ -1980,17 +2134,17 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
             return Result{409, "disable_and_wait_for_stationary_feedback"};
     }
     if (kind == CommandKind::Experiment) {
-        if (job_.active || experimentId_ || home_.active || anyStopPending() || node.enablePending ||
+        if (manual_.moveActive() || experimentId_ || manual_.homeActive() || anyStopPending() || node.enablePending ||
             faultAppliesTo(id) || !node.enableConfirmed || !stationaryFeedback(id, millis(), 0))
             return Result{409, "enable_and_wait_for_stationary_feedback"};
     }
-    can_.clearTransmissionError();
-    const bool queued = can_.sendValidatedCommand(b, n);
+    bus_.clearTransmissionError();
+    const bool queued = bus_.sendValidatedCommand(b, n);
     if (kind == CommandKind::Interrupt) {
         // 0x9C aborts a homing run. The operator's own frame is already on the
         // wire, so the supervised run is cancelled without a second interrupt
         // and the motor is then halted.
-        if (home_.active && homeId_ == id) cancelHome(false, false);
+        if (manual_.homeActive() && manual_.homeId() == id) cancelHome(false, false);
         stop(id);
     }
     if (!queued) {
@@ -2022,7 +2176,7 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
 
 void MotorControl::traceSink(void* context, const CanRawFrame& frame, bool tx) {
     MotorControl* self = static_cast<MotorControl*>(context);
-    if (tx) { ++self->txFrameCount_; self->queries_.noteTraffic(millis()); }
+    if (tx) ++self->txFrameCount_;
     if(tx && !self->queueTransport_ && frame.length && (frame.identifier&0xFF)==0 &&
        !CanQueryScheduler::supported(frame.data[0])) {
         self->queueDiagnostics_.invalidate(uint8_t(frame.identifier>>8));

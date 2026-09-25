@@ -17,6 +17,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace motion;
 using namespace fakecan;
@@ -2328,16 +2329,17 @@ static void test_stop_all_does_not_invent_unseen_target() {
     const auto savedLimits = rig.mc.debugLimits();
     const size_t beforeClear = capturedTX.size();
     rig.mc.clearControlState();
-    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.operationBusy()); // Reset cannot prove the stop of node 99.
     CHECK(!rig.mc.hasFault());
-    CHECK(!rig.mc.snapshot(2).enabled);
-    CHECK(!rig.mc.snapshot(2).positionValid);
+    CHECK(rig.mc.snapshot(99).stopPending);
+    CHECK(rig.mc.snapshot(2).enabled); // Physical enable evidence survives.
+    CHECK(rig.mc.snapshot(2).positionValid);
     CHECK(rig.mc.debugLimits().maxCurrentMa == savedLimits.maxCurrentMa);
     CHECK(capturedTX.size() == beforeClear); // no enable, move, retry or CAN reinit
     injectRx(makeAck(2, kFrameEnable, 0x02));
     setMillis(240);
     rig.mc.poll();
-    CHECK(!rig.mc.snapshot(2).enabled); // stale ACK cannot resurrect confirmation
+    CHECK(rig.mc.snapshot(2).enabled); // stale ACK changes nothing
     rig.mc.watch(2);
     injectRx(makeAck(2, kFrameEnable, 0xE2));
     injectRx(makeAck(2, kFrameMove, 0xEE));
@@ -2345,7 +2347,812 @@ static void test_stop_all_does_not_invent_unseen_target() {
     setMillis(260);
     rig.mc.poll();
     CHECK(!rig.mc.hasFault());
+    CHECK(rig.mc.operationBusy());
+    setMillis(280);
+    injectRx(makePosition(99, 0));
+    injectRx(makeVelocity(99, 0));
+    rig.mc.poll();
+    CHECK(!rig.mc.snapshot(99).stopPending);
     CHECK(!rig.mc.operationBusy());
+}
+
+// A failed addressed disable latches a recoverable, per-node fault. Resolve
+// its stop wait with new stationary feedback, while retaining the diagnosis.
+static void prepareRecoverableEnableFault(Rig& rig) {
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    setMillis(60);
+    failNextEnableTx = true;
+    CHECK(rig.mc.enable(1, false).code == kCodeUnavailable);
+    CHECK(std::string(rig.mc.faultTag()) == "disable_tx_failed");
+    CHECK(rig.mc.snapshot(1).stopPending);
+    setMillis(80);
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.hasFault());
+}
+
+static void test_enable_recovery_keeps_fault_until_ack_and_flag() {
+    Rig rig;
+    prepareRecoverableEnableFault(rig);
+    setMillis(90);
+    failNextEnableTx = true;
+    CHECK(rig.mc.enable(1, true).code == kCodeUnavailable);
+    CHECK(rig.mc.hasFault());
+    CHECK(!rig.mc.snapshot(1).enabled);
+    CHECK(!rig.mc.snapshot(1).enablePending);
+
+    setMillis(100);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    CHECK(rig.mc.hasFault()); // Queued F3 is not recovery evidence.
+    setMillis(120);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault()); // Receive mode's 02 only accepts the request.
+    CHECK(!rig.mc.snapshot(1).enabled);
+    setMillis(140);
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.hasFault());
+    CHECK(rig.mc.snapshot(1).enabled);
+}
+
+static void test_enable_recovery_flag_first_and_timeout() {
+    Rig rig;
+    prepareRecoverableEnableFault(rig);
+    setMillis(100);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    setMillis(120);
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault()); // A driver flag alone does not own F3 acceptance.
+    CHECK(!rig.mc.snapshot(1).enabled);
+    setMillis(1700); // Past the existing 1500 ms F3 timeout.
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault());
+    CHECK(!rig.mc.snapshot(1).enablePending);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    setMillis(1720);
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault()); // Late ACK must not recover a timed-out request.
+
+    setMillis(1740);
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    setMillis(1750);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    setMillis(1770);
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault());
+    setMillis(1790);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.hasFault());
+    CHECK(rig.mc.snapshot(1).enabled);
+}
+
+static void test_failed_disable_withdraws_recovery_authority() {
+    Rig rig;
+    prepareRecoverableEnableFault(rig);
+    setMillis(100);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    busState = CanControllerState::Stopped;
+    setMillis(110);
+    CHECK(rig.mc.enable(1, false).code == kCodeUnavailable);
+    busState = CanControllerState::Running;
+    setMillis(120);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.hasFault());
+}
+
+static void test_control_reset_preserves_local_fault_evidence() {
+    Rig rig;
+    prepareRecoverableEnableFault(rig);
+    const size_t before = capturedTX.size();
+    rig.mc.clearControlState();
+    CHECK(capturedTX.size() == before); // Reset itself sends no CAN request.
+    CHECK(rig.mc.hasFault());
+    CHECK(std::string(rig.mc.faultTag()) == "disable_tx_failed");
+    CHECK(rig.mc.snapshot(1).fault);
+    CHECK(status(rig, 1).find("\"fault\":\"disable_tx_failed\"") != std::string::npos);
+
+    // A reset during a subsequent recovery attempt withdraws that attempt's
+    // authority. Its eventual ACK and flag can describe enable, not recovery.
+    setMillis(100);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    rig.mc.clearControlState();
+    setMillis(120);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).enabled);
+    CHECK(rig.mc.hasFault());
+}
+
+static void test_control_reset_preserves_ordinary_manual_fault() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    CHECK(startMove(rig, 1, 30.0f, 60).code == kCodeQueued);
+    setMillis(80);
+    injectRx(makeAck(1, kFrameMove, 0xE2));
+    rig.mc.poll(false);
+    CHECK(std::string(rig.mc.faultTag()) == "ack_rejected");
+    CHECK(rig.mc.snapshot(1).stopPending);
+    const size_t before = capturedTX.size();
+    rig.mc.clearControlState();
+    CHECK(capturedTX.size() == before);
+    CHECK(std::string(rig.mc.faultTag()) == "ack_rejected");
+    CHECK(rig.mc.snapshot(1).fault);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    CHECK(status(rig, 1).find("\"fault\":\"ack_rejected\"") != std::string::npos);
+}
+
+static void test_queue_f3_does_not_clear_operator_fault() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(1);
+    setMillis(10);
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    setMillis(30);
+    failNextMoveTx = true;
+    CHECK(rig.mc.broadcastEnable(false).code == kCodeUnavailable);
+    setMillis(50);
+    injectRx(makeFlags(1, 0));
+    rig.mc.poll(false);
+    setMillis(70);
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.hasFault());
+    rig.mc.takeQueueControl(); // Actual queue takeover preserves this global fault.
+    CHECK(rig.mc.hasFault());
+    const uint8_t rawEnable[] = {1, 0xF3, 0xAB, 1, 0, 0x6B};
+    setMillis(100);
+    CHECK(rig.mc.queueSendLogical(rawEnable, sizeof(rawEnable)));
+    setMillis(120);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).enabled); // Queue's own F3 can be confirmed.
+    CHECK(rig.mc.hasFault()); // It cannot authorize fault recovery.
+    CHECK(std::string(rig.mc.faultTag()) == "disable_tx_failed");
+}
+
+static void test_broadcast_disable_waits_for_driver_and_stop_proof() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    CHECK(rig.mc.snapshot(1).enabled);
+    CHECK(startMove(rig, 1, 30.0f, 40).code == kCodeQueued);
+    const uint64_t operationId = rig.mc.activeOperationId();
+    CHECK(operationId != 0);
+
+    setMillis(60);
+    const Result disabled = rig.mc.broadcastEnable(false);
+    CHECK(disabled.code == 202);
+    CHECK(std::string(disabled.message) == "broadcast_sent");
+    CHECK(!capturedTX.empty());
+    const CanRawFrame& broadcast = capturedTX.back();
+    CHECK(x42sCanAddress(broadcast.identifier) == 0);
+    CHECK(broadcast.length == 5 && broadcast.data[0] == 0xF3 &&
+          broadcast.data[1] == 0xAB && broadcast.data[2] == 0);
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Cancelled);
+    CHECK(rig.mc.snapshot(1).enabled); // TX is not physical disable proof.
+    CHECK(rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.snapshot(1).positionValid); // Existing observations survive.
+    CHECK(rig.mc.operationBusy());
+    CHECK(rig.mc.hasActiveMotion());
+    CHECK(status(rig, 1).find("\"state\":\"stop_requested\"") != std::string::npos);
+    CHECK(status(rig, 1).find("\"reason\":\"stop_pending\"") != std::string::npos);
+    rig.mc.clearControlState();
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Cancelled);
+    CHECK(rig.mc.snapshot(1).enabled && rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.operationBusy() && rig.mc.hasActiveMotion());
+
+    // The pre-broadcast flags and then post-broadcast stationary telemetry are
+    // each insufficient alone. The broadcast has no per-node ACK.
+    setMillis(80);
+    injectRx(makePosition(1, 10));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    setMillis(100);
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.snapshot(1).enabled);
+    setMillis(120);
+    injectRx(makeFlags(1, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending); // Earlier stillness may predate coasting.
+    CHECK(!rig.mc.snapshot(1).enabled);
+    CHECK(rig.mc.operationBusy());
+    setMillis(140);
+    injectRx(makePosition(1, 20));
+    injectRx(makeVelocity(1, 100)); // Released shaft is still moving.
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    setMillis(160);
+    injectRx(makePosition(1, 30));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending); // Old moving velocity cannot prove stop.
+    setMillis(180);
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(!rig.mc.hasActiveMotion());
+    CHECK(status(rig, 1).find("\"state\":\"disabled\"") != std::string::npos);
+
+    // An uncommanded, unseen UI selection must not create a permanent OTA
+    // blocker simply because the operator broadcast a disable.
+    Rig idle;
+    CHECK(idle.mc.begin(4, 5, 500000));
+    idle.mc.watch(99);
+    CHECK(idle.mc.broadcastEnable(false).code == 202);
+    CHECK(!idle.mc.snapshot(99).stopPending);
+    CHECK(!idle.mc.operationBusy());
+}
+
+static void test_broadcast_disable_repeated_flags_do_not_starve_stop_proof() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    for (uint8_t id = 1; id <= 5; ++id) {
+        enableAndFeedStationary(rig, id, static_cast<uint32_t>(id) * 80);
+        CHECK(rig.mc.snapshot(id).enabled);
+    }
+
+    setMillis(500);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(520);
+    for (uint8_t id = 1; id <= 5; ++id) injectRx(makeFlags(id, 0));
+    rig.mc.poll(false);
+    for (uint8_t id = 1; id <= 5; ++id) CHECK(rig.mc.snapshot(id).stopPending);
+
+    // A later enabled reply revokes axis 3's earlier disabled proof. The
+    // other four retain their fixed first disabled observation.
+    setMillis(540);
+    injectRx(makeFlags(3, 1));
+    rig.mc.poll(false);
+    setMillis(600);
+    for (uint8_t id = 1; id <= 5; ++id) {
+        injectRx(makeFlags(id, 0));
+        injectRx(makePosition(id, 0));
+    }
+    rig.mc.poll(false);
+    setMillis(700);
+    for (uint8_t id = 1; id <= 5; ++id) {
+        injectRx(makeFlags(id, 0));
+        injectRx(makeVelocity(id, 0));
+    }
+    rig.mc.poll(false);
+    for (uint8_t id = 1; id <= 5; ++id)
+        CHECK(rig.mc.snapshot(id).stopPending == (id == 3));
+    CHECK(rig.mc.operationBusy());
+
+    // Axis 3 needs a position strictly after its replacement disabled proof.
+    setMillis(720);
+    injectRx(makeFlags(3, 0));
+    injectRx(makePosition(3, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(3).stopPending);
+    CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_recovers_under_shared_10_qps_budget() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    const CanQueryScheduler::Config budget = rig.mc.queryBudget();
+    CHECK(budget.queriesPerSecond == 10 && budget.gapMs == 100);
+    for (uint8_t id = 1; id <= 5; ++id)
+        enableAndFeedStationary(rig, id, static_cast<uint32_t>(id) * 80);
+    setMillis(600);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+
+    // Reply only to reads actually emitted by MotorBus. Each pass is 100 ms,
+    // so all five motors compete for the real board-wide query scheduler.
+    size_t replyCursor = txLog.size();
+    uint32_t queryCount = 0;
+    bool complete = false;
+    uint32_t completedAt = 0;
+    for (uint32_t t = 700; t <= 9000; t += 100) {
+        setMillis(t);
+        for (size_t i = replyCursor; i < txLog.size(); ++i) {
+            const TxRecord& sent = txLog[i];
+            if (sent.kind != TxKind::ReadSysParam) continue;
+            switch (sent.param) {
+                case X42sSysParam::Flag: injectRx(makeFlags(sent.addr, 0)); break;
+                case X42sSysParam::Cpos: injectRx(makePosition(sent.addr, 0)); break;
+                case X42sSysParam::Vel: injectRx(makeVelocity(sent.addr, 0)); break;
+                default: break;
+            }
+        }
+        replyCursor = txLog.size();
+        const uint32_t before = countTx(TxKind::ReadSysParam);
+        rig.mc.poll();
+        const uint32_t after = countTx(TxKind::ReadSysParam);
+        CHECK(after - before <= 1);
+        queryCount += after - before;
+        complete = true;
+        for (uint8_t id = 1; id <= 5; ++id)
+            if (rig.mc.snapshot(id).stopPending) complete = false;
+        if (complete) { completedAt = t; break; }
+    }
+    CHECK(queryCount > 0 && queryCount <= 84);
+    CHECK(complete);
+    CHECK(completedAt <= 5000);
+    CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_new_request_resets_proof_across_millis_wrap() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(UINT32_MAX - 40);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    injectRx(makeFlags(7, 1));
+    rig.mc.poll(false);
+
+    setMillis(UINT32_MAX - 1);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(0);
+    injectRx(makeFlags(7, 0)); // First proof can have timestamp zero.
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    setMillis(4);
+    injectRx(makePosition(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+
+    // A second disable starts a new proof sequence; position from the first
+    // request cannot combine with velocity after the second.
+    setMillis(8);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(12);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    setMillis(16);
+    injectRx(makeVelocity(7, 0));
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    setMillis(20);
+    injectRx(makePosition(7, 0));
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+    CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_requires_fresh_flags_at_release() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(10);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    setMillis(30);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(50);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+
+    // With sparse CAN feedback, fresh stillness alone cannot release a node
+    // based on a driver-disabled flag older than the 600 ms freshness window.
+    setMillis(700);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    CHECK(rig.mc.operationBusy());
+
+    // Let the real shared scheduler request the stale 3A again. Reply only to
+    // reads it actually sends, at 100 ms intervals; the refreshed disabled
+    // flag arrives after the stationary pair but must not move proofMs.
+    size_t replyCursor = txLog.size();
+    uint32_t refreshedFlagQueries = 0;
+    for (uint32_t t = 800; t <= 1800 && rig.mc.snapshot(7).stopPending; t += 100) {
+        setMillis(t);
+        for (size_t i = replyCursor; i < txLog.size(); ++i) {
+            const TxRecord& sent = txLog[i];
+            if (sent.kind != TxKind::ReadSysParam || sent.addr != 7) continue;
+            switch (sent.param) {
+                case X42sSysParam::Flag:
+                    ++refreshedFlagQueries;
+                    injectRx(makeFlags(7, 0));
+                    break;
+                case X42sSysParam::Cpos: injectRx(makePosition(7, 0)); break;
+                case X42sSysParam::Vel: injectRx(makeVelocity(7, 0)); break;
+                default: break;
+            }
+        }
+        replyCursor = txLog.size();
+        rig.mc.poll();
+    }
+    CHECK(refreshedFlagQueries >= 1);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+    CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_proof_withdrawn_by_reenable_or_bus_off() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(10);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    setMillis(30);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(50);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+
+    setMillis(60);
+    CHECK(rig.mc.broadcastEnable(true).code == 202);
+    setMillis(80);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+
+    setMillis(100);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    busState = CanControllerState::BusOff;
+    setMillis(110);
+    rig.mc.poll(false);
+    busState = CanControllerState::Running;
+    setMillis(120);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+
+    setMillis(130);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    setMillis(140);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.hasFault()); // Bus-off diagnosis needs explicit recovery.
+}
+
+static void test_failed_broadcast_reenable_withdraws_disable_proof() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(10);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    setMillis(30);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(50);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+
+    setMillis(60);
+    failNextMoveTx = true;
+    CHECK(rig.mc.broadcastEnable(true).code == 503);
+    setMillis(80);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    setMillis(100);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    setMillis(120);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+}
+
+static void test_failed_broadcast_disable_retains_fault_and_stop_waits() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    enableAndFeedStationary(rig, 2, 100);
+    CHECK(startMove(rig, 1, 30.0f, 140).code == kCodeQueued);
+    const uint64_t operationId = rig.mc.activeOperationId();
+    CHECK(operationId != 0);
+
+    setMillis(160);
+    failNextMoveTx = true; // Fail the raw F3 before any packet is captured.
+    const Result disabled = rig.mc.broadcastEnable(false);
+    CHECK(disabled.code == 503);
+    CHECK(std::string(disabled.message) == "can_tx_failed");
+    CHECK(sawStopFor(0)); // One best-effort FE on the failure path.
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Cancelled);
+    CHECK(rig.mc.hasFault());
+    CHECK(rig.mc.snapshot(1).fault && rig.mc.snapshot(2).fault);
+    CHECK(rig.mc.snapshot(1).enabled && rig.mc.snapshot(2).enabled);
+    CHECK(rig.mc.snapshot(1).stopPending && rig.mc.snapshot(2).stopPending);
+    CHECK(rig.mc.operationBusy());
+    const auto otaMotionGate = [&rig]() {
+        return !rig.mc.hasActiveMotion() && !rig.mc.operationBusy();
+    };
+    CHECK(!otaMotionGate()); // The motion portion of safeForOta() stays closed.
+    const std::string json = status(rig, 1);
+    CHECK(json.find("\"state\":\"fault\"") != std::string::npos);
+    CHECK(json.find("\"fault\":\"disable_tx_failed\"") != std::string::npos);
+    CHECK(json.find("\"id\":1,\"reason\":\"stop_pending\"") != std::string::npos);
+    CHECK(json.find("\"id\":2,\"reason\":\"stop_pending\"") != std::string::npos);
+    rig.mc.clearControlState();
+    CHECK(rig.mc.hasFault());
+    CHECK(std::string(rig.mc.faultTag()) == "disable_tx_failed");
+    CHECK(rig.mc.snapshot(1).enabled && rig.mc.snapshot(2).enabled);
+    CHECK(rig.mc.snapshot(1).stopPending && rig.mc.snapshot(2).stopPending);
+    CHECK(!otaMotionGate());
+    CHECK(status(rig, 1).find("\"fault\":\"disable_tx_failed\"") != std::string::npos);
+
+    // Old observations, and even new stationary feedback, cannot stand in for
+    // disabled driver flags. This also proves one completed node cannot clear
+    // the other node's OTA blocker.
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending && rig.mc.snapshot(2).stopPending);
+    setMillis(180);
+    injectRx(makePosition(1, 10)); injectRx(makeVelocity(1, 0));
+    injectRx(makePosition(2, 0)); injectRx(makeVelocity(2, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending && rig.mc.snapshot(2).stopPending);
+    setMillis(200);
+    injectRx(makeFlags(1, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.snapshot(2).stopPending);
+    CHECK(!otaMotionGate());
+    setMillis(210);
+    injectRx(makePosition(1, 10)); injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.snapshot(2).stopPending);
+    setMillis(220);
+    injectRx(makeFlags(2, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(2).stopPending);
+    setMillis(230);
+    injectRx(makePosition(2, 0)); injectRx(makeVelocity(2, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(2).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(!rig.mc.hasActiveMotion());
+    CHECK(otaMotionGate());
+    CHECK(rig.mc.hasFault()); // Fault is diagnostic until explicit recovery.
+
+    // Fresh stationary evidence permits explicit recovery, but F3 submission
+    // alone cannot clear the global diagnostic.
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    CHECK(rig.mc.hasFault());
+    setMillis(250);
+    injectRx(makeAck(1, kFrameEnable, 0x02));
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.hasFault());
+}
+
+static void test_broadcast_disable_tracks_observed_selection_without_enable() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(10);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).enabled);
+
+    setMillis(30);
+    failNextMoveTx = true;
+    CHECK(rig.mc.broadcastEnable(false).code == 503);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    CHECK(rig.mc.operationBusy());
+    rig.mc.clearControlState();
+    CHECK(rig.mc.snapshot(7).stopPending);
+    CHECK(rig.mc.hasFault());
+    CHECK(rig.mc.operationBusy());
+    setMillis(50);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending); // Pre-flag stillness is too old.
+    setMillis(70);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.hasFault());
+}
+
+static void test_broadcast_disable_aborts_home_before_f3() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    setMillis(40);
+    CHECK(rig.mc.home(1, 0).code == kCodeQueued);
+    const uint64_t operationId = rig.mc.activeOperationId();
+    CHECK(operationId != 0);
+    const size_t before = capturedTX.size();
+    setMillis(60);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    CHECK(capturedTX.size() == before + 2);
+    const CanRawFrame& abort = capturedTX[before];
+    const CanRawFrame& disable = capturedTX[before + 1];
+    CHECK(x42sCanAddress(abort.identifier) == 1);
+    CHECK(abort.length == 3 && abort.data[0] == 0x9C &&
+          abort.data[1] == 0x48 && abort.data[2] == 0x6B);
+    CHECK(x42sCanAddress(disable.identifier) == 0);
+    CHECK(disable.length == 5 && disable.data[0] == 0xF3 &&
+          disable.data[1] == 0xAB && disable.data[2] == 0);
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Cancelled);
+    CHECK(rig.mc.snapshot(1).stopPending);
+}
+
+static std::vector<uint8_t> logicalFromTx(size_t first, size_t last, uint8_t id) {
+    std::vector<uint8_t> bytes;
+    if (first >= last) return bytes;
+    bytes.push_back(id);
+    bytes.push_back(capturedTX[first].data[0]);
+    for (size_t i = first; i < last; ++i) {
+        CHECK(x42sCanAddress(capturedTX[i].identifier) == id);
+        CHECK(capturedTX[i].data[0] == bytes[1]);
+        for (uint8_t j = 1; j < capturedTX[i].length; ++j)
+            bytes.push_back(capturedTX[i].data[j]);
+    }
+    return bytes;
+}
+
+static void test_unverified_mode_sends_typed_and_raw_without_evidence() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    CHECK(!rig.mc.unverifiedMode());
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeBusy);
+    rig.mc.setUnverifiedMode(true);
+    CHECK(rig.mc.unverifiedMode());
+    CHECK(status(rig, 1).find("\"unverifiedMode\":true") != std::string::npos);
+
+    setMillis(10);
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    CHECK(!rig.mc.snapshot(1).enabled);
+    CHECK(!rig.mc.snapshot(1).enablePending);
+    MoveRequest move = moveRequest(1, 5000.0f);
+    move.currentMa = 6000; // Beyond policy, still fits the exact u16 wire field.
+    const size_t moveFirst = capturedTX.size();
+    CHECK(rig.mc.move(move).code == kCodeQueued);
+    const std::vector<uint8_t> moveWire = logicalFromTx(moveFirst, capturedTX.size(), 1);
+    const std::vector<uint8_t> expectedMove =
+        {1, 0xCD, 0, 0, 100, 0, 100, 1, 44, 0, 0, 0xC3, 0x50, 2, 0, 0x17, 0x70, 0x6B};
+    CHECK(moveWire == expectedMove);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.moveOutcome() == MotorControl::MoveOutcome::None);
+
+    DirectPositionRequest direct;
+    direct.id = 1;
+    direct.direction = 1;
+    direct.speedTenths = 400;
+    direct.angleTenths = 900;
+    direct.motionMode = 0;
+    direct.sync = true; // Cached form bypasses the supervised immediate-only gate.
+    direct.withCurrentLimit = true;
+    direct.currentMa = 6000;
+    const size_t directFirst = capturedTX.size();
+    CHECK(rig.mc.directPosition(direct).code == kCodeQueued);
+    const std::vector<uint8_t> directWire = logicalFromTx(directFirst, capturedTX.size(), 1);
+    const std::vector<uint8_t> expectedDirect =
+        {1, 0xCB, 1, 1, 144, 0, 0, 3, 132, 0, 1, 0x17, 0x70, 0x6B};
+    CHECK(directWire == expectedDirect);
+    CHECK(rig.mc.home(1, 255).code == kCodeQueued);
+    CHECK(!rig.mc.homeActive());
+
+    const uint8_t unknown[] = {1, 0x7E, 0x12, 0x34, 0x6B};
+    const size_t rawFirst = capturedTX.size();
+    CHECK(rig.mc.command(unknown, sizeof(unknown)).code == kCodeQueued);
+    CHECK(logicalFromTx(rawFirst, capturedTX.size(), 1) ==
+          std::vector<uint8_t>(unknown, unknown + sizeof(unknown)));
+    const uint8_t malformed[] = {1, 0x7E, 0x12, 0x34, 0};
+    CHECK(rig.mc.command(malformed, sizeof(malformed)).code == kCodeInvalid);
+    CHECK(rig.mc.unverifiedMotionOutstanding());
+    const uint8_t rawData[] = {0x7D, 0xAA, 0x55};
+    const size_t beforeRawCan = capturedTX.size();
+    CHECK(rig.mc.rawCanFrame(0x12A5u, true, rawData, sizeof(rawData)));
+    CHECK(capturedTX.size() == beforeRawCan + 1);
+    CHECK(capturedTX.back().identifier == 0x12A5u);
+    CHECK(capturedTX.back().length == sizeof(rawData));
+    CHECK(capturedTX.back().data[0] == rawData[0] &&
+          capturedTX.back().data[1] == rawData[1] &&
+          capturedTX.back().data[2] == rawData[2]);
+
+    injectRx(makePosition(1, 120));
+    injectRx(makeVelocity(1, 70));
+    setMillis(20);
+    rig.mc.poll();
+    CHECK(rig.mc.snapshot(1).positionValid);
+    CHECK(rig.mc.snapshot(1).velocityValid);
+    CHECK(!rig.mc.snapshot(1).enabled); // Observations are not admission proof.
+
+    rig.mc.watch(1);
+    const size_t noQueryFrom = capturedTX.size();
+    for (uint32_t t = 100; t <= 2000; t += 100) {
+        setMillis(t);
+        rig.mc.poll();
+        rig.mc.dispatchQueries();
+    }
+    CHECK(capturedTX.size() == noQueryFrom);
+    CHECK(!rig.mc.hasFault());
+}
+
+static void test_unverified_transition_and_transport_failure() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    setMillis(60);
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeQueued);
+    const uint64_t operationId = rig.mc.activeOperationId();
+    const size_t beforeMode = capturedTX.size();
+    rig.mc.setUnverifiedMode(true);
+    CHECK(capturedTX.size() == beforeMode); // Toggle itself sends no stop/abort.
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Superseded);
+    CHECK(!rig.mc.snapshot(1).enabled);
+    setMillis(100000);
+    rig.mc.poll();
+    CHECK(capturedTX.size() == beforeMode); // Old deadline cannot auto-stop.
+
+    failNextMoveTx = true;
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeUnavailable);
+    CHECK(capturedTX.size() == beforeMode); // No automatic FE or retry.
+    CHECK(rig.mc.unverifiedMotionOutstanding()); // Delivery may be uncertain.
+    CHECK(!rig.mc.hasFault());
+    CHECK(rig.mc.stopAll().code == kCodeQueued);
+    CHECK(rig.mc.unverifiedMotionOutstanding()); // FE is not physical stop proof.
+    rig.mc.setUnverifiedMode(false);
+    CHECK(!rig.mc.unverifiedMode());
+    CHECK(!rig.mc.snapshot(1).enabled);
+    CHECK(rig.mc.unverifiedMotionOutstanding());
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeBusy);
+}
+
+static void test_unverified_mode_bypasses_latched_fault_and_stop_wait() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    setMillis(60);
+    CHECK(rig.mc.move(moveRequest(1, 10)).code == kCodeQueued);
+    injectRx(makeAck(1, kFrameMove, 0xEE));
+    setMillis(80);
+    rig.mc.poll();
+    CHECK(rig.mc.hasFault());
+    CHECK(rig.mc.snapshot(1).stopPending);
+    const size_t beforeMode = capturedTX.size();
+    rig.mc.setUnverifiedMode(true);
+    CHECK(capturedTX.size() == beforeMode);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.hasFault()); // Retained diagnosis, not a command gate.
+    const size_t beforeMove = capturedTX.size();
+    CHECK(rig.mc.move(moveRequest(1, 20)).code == kCodeQueued);
+    CHECK(capturedTX.size() > beforeMove);
+    CHECK(rig.mc.hasFault()); // No false recovery claim either.
+    const size_t afterMove = capturedTX.size();
+    setMillis(5000);
+    rig.mc.poll();
+    CHECK(capturedTX.size() == afterMove); // No stop after stale feedback/ACK.
 }
 
 struct TestCase {
@@ -2355,6 +3162,19 @@ struct TestCase {
 
 int main() {
     const TestCase tests[] = {
+        {"unverified mode sends typed/raw bytes without evidence or auto queries", test_unverified_mode_sends_typed_and_raw_without_evidence},
+        {"unverified transition supersedes supervision and TX failure never auto-stops", test_unverified_transition_and_transport_failure},
+        {"unverified mode bypasses latched fault and stop wait without auto recovery", test_unverified_mode_bypasses_latched_fault_and_stop_wait},
+        {"broadcast disable keeps state until flags and stop proof", test_broadcast_disable_waits_for_driver_and_stop_proof},
+        {"repeated disabled flags do not starve five-axis stop proof", test_broadcast_disable_repeated_flags_do_not_starve_stop_proof},
+        {"five-axis broadcast disable recovers under the shared 10 qps budget", test_broadcast_disable_recovers_under_shared_10_qps_budget},
+        {"new broadcast disable resets proof across millis wrap", test_broadcast_disable_new_request_resets_proof_across_millis_wrap},
+        {"stale disabled flags refresh before stop proof releases", test_broadcast_disable_requires_fresh_flags_at_release},
+        {"re-enable and bus-off withdraw broadcast disable proof", test_broadcast_disable_proof_withdrawn_by_reenable_or_bus_off},
+        {"failed broadcast re-enable also withdraws disable proof", test_failed_broadcast_reenable_withdraws_disable_proof},
+        {"failed broadcast disable retains fault, waits and OTA gate", test_failed_broadcast_disable_retains_fault_and_stop_waits},
+        {"broadcast disable tracks an observed selected node", test_broadcast_disable_tracks_observed_selection_without_enable},
+        {"broadcast disable aborts home before F3", test_broadcast_disable_aborts_home_before_f3},
         {"broadcast stop does not lock the board on an unseen UI selection", test_stop_all_does_not_invent_unseen_target},
         {"configurable limits and trial timeout, continuous freshness guard", test_configurable_debug_limits},
         {"protocol truncation, limits and sync rejection", test_protocol_validation_bounds},
@@ -2366,6 +3186,12 @@ int main() {
         {"global query budget and repeated demands past 600ms", test_query_global_budget_and_repeats_past_600ms},
         {"shared query budget: selected + active, no periodic current", test_query_budget_selected_and_active_without_current},
         {"enable confirmed only after F3 02", test_enable_confirmed_only_after_f3_02},
+        {"recovery retains fault until F3 ACK and enabled flag", test_enable_recovery_keeps_fault_until_ack_and_flag},
+        {"recovery handles flag-first order and timed-out ACK", test_enable_recovery_flag_first_and_timeout},
+        {"failed disable withdraws recovery authority", test_failed_disable_withdraws_recovery_authority},
+        {"control reset preserves local fault evidence", test_control_reset_preserves_local_fault_evidence},
+        {"control reset preserves ordinary manual fault", test_control_reset_preserves_ordinary_manual_fault},
+        {"queue F3 confirmation cannot clear operator fault", test_queue_f3_does_not_clear_operator_fault},
         {"late F3 ack after stop does not enable", test_late_f3_ack_after_stop_does_not_enable},
         {"move requires fresh feedback + enable", test_move_requires_fresh_feedback_and_enable},
         {"move completion: CD ack + two distinct pairs", test_move_completion_needs_cd_ack_and_two_distinct_pairs},

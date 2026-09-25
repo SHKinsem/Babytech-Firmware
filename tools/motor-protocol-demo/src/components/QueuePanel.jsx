@@ -51,7 +51,7 @@ function PreviewRow({ row }) {
   );
 }
 
-function VerbHelp() {
+function VerbHelp({unverifiedMode = false}) {
   return (
     <dl className="queue-help">
       {QUEUE_VERBS.map((entry) => (
@@ -62,8 +62,10 @@ function VerbHelp() {
           </dt>
           <dd>
             <span className="queue-help__form">短写：<code>{entry.shortForm}</code></span>
-            <span className="queue-help__form">默认：{entry.defaults}</span>
-            <span className="queue-help__note">{entry.note}</span>
+            <span className="queue-help__form">默认：{unverifiedMode && entry.verb==='wait' ? '整数 0..1000000000 ms' : entry.defaults}</span>
+            <span className="queue-help__note">{unverifiedMode && ['sync','move','home'].includes(entry.verb)
+              ? '不校验模式只按顺序提交可编码帧；await 不等待反馈，也不判断到位。'
+              : entry.note}</span>
           </dd>
         </div>
       ))}
@@ -71,6 +73,7 @@ function VerbHelp() {
         指令与单位不分大小写；数字只接受十进制字面量（可带负号与小数点），不接受 <code>+</code>、<code>0x</code>、科学计数法或任何表达式；
         <code>#</code> 之后是注释。可选参数只能写在最后，越界直接报错、不做截断。
       </p>
+      {unverifiedMode ? <p className="queue-help__foot">直通范围：地址 0..255（同步成员 1..255），速度 0..6553.5 RPM，加减速与电流 0..65535；move 行程仍限于有符号 32 位的 0.1° 计数。按字节提交不代表驱动接受。</p> : null}
     </dl>
   );
 }
@@ -86,6 +89,7 @@ function VerbHelp() {
  */
 export function QueuePanel({
   connected,
+  unverifiedMode = false,
   limits,
   limitsReady,
   queue,
@@ -145,8 +149,8 @@ export function QueuePanel({
     return out;
   }, [profiles]);
 
-  const result = useMemo(() => validateProgram(program, { distances }), [program, distances]);
-  const repeatCheck = checkRepeat(repeat);
+  const result = useMemo(() => validateProgram(program, { distances, unverified:unverifiedMode }), [program, distances, unverifiedMode]);
+  const repeatCheck = checkRepeat(repeat,{unverified:unverifiedMode});
   const mmIds = useMemo(
     () => [...new Set(result.actions.flatMap(a=>a.verb==='helix'?[a.linearId]:a.verb==='move'&&a.unit==='mm'?[a.id]:[]))],
     [result.actions],
@@ -292,13 +296,13 @@ export function QueuePanel({
   }
 
   // --------------------------------------------------------------- start / cancel
-  const startBlock = !connected
+  const startBlock = !unverifiedMode && !connected
     ? '设备未连接：无法提交队列。'
     : queueState === 'unavailable'
       ? '板端没有 /api/queue 接口（固件未更新），本页无法提交队列。'
-      : queue?.active || queue?.state === 'running'
+      : !unverifiedMode && (queue?.active || queue?.state === 'running')
         ? '队列正在运行：请先「取消队列」或等待板端结束。'
-        : queueUnknown
+        : !unverifiedMode && queueUnknown
           ? '上一次提交的结果未知：请先「取消队列」确认板端状态。'
           : !result.ok
             ? '请先修正程序中的错误。'
@@ -324,7 +328,9 @@ export function QueuePanel({
         onQueueBusy({ pending: false, unconfirmed: false });
         setNotice({
           tone: parsed.status.state === 'failed' ? 'error' : 'ok',
-          text: `板端已接受队列（HTTP 202）：${queueProgressText(parsed.status)}。默认发送后继续；move/home 末尾加 await 才等待完成；原始帧（hex / can）只报告已发送，不推断完成。`,
+          text: unverifiedMode
+            ? `板端已接受队列（HTTP 202）：${queueProgressText(parsed.status)}。不校验模式只按顺序提交可编码帧；await 不等待反馈，发送成功不证明运动到位。`
+            : `板端已接受队列（HTTP 202）：${queueProgressText(parsed.status)}。默认发送后继续；move/home 末尾加 await 才等待完成；原始帧（hex / can）只报告已发送，不推断完成。`,
         });
       } else {
         // 202 without a readable body still means the board took the program.
@@ -437,7 +443,7 @@ export function QueuePanel({
   }
 
   function insertAction() {
-    const built = buildActionLine(builderVerb, builderValues);
+    const built = buildActionLine(builderVerb, builderValues,{unverified:unverifiedMode});
     if (!built.ok) {
       setBuilderError(built.error);
       return;
@@ -454,18 +460,18 @@ export function QueuePanel({
 
   const definition = getVerbDefinition(builderVerb);
   const builderPreview = (() => {
-    const built = buildActionLine(builderVerb, builderValues);
-    return built.ok ? describeAction(built.action, { distances }) : built.error;
+    const built = buildActionLine(builderVerb, builderValues,{unverified:unverifiedMode});
+    return built.ok ? describeAction(built.action, { distances, unverified:unverifiedMode }) : built.error;
   })();
 
   // A failed read keeps the last board-reported status on screen but never
   // presents it as current: the label and the note say which one it is.
   const queueStale = queueState === 'error';
-  const lastStateLabel = queue ? (queue.state==='done' ? (queue.motionComplete?'运动完成':'发送结束') : queueStateLabels[queue.state]) : null;
+  const lastStateLabel = queue ? (queue.state==='done' ? (queue.motionComplete && !unverifiedMode ? '运动完成':'发送结束') : queueStateLabels[queue.state]) : null;
   const stateLabel = queueState === 'unavailable'
     ? '不可用'
     : queueStale && lastStateLabel ? `${lastStateLabel}（最后读取，当前未知）` : (lastStateLabel ?? queueStateLabels.unknown);
-  const chipClass = queue?.state === 'running' ? 'chip--warn' : queue?.state === 'failed' ? 'chip--warn' : queue?.state === 'done' && !queue?.raw ? 'chip--ok' : 'chip--muted';
+  const chipClass = queue?.state === 'running' ? 'chip--warn' : queue?.state === 'failed' ? 'chip--warn' : queue?.state === 'done' && !queue?.raw && !unverifiedMode ? 'chip--ok' : 'chip--muted';
 
   return (
     <div className="queue-page">
@@ -477,7 +483,7 @@ export function QueuePanel({
           <span className={`chip ${chipClass}`}>板端队列：{stateLabel}</span>
         </div>
         <details><summary>执行规则与注意事项</summary><p className="panel__desc">
-          按顺序发送，默认发送后继续；move/home 末尾加 await 才等待本次动作完成。速度／力矩按写出的持续时间执行；<code>wait MS</code> 用于额外延时。await 期间反馈中断时停留当前行并提示，恢复后继续；驱动拒绝时报告原因，不自动失能或追加停机。原始帧只负责发送。浏览器断开后板端仍继续，不会自动重发。
+          {unverifiedMode ? <>不校验模式按顺序提交可编码的动作帧；move/home 的 <code>await</code> 只保留语法，不等待电机应答或到位。显式 <code>wait MS</code> 和速度／力矩持续时间仍计时。返回发送结束不表示机械完成；浏览器断开后板端仍继续，不会自动重发。</> : <>按顺序发送，默认发送后继续；move/home 末尾加 await 才等待本次动作完成。速度／力矩按写出的持续时间执行；<code>wait MS</code> 用于额外延时。await 期间反馈中断时停留当前行并提示，恢复后继续；驱动拒绝时报告原因，不自动失能或追加停机。原始帧只负责发送。浏览器断开后板端仍继续，不会自动重发。</>}
         </p></details>
 
         <label className="queue-editor__label" htmlFor="queue-program">
@@ -532,7 +538,7 @@ export function QueuePanel({
               value={repeat}
               onChange={(event) => { setRepeat(event.target.value); setNotice(null); }}
             />
-            <span className="field__range">1..1000</span>
+            <span className="field__range">1..{unverifiedMode ? QUEUE_LIMITS.unverifiedRepeatMax : QUEUE_LIMITS.repeatMax}</span>
           </label>
           <button type="button" className="button button--primary" onClick={start} disabled={!canStart}>
             {starting ? '提交中…' : '开始执行'}
@@ -545,7 +551,7 @@ export function QueuePanel({
         {startBlock ? (
           <p className="queue-gate" role="status"><GlyphInfo /><span>{startBlock}</span></p>
         ) : (
-          <p className="queue-gate"><GlyphInfo /><span>提交后本页不会自动重试；运行状态只以板端返回为准。</span></p>
+          <p className="queue-gate"><GlyphInfo /><span>{unverifiedMode ? '提交后本页不会自动重试；板端状态只表示发送进度，不证明驱动实际执行。' : '提交后本页不会自动重试；运行状态只以板端返回为准。'}</span></p>
         )}
         {notice && notice.tone!=='error' ? (
           <p className={`queue-notice queue-notice--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.text}</p>
@@ -741,7 +747,7 @@ export function QueuePanel({
           指令与默认值
           <HelpTip label="编排队列" text="板端先校验整份程序，再按顺序直接发送；只检查报文编码、单位换算和资源容量所需边界。速度、电流和行程由操作者按实机条件判断。" />
         </h3>
-        <VerbHelp />
+        <VerbHelp unverifiedMode={unverifiedMode} />
         </details>
       </section>
       </CompactPanel>

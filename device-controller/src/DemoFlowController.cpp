@@ -1,5 +1,6 @@
 #include "DemoFlowController.h"
 #include <cstring>
+#include <sstream>
 #include <utility>
 
 namespace motion {
@@ -15,6 +16,8 @@ bool DemoFlowController::apply(DemoConfig config) {
     if (busy() || !executor_.available()) return false;
     config_ = std::move(config);
     reference_ = false;
+    zeros_.fill(0);
+    zeroKnown_.fill(false);
     if (stage_ != DisplayStage::Error) stage_ = DisplayStage::NotReady;
     reason_ = config_.configured ? "initialization_required" : "configuration_required";
     return true;
@@ -30,6 +33,16 @@ bool DemoFlowController::settled(bool zero) const {
     }
     return true;
 }
+bool DemoFlowController::zerosRepresentable(const DemoScript& script) const {
+    for (const auto& command : script.commands) {
+        std::istringstream tokens(command);
+        std::string verb;
+        unsigned id = 0;
+        if (tokens >> verb && verb == "zero" && tokens >> id &&
+            (id == 0 || id >= zeroKnown_.size() || !zeroKnown_[id])) return false;
+    }
+    return true;
+}
 bool DemoFlowController::begin(int index, uint32_t now) {
     index_ = index;
     began_ = now;
@@ -42,6 +55,12 @@ bool DemoFlowController::begin(int index, uint32_t now) {
 }
 bool DemoFlowController::initialize(uint32_t now) {
     if (busy() || !config_.configured || !executor_.available()) return false;
+    if (executor_.unverifiedMode()) {
+        full_ = false;
+        reference_ = false;
+        zeroKnown_.fill(false);
+        return begin(-1, now);
+    }
     if (stage_ == DisplayStage::Error || !executor_.healthy()) {
         if (!executor_.healthy()) reference_ = false;
         resetPending_ = executor_.reset();
@@ -61,19 +80,51 @@ bool DemoFlowController::initialize(uint32_t now) {
     return begin(-1, now);
 }
 bool DemoFlowController::start(uint32_t now) {
+    if (executor_.unverifiedMode()) {
+        if (!config_.configured || busy() || !executor_.available() ||
+            !executor_.configurationValid()) return false;
+        for (const auto& script : config_.stages) if (!zerosRepresentable(script)) {
+            reason_ = "zero_reference_unavailable";
+            return false;
+        }
+        full_ = true;
+        return begin(0, now);
+    }
     tick(now); // revalidate Ready before accepting an intent
     if (stage_ != DisplayStage::Ready || busy() || !executor_.available()) return false;
     full_ = true;
     return begin(0, now);
 }
 bool DemoFlowController::single(uint8_t index, uint32_t now) {
+    if (executor_.unverifiedMode()) {
+        if (index >= 5 || busy() || !config_.configured || !executor_.available() ||
+            !executor_.configurationValid()) return false;
+        if (!zerosRepresentable(config_.stages[index])) {
+            reason_ = "zero_reference_unavailable";
+            return false;
+        }
+        full_ = false;
+        return begin(index, now);
+    }
     if (index >= 5 || busy() || stage_ == DisplayStage::Error || !reference_ ||
         !config_.configured || !executor_.available() || !executor_.healthy()) return false;
     full_ = false;
     return begin(index, now);
 }
+void DemoFlowController::cancelLocal(const char* reason) {
+    (void)reason;
+    executor_.cancelLocal();
+    running_ = launchPending_ = resetPending_ = stopping_ = full_ = false;
+    reference_ = false;
+    zeroKnown_.fill(false);
+    index_ = -1;
+    stage_ = DisplayStage::NotReady;
+    error_ = DisplayError::None;
+    reason_ = "script_cancelled";
+}
 void DemoFlowController::invalidate() {
     reference_ = false;
+    zeroKnown_.fill(false);
     if (!busy() && stage_ != DisplayStage::Error) stage_ = DisplayStage::NotReady;
     reason_ = "reference_invalid";
 }
@@ -82,11 +133,25 @@ void DemoFlowController::fail(DisplayError error, const char* reason, uint32_t n
     stage_ = DisplayStage::Error;
     error_ = error;
     reason_ = reason;
+    if (executor_.unverifiedMode()) return;
     stopping_ = true;
     stopAt_ = now;
     if (!executor_.stop()) { error_ = DisplayError::CanFault; reference_ = false; }
 }
 void DemoFlowController::stop(uint32_t now) {
+    if (executor_.unverifiedMode()) {
+        running_ = launchPending_ = resetPending_ = stopping_ = false;
+        reference_ = false;
+        zeroKnown_.fill(false);
+        if (executor_.stop()) {
+            stage_ = DisplayStage::NotReady; error_ = DisplayError::None;
+            reason_ = "stop_command_sent";
+        } else {
+            stage_ = DisplayStage::Error; error_ = DisplayError::CanFault;
+            reason_ = "stop_send_failed";
+        }
+        return;
+    }
     const bool latched = stage_ == DisplayStage::Error;
     running_ = launchPending_ = false;
     resetPending_ = false;
@@ -100,7 +165,13 @@ void DemoFlowController::stop(uint32_t now) {
     }
 }
 void DemoFlowController::tick(uint32_t now) {
+    const bool unverified = executor_.unverifiedMode();
     if (resetPending_) {
+        if (unverified) {
+            resetPending_ = false;
+            begin(-1, now);
+            return;
+        }
         if (settled(false)) {
             resetPending_ = false;
             if (reference_) {
@@ -114,6 +185,11 @@ void DemoFlowController::tick(uint32_t now) {
         return;
     }
     if (stopping_) {
+        if (unverified) {
+            stopping_ = false;
+            reason_ = "stop_command_sent";
+            return;
+        }
         // Adapter must return post-stop evidence, not the pre-stop sample.
         if (settled(false)) { stopping_ = false; reason_ = "stopped"; }
         else if (uint32_t(now - stopAt_) >= 3000) {
@@ -124,11 +200,11 @@ void DemoFlowController::tick(uint32_t now) {
         return;
     }
     if (running_) {
-        if (!executor_.healthy()) {
+        if (!unverified && !executor_.healthy()) {
             reference_ = false; fail(DisplayError::CanFault, "can_fault", now); return;
         }
         const DemoScript& script = index_ < 0 ? config_.initialization : config_.stages[index_];
-        if (uint32_t(now - began_) >= script.timeoutMs) {
+        if (!unverified && uint32_t(now - began_) >= script.timeoutMs) {
             fail(index_ < 0 ? DisplayError::Unknown : timeouts[index_], "stage_timeout", now); return;
         }
         if (launchPending_) {
@@ -142,34 +218,53 @@ void DemoFlowController::tick(uint32_t now) {
             return;
         }
         const auto execution = executor_.execution();
+        if (unverified && execution == DemoExecution::Cancelled) {
+            running_ = launchPending_ = full_ = false;
+            reference_ = false;
+            zeroKnown_.fill(false);
+            stage_ = DisplayStage::NotReady;
+            error_ = DisplayError::None;
+            reason_ = "script_cancelled";
+            return;
+        }
         if (execution == DemoExecution::Failed) { fail(executor_.failureError(), "execution_failed", now); return; }
         if (execution != DemoExecution::Done) return;
         if (index_ == -1) {
-            for (const auto& axis : config_.axes) if (axis.zero)
-                zeros_[axis.id] = executor_.evidence(axis.id).position;
-            reference_ = true; running_ = false; stage_ = DisplayStage::Ready; reason_ = "ready";
+            if (!unverified) {
+                for (const auto& axis : config_.axes) if (axis.zero) {
+                    zeros_[axis.id] = executor_.evidence(axis.id).position;
+                    zeroKnown_[axis.id] = true;
+                }
+            }
+            reference_ = !unverified;
+            running_ = false; stage_ = unverified ? DisplayStage::Idle : DisplayStage::Ready;
+            reason_ = unverified ? "initialization_commands_sent" : "ready";
         } else if (full_ && index_ < 4) {
             begin(index_ + 1, now);
         } else if (full_) {
-            running_ = false; stage_ = DisplayStage::Complete; completeAt_ = now; reason_ = "complete";
+            running_ = false; stage_ = unverified ? DisplayStage::Idle : DisplayStage::Complete;
+            completeAt_ = now;
+            reason_ = unverified ? "scripts_sent" : "complete";
         } else {
-            running_ = false; stage_ = DisplayStage::NotReady; reason_ = "single_stage_done";
+            running_ = false; stage_ = unverified ? DisplayStage::Idle : DisplayStage::NotReady;
+            reason_ = unverified ? "script_commands_sent" : "single_stage_done";
         }
         return;
     }
     if (stage_ == DisplayStage::Ready || stage_ == DisplayStage::Complete) {
-        if (!executor_.healthy()) { reference_ = false; fail(DisplayError::CanFault, "can_fault", now); return; }
-        if (!reference_) {
+        if (!unverified && !executor_.healthy()) { reference_ = false; fail(DisplayError::CanFault, "can_fault", now); return; }
+        if (!unverified && !reference_) {
             stage_ = DisplayStage::NotReady; reason_ = "zero_or_feedback_required"; return;
         }
         if (stage_ == DisplayStage::Complete && uint32_t(now - completeAt_) >= 3000) {
-            stage_ = DisplayStage::Ready; reason_ = "ready";
+            stage_ = DisplayStage::Ready;
+            reason_ = unverified ? "scripts_sent_ready" : "ready";
         }
     }
 }
 babytech::display::DisplaySnapshot DemoFlowController::snapshot() const {
     babytech::display::DisplaySnapshot s;
-    s.stage = stage_; s.error = error(); s.startEnabled = startEnabled();
+    s.stage = stage(); s.error = error(); s.startEnabled = startEnabled();
     s.thermalSimulated = true; s.waterMl = config_.waterMl; s.temperatureC = config_.temperatureC;
     std::strncpy(s.babyName.data(), config_.baby.c_str(), s.babyName.size() - 1);
     std::strncpy(s.formulaBrand.data(), config_.brand.c_str(), s.formulaBrand.size() - 1);

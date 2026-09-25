@@ -2,7 +2,7 @@
 // Bounded motion module for the X42S/X28S CAN motors on an ESP32-S3 (TWAI).
 //
 // Responsibilities:
-//   * own the CAN driver (X42sProtocol) and the polling of motor feedback
+//   * own MotorBus and the polling of motor feedback
 //   * keep exactly one supervised action at a time (move, trial or homing)
 //   * only confirm "enabled", "move done" or "home done" from real post-command
 //     feedback, never from a bare 0x02 ack or a single idle status byte
@@ -15,7 +15,9 @@
 #include <cstring>
 
 #include "MotionCore.h"
-#include "X42sProtocol.h"
+#include "MotorBus.h"
+#include "ConfigTransaction.h"
+#include "ManualOperationSupervisor.h"
 #include "QueueDiagnostics.h"
 #include "CanQueryScheduler.h"
 
@@ -32,20 +34,53 @@ public:
     void poll(bool dispatchQueries = true);
     // Production loop calls this after queue/UART/HTTP operations for TX priority.
     void dispatchQueries();
-    CanQueryScheduler& queries() { return queries_; }
+    // Compatibility view for existing diagnostics/tests. The bus owns this
+    // scheduler; new clients use the narrow query methods below.
+    CanQueryScheduler& queries() { return bus_.syncScheduler(); }
+    // SyncRuntime currently requires a scheduler reference for its existing
+    // contract. It receives the bus-owned instance, never a second budget.
+    CanQueryScheduler& syncQueryScheduler() { return bus_.syncScheduler(); }
+    const CanQueryScheduler::Config& queryBudget() const { return bus_.queryBudget(); }
+    const CanQueryScheduler::Statistics& queryStatistics() const { return bus_.queryStatistics(); }
+    bool configureQueryBudget(const CanQueryScheduler::Config& value) {
+        return bus_.configureQueryBudget(value);
+    }
+    uint8_t queryInflight() const { return bus_.queryInflight(); }
+    bool demandQuery(uint8_t id, uint8_t field, CanQueryScheduler::Owner owner,
+                     uint32_t periodMs, uint32_t leaseMs, uint8_t priority, uint32_t now) {
+        if (unverifiedMode_) return false;
+        return bus_.demandQuery(id, field, owner, periodMs, leaseMs, priority, now);
+    }
+    void releaseQueries(CanQueryScheduler::Owner owner) { bus_.releaseQueries(owner); }
+    void releaseQuery(uint8_t id, uint8_t field, CanQueryScheduler::Owner owner) {
+        bus_.releaseQuery(id, field, owner);
+    }
+    CanQueryScheduler::Evidence queryEvidence(uint8_t id, uint8_t field) const {
+        return bus_.queryEvidence(id, field);
+    }
     String queryStatusJson() const;
     // Compatibility name: this controls idle page refresh only. Queries needed
     // to supervise an active command always use the shared scheduler.
     void setAutoQueriesEnabled(bool enabled);
     bool autoQueriesEnabled() const { return autoQueriesEnabled_; }
 
+    // Transport-only mode submits logical frames without software evidence or
+    // motion-policy admission checks. Submission never proves motor completion.
+    void setUnverifiedMode(bool enabled);
+    bool unverifiedMode() const { return unverifiedMode_; }
+    // Sticky evidence for status/OTA only. It never blocks motor commands.
+    bool unverifiedMotionOutstanding() const { return unverifiedMotionOutstanding_; }
+    // A writer outside MotorControl (the board queue) may have already sent a
+    // motion frame when this mode is selected. This records that uncertainty.
+    void noteUnverifiedMotionPossiblyOutstanding() { unverifiedMotionOutstanding_ = true; }
+
     // Selects the address the module tracks (1..255). Selecting a new id never
     // consumes a slot: queries always cover the selected id, the active job and
     // any node with a pending enable/stop.
     void watch(uint8_t id);
 
-    // Requests the firmware enable state. Result is 202 queued; the enable is
-    // only reported as true after matching F3 ACK and fresh enabled 3A flags.
+    // In supervised mode, enable is only reported as true after matching F3
+    // ACK and fresh enabled 3A flags. Unverified mode reports CAN TX only.
     Result enable(uint8_t id, bool enabled);
     Result broadcastEnable(bool enabled);
 
@@ -90,7 +125,8 @@ public:
 
     // Operator-requested software reset, after the caller has cancelled writers
     // and attempted broadcast stop. No CAN re-init, NVS write, enable or motion.
-    // Clears stale ownership; it is NOT evidence of physical stop.
+    // Clears stale ownership; it is NOT evidence of physical stop. An active
+    // manual handle becomes Superseded unless its caller already stopped it.
     void clearControlState();
     // Relinquish manual supervisors without CAN traffic or erasing observed
     // feedback, confirmed enables, or still-pending hardware evidence.
@@ -105,8 +141,8 @@ public:
     bool setDebugLimits(const DebugLimits& limits);
 
     // --- Raw transport for the board queue (see queue-contract.md) ----------
-    // Both require a ready bus and no active supervised operation, and neither
-    // stops nor enables anything implicitly. They report transmission only:
+    // Supervised mode also requires no active operation. Neither path stops or
+    // enables anything implicitly. They report transmission only:
     // no motion completion or parameter policy. Known 4C logical frames are
     // tracked separately through ACK and 22 readback before queue advancement.
     bool rawLogical(const uint8_t* bytes, uint8_t length);
@@ -138,7 +174,7 @@ public:
     bool anyMotorOnline() const;
     bool hasActiveMotion() const;
 
-    enum class MoveOutcome : uint8_t { None, Running, Done, Cancelled, Failed };
+    using MoveOutcome = ManualOperationSupervisor::MoveOutcome;
     // Homing outcome. NoMotion is the manual's 12/22 answer ("already at the
     // origin or the limit is already triggered, the motor does not move"): it is
     // a finished attempt, but it is NOT a completion claim and not a fault.
@@ -149,7 +185,7 @@ public:
     //   statusJson.homeOrg  is the raw 0x3B homing status byte of that node
     //                       (the manual's Org), with homeRunning = bit2 and
     //                       homeFailed = bit3 decoded from the same byte.
-    enum class HomeOutcome : uint8_t { None, Running, Done, NoMotion, Cancelled, Failed };
+    using HomeOutcome = ManualOperationSupervisor::HomeOutcome;
     static const char* homeOutcomeName(HomeOutcome outcome);
     struct Snapshot {
         bool positionValid=false, velocityValid=false, currentValid=false;
@@ -168,8 +204,8 @@ public:
     bool stopping() const { return anyStopPending(); }
     bool hasFault() const { return faultTag_ && strcmp(faultTag_, "none") != 0; }
     bool canRecover(uint8_t id) const { return !faultGlobal_ && faultId_ == id; }
-    bool configPending() const { return config_.state == 1 || config_.state == 2; }
-    bool configFailed() const { return config_.state >= 4; }
+    bool configPending() const { return config_.pending(); }
+    bool configFailed() const { return config_.failed(); }
     const char* configMessage() const;
     String configJson() const;
     // Stable identifier of the latched fault ("none" when there is none), so a
@@ -177,14 +213,18 @@ public:
     // generic "fault_active".
     const char* faultTag() const { return faultTag_; }
     bool ready() const { return canReady(); }
-    MoveOutcome moveOutcome() const { return moveOutcome_; }
+    MoveOutcome moveOutcome() const { return manual_.moveOutcome(); }
+    uint64_t activeOperationId() const { return manual_.activeOperationId(); }
+    DeviceOperationResult readOperation(uint64_t operationId) const {
+        return manual_.readOperation(operationId);
+    }
     // Homing accessors. homeId()/homeMode() keep the last requested run so a
     // finished outcome can still be attributed; homeActive() tells whether one
     // is running right now.
-    HomeOutcome homeOutcome() const { return homeOutcome_; }
-    uint8_t homeId() const { return homeId_; }
-    uint8_t homeMode() const { return homeMode_; }
-    bool homeActive() const { return home_.active; }
+    HomeOutcome homeOutcome() const { return manual_.homeOutcome(); }
+    uint8_t homeId() const { return manual_.homeId(); }
+    uint8_t homeMode() const { return manual_.homeMode(); }
+    bool homeActive() const { return manual_.homeActive(); }
 
 private:
     friend class CommandQueue;
@@ -192,29 +232,18 @@ private:
     bool syncObserve_[256]={};
     bool queueTransport_=false;
     QueueDiagnostics queueDiagnostics_;
-    CanQueryScheduler queries_;
-    static bool sendQuery(void* context, uint8_t id, uint8_t field);
+    static void querySent(void* context, uint8_t id, uint8_t field, bool sent);
     uint32_t txFrameCount_=0;
     uint32_t rxMissedCount_=0, rxOverrunCount_=0, txFailedCount_=0;
     uint8_t queueObserveId_ = 0;
-    struct MoveFailure {
-        uint8_t id = 0;
-        int64_t target = 0;
-        int32_t position = 0, velocity = 0;
-        uint32_t elapsed = 0, deadline = 0;
-        bool positionValid = false, velocityValid = false, enabled = false;
-    } moveFailure_;
-    // One serialized 4C write and its 22 readback. Terminal evidence is retained
-    // independently of the rolling CAN trace and ordinary feedback polling.
-    struct ConfigTransaction {
-        bool readIssued = false;
-        uint32_t sequence = 0, started = 0, readAt = 0;
-        uint8_t id = 0, state = 0, ack = 0, packet = 0, received = 0;
-        uint8_t expected[15] = {}, actual[16] = {};
-    } config_;
+    ManualOperationSupervisor manual_;
+    // The transaction owns manual 4C/22 evidence and transitions; this class
+    // bridges it to the shared CAN/query budget and command policy.
+    ConfigTransaction config_;
     void startConfig(const uint8_t* bytes);
     bool configFrame(const CanRawFrame& frame, uint32_t now);
     void pollConfig(uint32_t now);
+    void cancelConfig();
     DebugLimits limits_;
     static void traceSink(void* context, const CanRawFrame& frame, bool tx);
     struct TraceEntry { CanRawFrame frame; uint32_t sequence = 0, atMs = 0; bool tx = false; };
@@ -269,9 +298,20 @@ private:
         bool enablePending = false;
         bool enableAck = false, enableTimedOut = false;
         uint32_t enablePendingMs = 0;
+        // Only explicit enable(true) owns recovery of a latched fault. Queue
+        // and raw F3 requests can confirm enable without clearing diagnosis.
+        bool recoverFaultPending = false;
 
         bool stopRequested = false;
         uint32_t stopRequestedMs = 0;
+        // A broadcast F3 disable has no per-node ACK. Keep the node blocked
+        // until later 3A disabled flags and still-later stationary feedback arrive.
+        bool broadcastDisablePending = false;
+        // First candidate disabled 3A received after this request. Later disabled
+        // replies must not move the proof boundary ahead of sparse 36/35
+        // feedback; a later enabled reply withdraws this proof.
+        bool broadcastDisableProofValid = false;
+        uint32_t broadcastDisableProofMs = 0;
 
         const char* lastAck = "none";
         uint8_t queueAckFunction = 0, queueAckStatus = 0;
@@ -285,44 +325,22 @@ private:
         uint8_t syncAck=0;
     };
 
-    struct MoveJob {
-        bool active = false;
-        uint8_t id = 0;
-        // Opcode this job was started with (0xCD for a trapezoid move, 0xFB/0xCB
-        // for a direct one). An acknowledgement may only ever confirm the job
-        // whose opcode it matches, so an ack of another command cannot complete
-        // this one.
-        uint8_t opcode = kFrameMove;
-        // The position feedback is a full int32 and the travel is added to it,
-        // so the target and the error are kept in int64 to avoid overflow.
-        int64_t startTenths = 0;
-        int64_t targetTenths = 0;
-        int32_t toleranceTenths = 0;
-        uint32_t expectedDurationMs = 0;
-        uint32_t startMs = 0;
-        uint32_t deadlineMs = 0;
-        bool ackSeen = false;
-        // Direct (FB/CB) jobs additionally prove completion with the driver's own
-        // target sample: a fresh 0x33 that reports the resolved target.
-        bool targetProof = false;
-        uint8_t doneUpdates = 0;
-        // Timestamp of the last sample pair counted towards completion, so the
-        // same feedback sample is never counted twice.
-        uint32_t lastDonePosMs = 0;
-        uint32_t lastDoneVelMs = 0;
-    };
-
     // CAN plumbing.
     bool canReady() const;
     void refreshBusStatus();
     const char* busStateString() const;
     uint32_t txErrorCount() const;
-    void drainRx(uint32_t now);
+    // True only after receive() reports an empty RX queue. Hitting the bounded
+    // per-poll limit is conservatively treated as backlog.
+    bool drainRx(uint32_t now);
     void handleFrame(const CanRawFrame& frame, uint32_t now);
     void handleAck(uint8_t id, uint8_t function, uint8_t status, uint32_t now);
     bool sendStop(uint8_t id);
     bool sendHomeTrigger(uint8_t id, uint8_t mode);
     bool sendHomeInterrupt(uint8_t id);
+    bool sendUnverifiedLogical(const uint8_t* bytes, uint8_t length);
+    Result submitUnverifiedLogical(const uint8_t* bytes, uint8_t length);
+    static bool unverifiedLogicalMayMove(const uint8_t* bytes, uint8_t length);
 
     // Feedback helpers.
     bool freshPosition(uint8_t id, uint32_t now, int32_t& out) const;
@@ -351,22 +369,21 @@ private:
     void serviceEnableTimeouts(uint32_t now);
     void serviceJob(uint32_t now);
     void serviceHome(uint32_t now);
+    ManualOperationSupervisor::Observation manualObservation(uint8_t id, uint32_t now) const;
     void serviceStopConfirmations(uint32_t now);
-    void serviceQueries(uint32_t now);
+    void serviceQueries(uint32_t now, bool rxDrained);
 
-    // Homing supervision. endHome() only records the outcome; cancelHome() and
-    // failHome() also abort the run on the wire (9C interrupts homing, FE halts
-    // the motor) and a failure latches a fault, which invalidates the enable.
-    void endHome(HomeOutcome outcome);
+    // Homing cancellation and failure also abort the run on the wire (9C
+    // interrupts homing, FE halts the motor). Only the supervisor can judge done.
     void cancelHome(bool interruptWire, bool stopWire);
-    void failHome(const char* tag, uint32_t now);
+    void failHome(const char* tag, uint32_t now, uint8_t terminalId = 0);
 
     // Fault handling. A latched fault always invalidates the enable
     // confirmation (and cancels a pending enable) so a fresh explicit enable is
     // required.
     void latchFault(uint8_t id, const char* tag, bool global);
     void clearFault(uint8_t id);
-    void failJob(const char* tag, uint32_t now);
+    void failJob(const char* tag, uint32_t now, uint8_t terminalId = 0);
     // `enableDesired` may only be true while an enable is confirmed or still in
     // flight. Without this, dropping a confirmation while a request was pending
     // leaves a phantom desire behind: hasActiveMotion() would stay true forever
@@ -382,7 +399,7 @@ private:
     uint8_t diagnosticNext_ = 0, diagnosticCount_ = 0;
     uint32_t rxCount_ = 0;
 
-    X42sProtocol can_;
+    MotorBus bus_;
     bool canReady_ = false;
     CanControllerState busState_ = CanControllerState::Unavailable;
     uint32_t txErrorCounter_ = 0;
@@ -390,45 +407,13 @@ private:
     NodeState nodes_[kNodeCount];
     uint8_t selectedId_ = 0;
 
-    // Homing supervision state. The trigger is a single 0x9A frame; completion
-    // is never taken from the ack alone.
-    //
-    // Two independent proofs exist and both are timestamped, because a stationary
-    // sample may only count when it is NEWER than the proof:
-    //   * stoppedMs — inferred proof: the first post-start 0x3B sample that
-    //     reported "not running, no failure" AFTER bit2 had been observed set.
-    //     It is only usable while the 0x3B status is still fresh, and it is
-    //     withdrawn (0) as soon as a newer status reports running again, so a
-    //     stale "not homing" byte can never complete a later run.
-    //   * completedMs — explicit proof: the documented 9A/9F completion reply
-    //     arrived at this time. This path needs no 0x3B at all.
-    struct HomeJob {
-        bool active = false;
-        uint32_t startMs = 0;
-        // Duration budget taken from the configured limits (no extra hardcoded
-        // timeout); it is a duration, compared wrap-safely against startMs.
-        uint32_t deadlineMs = 0;
-        bool ackSeen = false;
-        bool runningSeen = false;
-        uint32_t stoppedMs = 0;
-        uint32_t completedMs = 0;
-        uint8_t doneUpdates = 0;
-        uint32_t lastDonePosMs = 0;
-        uint32_t lastDoneVelMs = 0;
-    };
-
-    MoveJob job_;
-    MoveOutcome moveOutcome_ = MoveOutcome::None;
-
-    HomeJob home_;
-    HomeOutcome homeOutcome_ = HomeOutcome::None;
-    uint8_t homeId_ = 0, homeMode_ = 0;
-
     const char* faultTag_ = "none";
     uint8_t faultId_ = 0;
     bool faultGlobal_ = false;
 
     bool autoQueriesEnabled_ = true;
+    bool unverifiedMode_ = false;
+    bool unverifiedMotionOutstanding_ = false;
 
     // Bounded on-demand 0x33 refresh. `targetPollId_` is 0 when nothing is being
     // refreshed; the window and global budget keep a quiet node from turning into
