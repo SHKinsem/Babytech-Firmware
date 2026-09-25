@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "CommandQueue.h"
+#include "DeviceOperation.h"
 
 namespace motion {
 
@@ -21,6 +22,7 @@ struct DeviceReceipt {
     uint16_t code;       // Existing HTTP-compatible result code.
     const char* message; // Existing stable reason; consume before the next request.
     uint32_t runId;      // Nonzero only for an accepted program or Demo start.
+    uint64_t operationId; // Nonzero only for an accepted manual move/direct/home.
     bool accepted() const { return admission == DeviceAdmission::Accepted || admission == DeviceAdmission::Processed; }
 };
 
@@ -59,8 +61,8 @@ struct DeviceSnapshot {
     bool hasActiveMotion = false;
     bool stopping = false;
     bool fault = false;
-    // Existing manual supervisors are board-global. These fields are not
-    // attributed to motorId; per-operation IDs/history belong to a later slice.
+    // Existing manual supervisors are board-global. These aggregate fields
+    // are not attributed to motorId; use readOperation(id) for a specific run.
     DeviceMoveStage manualMove = DeviceMoveStage::None;
     DeviceHomeStage manualHome = DeviceHomeStage::None;
     uint8_t homeId = 0;
@@ -100,11 +102,15 @@ public:
     // No CAN TX, query scheduling or mutation occurs while producing a snapshot.
     // sampledAtMs is read from millis() to match MotorControl feedback ages.
     DeviceSnapshot readSnapshot(uint8_t id) const;
+    // Bounded in-process history lookup; does not transmit CAN, schedule
+    // queries, or mutate operation state. IDs do not persist across reboot.
+    DeviceOperationResult readOperation(uint64_t operationId) const;
     // Cheap per-ID read for stop/feedback loops: no board-wide state scan.
     DeviceMotorObservation readMotorObservation(uint8_t id) const;
 
 private:
-    static DeviceReceipt receipt(Result result, uint32_t runId = 0);
+    static DeviceReceipt receipt(Result result, uint32_t runId = 0,
+                                 uint64_t operationId = 0);
     MotorControl& motor_;
     CommandQueue& queue_;
 };

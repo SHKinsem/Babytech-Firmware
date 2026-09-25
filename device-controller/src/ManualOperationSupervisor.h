@@ -4,6 +4,7 @@
 // node observations, stop confirmation and fault latching stay with MotorControl;
 // this class judges only evidence for the operation that currently owns the slot.
 #include <stdint.h>
+#include "DeviceOperation.h"
 
 namespace motion {
 
@@ -16,10 +17,11 @@ public:
     enum class Kind : uint8_t { None, Move, Home };
     enum class MoveOutcome : uint8_t { None, Running, Done, Cancelled, Failed };
     enum class HomeOutcome : uint8_t { None, Running, Done, NoMotion, Cancelled, Failed };
-    enum class Fault : uint8_t {
-        None, DriverDisabled, FeedbackStale, MoveAckTimeout, MoveTimeout,
-        HomeAckTimeout, HomeStatusMissing, HomeFailed, HomeProtection, HomeTimeout
-    };
+    using Fault = DeviceOperationFault;
+    using OperationResult = DeviceOperationResult;
+    enum : uint8_t { kTerminalHistoryCapacity = 8 };
+    explicit ManualOperationSupervisor(uint64_t initialCounter = 0)
+        : nextOperationId_(initialCounter), sessionBaseId_(initialCounter) {}
     struct Verdict {
         Kind kind = Kind::None;
         Fault fault = Fault::None;
@@ -28,6 +30,7 @@ public:
     struct MoveStart {
         uint8_t id = 0;
         uint8_t opcode = 0;
+        DeviceOperationKind operationKind = DeviceOperationKind::Move;
         int64_t startTenths = 0;
         int64_t targetTenths = 0;
         int32_t toleranceTenths = 0;
@@ -76,18 +79,69 @@ public:
     HomeOutcome homeOutcome() const { return homeOutcome_; }
     const MoveFailure& moveFailure() const { return moveFailure_; }
 
-    // A reset drops current ownership and outcomes, but retains the last failed
-    // move for diagnostics. Finished homing attribution survives until reset.
-    void reset() {
+    // One active manual operation and a bounded terminal ring. Queries are
+    // memory-only and never affect CAN or query scheduling.
+    bool canStartOperation() const { return nextOperationId_ != UINT64_MAX; }
+    uint64_t activeOperationId() const { return active() ? activeOperationId_ : 0; }
+    OperationResult readOperation(uint64_t operationId) const {
+        OperationResult result;
+        result.operationId = operationId;
+        if (operationId == 0) return result;
+        if (operationId <= sessionBaseId_) {
+            result.state = DeviceOperationState::Expired;
+            return result;
+        }
+        if (operationId > nextOperationId_) return result;
+        if (active() && operationId == activeOperationId_) {
+            result.motorId = activeId();
+            result.kind = activeOperationKind_;
+            result.state = DeviceOperationState::Running;
+            result.protocolAck = moveActive() ? move_.ackSeen : home_.ackSeen;
+            return result;
+        }
+        for (uint8_t i = 0; i < terminalCount_; ++i) {
+            if (terminal_[i].operationId == operationId) return terminal_[i];
+        }
+        result.state = DeviceOperationState::Evicted;
+        return result;
+    }
+
+    // A CAN reinitialization starts a new local session. Issued IDs are never
+    // reused by this object; old-session IDs are explicitly expired.
+    void beginSession() {
+        clearOwnership();
+        for (uint8_t i = 0; i < kTerminalHistoryCapacity; ++i) terminal_[i] = OperationResult{};
+        terminalCount_ = terminalNext_ = 0;
+        sessionBaseId_ = nextOperationId_;
+    }
+
+    // Queue ownership removes the old public manual outcome but records why
+    // the active handle stopped being supervised.
+    void supersede() {
+        if (moveActive()) finishMove(MoveOutcome::None, Fault::None,
+                                     DeviceOperationState::Superseded);
+        else if (homeActive()) finishHome(HomeOutcome::None, Fault::None,
+                                          DeviceOperationState::Superseded);
+        clearOwnership();
+    }
+
+    // Compatibility reset is a queue takeover. beginSession() performs the
+    // distinct lifecycle reset that clears the result history.
+    void reset() { supersede(); }
+private:
+    void clearOwnership() {
         kind_ = Kind::None;
         move_ = Move{};
         home_ = Home{};
         moveOutcome_ = MoveOutcome::None;
         homeOutcome_ = HomeOutcome::None;
         homeId_ = homeMode_ = 0;
+        activeOperationId_ = 0;
+        activeOperationKind_ = DeviceOperationKind::None;
     }
+public:
     bool startMove(const MoveStart& start) {
-        if (active()) return false;
+        if (active() || !canStartOperation()) return false;
         move_ = Move{};
         move_.id = start.id;
         move_.opcode = start.opcode;
@@ -102,10 +156,12 @@ public:
         move_.lastDoneVelMs = start.startMs;
         kind_ = Kind::Move;
         moveOutcome_ = MoveOutcome::Running;
+        activeOperationId_ = ++nextOperationId_;
+        activeOperationKind_ = start.operationKind;
         return true;
     }
     bool startHome(uint8_t id, uint8_t mode, uint32_t now, uint32_t deadlineMs) {
-        if (active()) return false;
+        if (active() || !canStartOperation()) return false;
         home_ = Home{};
         home_.startMs = now;
         home_.deadlineMs = deadlineMs;
@@ -115,6 +171,8 @@ public:
         homeMode_ = mode;
         kind_ = Kind::Home;
         homeOutcome_ = HomeOutcome::Running;
+        activeOperationId_ = ++nextOperationId_;
+        activeOperationKind_ = DeviceOperationKind::Home;
         return true;
     }
     bool ownsAck(uint8_t id, uint8_t opcode) const {
@@ -141,11 +199,11 @@ public:
     void cancelHome(uint8_t id) {
         if (homeActive() && homeId_ == id) finishHome(HomeOutcome::Cancelled);
     }
-    void failActiveWithoutSnapshot() {
-        if (moveActive()) finishMove(MoveOutcome::Failed);
-        else if (homeActive()) finishHome(HomeOutcome::Failed);
+    void failActiveWithoutSnapshot(Fault fault = Fault::None) {
+        if (moveActive()) finishMove(MoveOutcome::Failed, fault);
+        else if (homeActive()) finishHome(HomeOutcome::Failed, fault);
     }
-    void failMove(const Observation& observation) {
+    void failMove(const Observation& observation, Fault fault = Fault::None) {
         if (!moveActive()) return;
         moveFailure_.id = move_.id;
         moveFailure_.target = move_.targetTenths;
@@ -156,26 +214,22 @@ public:
         moveFailure_.elapsed = observation.now - move_.startMs;
         moveFailure_.deadline = move_.deadlineMs;
         moveFailure_.enabled = observation.enabled;
-        finishMove(MoveOutcome::Failed);
+        finishMove(MoveOutcome::Failed, fault);
     }
-    void failHome(uint8_t id) {
-        if (homeActive() && homeId_ == id) finishHome(HomeOutcome::Failed);
+    void failHome(uint8_t id, Fault fault = Fault::None) {
+        if (homeActive() && homeId_ == id) finishHome(HomeOutcome::Failed, fault);
     }
     void rawInvalidation(uint8_t id) {
         if (id == 0) {
-            kind_ = Kind::None;
-            move_ = Move{};
-            home_ = Home{};
-            moveOutcome_ = MoveOutcome::None;
-            homeOutcome_ = HomeOutcome::None;
+            if (moveActive()) finishMove(MoveOutcome::None, Fault::None,
+                                         DeviceOperationState::Invalidated);
+            else if (homeActive()) finishHome(HomeOutcome::None, Fault::None,
+                                              DeviceOperationState::Invalidated);
+            clearOwnership();
         } else if (moveActive() && move_.id == id) {
-            move_ = Move{};
-            kind_ = Kind::None;
-            moveOutcome_ = MoveOutcome::None;
+            finishMove(MoveOutcome::None, Fault::None, DeviceOperationState::Invalidated);
         } else if (homeActive() && homeId_ == id) {
-            home_ = Home{};
-            kind_ = Kind::None;
-            homeOutcome_ = HomeOutcome::None;
+            finishHome(HomeOutcome::None, Fault::None, DeviceOperationState::Invalidated);
         }
     }
 
@@ -184,11 +238,11 @@ public:
         if (moveActive()) {
             verdict = pollMove(o);
             if (verdict.done) finishMove(MoveOutcome::Done);
-            else if (verdict.fault != Fault::None) failMove(o);
+            else if (verdict.fault != Fault::None) failMove(o, verdict.fault);
         } else if (homeActive()) {
             verdict = pollHome(o);
             if (verdict.done) finishHome(HomeOutcome::Done);
-            else if (verdict.fault != Fault::None) finishHome(HomeOutcome::Failed);
+            else if (verdict.fault != Fault::None) finishHome(HomeOutcome::Failed, verdict.fault);
         }
         return verdict;
     }
@@ -224,15 +278,56 @@ private:
         return static_cast<int32_t>(stamp - since) > 0;
     }
     static int64_t absolute(int64_t value) { return value < 0 ? -value : value; }
-    void finishMove(MoveOutcome outcome) {
+    void recordTerminal(DeviceOperationState state, Fault fault, bool protocolAck,
+                        bool reached) {
+        OperationResult result;
+        result.operationId = activeOperationId_;
+        result.motorId = activeId();
+        result.kind = activeOperationKind_;
+        result.state = state;
+        result.fault = fault;
+        result.protocolAck = protocolAck;
+        result.reached = reached;
+        terminal_[terminalNext_] = result;
+        terminalNext_ = static_cast<uint8_t>((terminalNext_ + 1) % kTerminalHistoryCapacity);
+        if (terminalCount_ < kTerminalHistoryCapacity) ++terminalCount_;
+    }
+    void finishMove(MoveOutcome outcome, Fault fault = Fault::None,
+                    DeviceOperationState overrideState = DeviceOperationState::Unknown) {
+        DeviceOperationState state = overrideState;
+        if (state == DeviceOperationState::Unknown) {
+            switch (outcome) {
+                case MoveOutcome::Done: state = DeviceOperationState::Reached; break;
+                case MoveOutcome::Cancelled: state = DeviceOperationState::Cancelled; break;
+                case MoveOutcome::Failed: state = DeviceOperationState::Failed; break;
+                default: return;
+            }
+        }
+        recordTerminal(state, fault, move_.ackSeen, outcome == MoveOutcome::Done);
         kind_ = Kind::None;
         move_ = Move{};
         moveOutcome_ = outcome;
+        activeOperationId_ = 0;
+        activeOperationKind_ = DeviceOperationKind::None;
     }
-    void finishHome(HomeOutcome outcome) {
+    void finishHome(HomeOutcome outcome, Fault fault = Fault::None,
+                    DeviceOperationState overrideState = DeviceOperationState::Unknown) {
+        DeviceOperationState state = overrideState;
+        if (state == DeviceOperationState::Unknown) {
+            switch (outcome) {
+                case HomeOutcome::Done: state = DeviceOperationState::Reached; break;
+                case HomeOutcome::NoMotion: state = DeviceOperationState::NoMotion; break;
+                case HomeOutcome::Cancelled: state = DeviceOperationState::Cancelled; break;
+                case HomeOutcome::Failed: state = DeviceOperationState::Failed; break;
+                default: return;
+            }
+        }
+        recordTerminal(state, fault, home_.ackSeen, outcome == HomeOutcome::Done);
         kind_ = Kind::None;
         home_ = Home{};
         homeOutcome_ = outcome;
+        activeOperationId_ = 0;
+        activeOperationKind_ = DeviceOperationKind::None;
     }
     Verdict failure(Kind kind, Fault fault) const {
         Verdict verdict;
@@ -319,6 +414,12 @@ private:
     }
 
     Kind kind_ = Kind::None;
+    uint64_t nextOperationId_ = 0;
+    uint64_t sessionBaseId_ = 0;
+    uint64_t activeOperationId_ = 0;
+    DeviceOperationKind activeOperationKind_ = DeviceOperationKind::None;
+    OperationResult terminal_[kTerminalHistoryCapacity];
+    uint8_t terminalNext_ = 0, terminalCount_ = 0;
     Move move_;
     Home home_;
     MoveOutcome moveOutcome_ = MoveOutcome::None;

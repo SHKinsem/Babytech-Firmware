@@ -46,7 +46,7 @@ void copyText(char (&destination)[N], const char* source) {
 
 } // namespace
 
-DeviceReceipt DeviceAPI::receipt(Result result, uint32_t runId) {
+DeviceReceipt DeviceAPI::receipt(Result result, uint32_t runId, uint64_t operationId) {
     DeviceAdmission admission = DeviceAdmission::Failed;
     switch (result.code) {
         case 202: admission = DeviceAdmission::Accepted; break;
@@ -56,7 +56,9 @@ DeviceReceipt DeviceAPI::receipt(Result result, uint32_t runId) {
         case 503: admission = DeviceAdmission::Unavailable; break;
         default: break;
     }
-    return DeviceReceipt{admission, result.code, result.message, admission == DeviceAdmission::Accepted ? runId : 0};
+    return DeviceReceipt{admission, result.code, result.message,
+                         admission == DeviceAdmission::Accepted ? runId : 0,
+                         admission == DeviceAdmission::Accepted ? operationId : 0};
 }
 
 bool DeviceAPI::begin(int tx, int rx, long bitrate) {
@@ -80,15 +82,18 @@ DeviceReceipt DeviceAPI::requestBroadcastEnable(bool enabled) {
 }
 
 DeviceReceipt DeviceAPI::requestMove(const MoveRequest& request) {
-    return receipt(motor_.move(request));
+    const Result result = motor_.move(request);
+    return receipt(result, 0, motor_.activeOperationId());
 }
 
 DeviceReceipt DeviceAPI::requestDirectPosition(const DirectPositionRequest& request) {
-    return receipt(motor_.directPosition(request));
+    const Result result = motor_.directPosition(request);
+    return receipt(result, 0, motor_.activeOperationId());
 }
 
 DeviceReceipt DeviceAPI::requestHome(uint8_t id, uint8_t mode) {
-    return receipt(motor_.home(id, mode));
+    const Result result = motor_.home(id, mode);
+    return receipt(result, 0, motor_.activeOperationId());
 }
 
 DeviceReceipt DeviceAPI::requestStop(uint8_t id) {
@@ -112,7 +117,10 @@ DeviceReceipt DeviceAPI::requestRawCommand(const uint8_t* bytes, uint8_t length)
         if (stopLike) (void)queue_.cancel("stopped");
         else if (kind != CommandKind::Read) return receipt(Result{409, "queue_busy"});
     }
-    return receipt(motor_.command(bytes, length));
+    const Result result = motor_.command(bytes, length);
+    const bool manualMotion = kind == CommandKind::Move ||
+        kind == CommandKind::DirectMove || kind == CommandKind::Home;
+    return receipt(result, 0, manualMotion ? motor_.activeOperationId() : 0);
 }
 
 bool DeviceAPI::requestDemoMarker(uint8_t id) {
@@ -159,6 +167,10 @@ DeviceSnapshot DeviceAPI::readSnapshot(uint8_t id) const {
 
     result.motor = readMotorObservation(id);
     return result;
+}
+
+DeviceOperationResult DeviceAPI::readOperation(uint64_t operationId) const {
+    return motor_.readOperation(operationId);
 }
 
 DeviceMotorObservation DeviceAPI::readMotorObservation(uint8_t id) const {

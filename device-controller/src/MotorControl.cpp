@@ -63,6 +63,22 @@ const char* const kFaultHomeProtection = "home_protection";
 const char* const kFaultHomeTxFailed = "home_tx_failed";
 const char* const kFaultHomeStatusMissing = "home_status_missing";
 
+DeviceOperationFault operationFaultForTag(const char* tag) {
+    if (!tag) return DeviceOperationFault::None;
+    if (strcmp(tag, "driver_disabled") == 0) return DeviceOperationFault::DriverDisabled;
+    if (strcmp(tag, kFaultFeedbackStale) == 0) return DeviceOperationFault::FeedbackStale;
+    if (strcmp(tag, kFaultMoveAckTimeout) == 0) return DeviceOperationFault::MoveAckTimeout;
+    if (strcmp(tag, kFaultMoveTimeout) == 0) return DeviceOperationFault::MoveTimeout;
+    if (strcmp(tag, kFaultHomeAckTimeout) == 0) return DeviceOperationFault::HomeAckTimeout;
+    if (strcmp(tag, kFaultHomeStatusMissing) == 0) return DeviceOperationFault::HomeStatusMissing;
+    if (strcmp(tag, kFaultHomeFailed) == 0) return DeviceOperationFault::HomeFailed;
+    if (strcmp(tag, kFaultHomeProtection) == 0) return DeviceOperationFault::HomeProtection;
+    if (strcmp(tag, kFaultHomeTimeout) == 0) return DeviceOperationFault::HomeTimeout;
+    if (strcmp(tag, kFaultAckRejected) == 0) return DeviceOperationFault::AckRejected;
+    if (strcmp(tag, kFaultBusOff) == 0) return DeviceOperationFault::BusOff;
+    return DeviceOperationFault::None;
+}
+
 bool ageWithin(uint32_t now, uint32_t stamp, uint32_t window) {
     return static_cast<uint32_t>(now - stamp) <= window;
 }
@@ -93,7 +109,7 @@ MotorControl::MotorControl()
 bool MotorControl::begin(int tx, int rx, long bitrate) {
     // Reset software tracking only: no motor is enabled, moved or stopped here.
     // The selected id survives a re-init so a configured node stays selected.
-    manual_.reset();
+    manual_.beginSession();
     faultTag_ = kFaultNone;
     faultId_ = 0;
     faultGlobal_ = false;
@@ -126,8 +142,8 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
         if (strcmp(faultTag_, kFaultBusOff) != 0) {
             latchFault(0, kFaultBusOff, true);
         }
-        const uint8_t activeId = manual_.moveActive() ? manual_.moveId() : 0;
-        manual_.failActiveWithoutSnapshot();
+        const uint8_t activeId = manual_.activeId();
+        manual_.failActiveWithoutSnapshot(ManualOperationSupervisor::Fault::BusOff);
         experimentId_ = 0;
         for (uint16_t id = 1; id < kNodeCount; ++id) {
             NodeState& node = nodes_[id];
@@ -417,7 +433,7 @@ void MotorControl::handleAck(
     node.stopRequestedMs = now;
     if (manual_.moveActive() && manual_.moveId() == id) {
         sendStop(id);
-        manual_.failActiveWithoutSnapshot();
+        manual_.failActiveWithoutSnapshot(ManualOperationSupervisor::Fault::AckRejected);
     }
     if (manual_.homeActive() && manual_.homeId() == id) {
         // A rejected trigger/abort answer fails the run: the 9C+FE abort is
@@ -708,7 +724,8 @@ String MotorControl::queryStatusJson() const {
 void MotorControl::failJob(const char* tag, uint32_t now, uint8_t terminalId) {
     const uint8_t id = terminalId ? terminalId : manual_.moveId();
     NodeState& node = nodes_[id];
-    if (manual_.moveActive()) manual_.failMove(manualObservation(id, now));
+    if (manual_.moveActive())
+        manual_.failMove(manualObservation(id, now), operationFaultForTag(tag));
     node.stopRequested = true;
     node.stopRequestedMs = now;
     // Best effort single stop; success is never assumed.
@@ -748,7 +765,7 @@ void MotorControl::cancelHome(bool interruptWire, bool stopWire) {
 void MotorControl::failHome(const char* tag, uint32_t now, uint8_t terminalId) {
     if (!manual_.homeActive() && !terminalId) return;
     const uint8_t id = terminalId ? terminalId : manual_.homeId();
-    if (manual_.homeActive()) manual_.failHome(id);
+    if (manual_.homeActive()) manual_.failHome(id, operationFaultForTag(tag));
     sendHomeInterrupt(id);
     sendStop(id);
     invalidateTarget(id);
@@ -931,6 +948,8 @@ Result MotorControl::move(const MoveRequest& request) {
     }
     const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
+    if (!manual_.canStartOperation())
+        return Result{kCodeUnavailable, "operation_id_exhausted"};
 
     bus_.clearTransmissionError();
     bus_.positionControlWithCurrentLimit(
@@ -1022,6 +1041,8 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     }
     const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
+    if (!manual_.canStartOperation())
+        return Result{kCodeUnavailable, "operation_id_exhausted"};
 
     // Mode 0 is relative to the target the DRIVER currently holds, so it needs a
     // fresh 0x33 read of that target (manual V1.0.5 p70, the target the last
@@ -1086,6 +1107,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     ManualOperationSupervisor::MoveStart start;
     start.id = id;
     start.opcode = plan.withCurrentLimit ? kFrameDirectLimit : kFrameDirect;
+    start.operationKind = DeviceOperationKind::DirectPosition;
     start.targetProof = true;
     start.startTenths = position;
     start.targetTenths = resolved.targetTenths;
@@ -1153,6 +1175,8 @@ Result MotorControl::home(uint8_t id, uint8_t mode) {
     (void)position;
     const int32_t absSpeed = velocity < 0 ? -velocity : velocity;
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
+    if (!manual_.canStartOperation())
+        return Result{kCodeUnavailable, "operation_id_exhausted"};
 
     if (!sendHomeTrigger(id, mode)) {
         // The trigger may or may not have reached the motor: stop best effort
@@ -1432,13 +1456,17 @@ Result MotorControl::stopAll() {
 Result MotorControl::broadcastEnable(bool enabled) {
     const uint8_t frame[] = {0, 0xF3, 0xAB, uint8_t(enabled ? 1 : 0), 0, 0x6B};
     // Broadcast has no per-node acknowledgement; do not invent confirmations.
+    if (!enabled) {
+        if (manual_.moveActive()) manual_.cancelMove(manual_.moveId());
+        if (manual_.homeActive()) manual_.cancelHome(manual_.homeId());
+    }
     const bool sent = queueSendLogical(frame, sizeof(frame));
     if (!enabled) clearControlState();
     return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
 }
 
 void MotorControl::takeQueueControl() {
-    manual_.reset();
+    manual_.supersede();
     experimentId_ = 0;
     experimentStart_ = 0;
     faultTag_ = kFaultNone;

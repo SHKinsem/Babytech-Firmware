@@ -64,7 +64,9 @@ static size_t countWireEnableOn(uint8_t id) {
 
 static void enableAndFeed(Rig& rig, uint8_t id) {
     setMillis(0);
-    CHECK(rig.api.requestEnable(id, true).accepted());
+    const DeviceReceipt enabled = rig.api.requestEnable(id, true);
+    CHECK(enabled.accepted());
+    CHECK(enabled.operationId == 0);
     injectRx(makeAck(id, kFrameEnable, 0x02));
     injectRx(flags(id, true));
     rig.poll(20);
@@ -154,7 +156,9 @@ static void test_manual_failure_json_keeps_diagnostic_snapshot() {
         CHECK(rig.motor.setDebugLimits(limits));
         enableAndFeed(rig, 1);
         setMillis(60);
-        CHECK(rig.api.requestMove(move(1)).accepted());
+        const DeviceReceipt started = rig.api.requestMove(move(1));
+        CHECK(started.accepted());
+        CHECK(started.operationId != 0);
         injectRx(makeAck(1, kFrameMove, 0x02));
         rig.poll(80);
         for (uint32_t now = 100; now <= 2100; now += 400) {
@@ -163,6 +167,11 @@ static void test_manual_failure_json_keeps_diagnostic_snapshot() {
             rig.poll(now);
         }
         CHECK(rig.state(1, 2100).manualMove == DeviceMoveStage::Failed);
+        const DeviceOperationResult failed = rig.api.readOperation(started.operationId);
+        CHECK(failed.state == DeviceOperationState::Failed);
+        CHECK(failed.fault == DeviceOperationFault::MoveTimeout);
+        CHECK(failed.protocolAck);
+        CHECK(!failed.reached);
         const std::string status = rig.motor.statusJson(1).str();
         CHECK(status.find("\"fault\":\"move_timeout\"") != std::string::npos);
         CHECK(status.find("\"lastMoveFailure\":{\"targetDeg\":10.0,\"positionDeg\":2.5,"
@@ -174,11 +183,18 @@ static void test_manual_failure_json_keeps_diagnostic_snapshot() {
         rig.begin();
         enableAndFeed(rig, 1);
         setMillis(60);
-        CHECK(rig.api.requestMove(move(1)).accepted());
+        const DeviceReceipt started = rig.api.requestMove(move(1));
+        CHECK(started.accepted());
+        CHECK(started.operationId != 0);
         injectRx(makeAck(1, kFrameMove, 0x02));
         rig.poll(80);
         rig.poll(800); // No new position or velocity after command.
         CHECK(rig.state(1, 800).manualMove == DeviceMoveStage::Failed);
+        const DeviceOperationResult failed = rig.api.readOperation(started.operationId);
+        CHECK(failed.state == DeviceOperationState::Failed);
+        CHECK(failed.fault == DeviceOperationFault::FeedbackStale);
+        CHECK(failed.protocolAck);
+        CHECK(!failed.reached);
         const std::string status = rig.motor.statusJson(1).str();
         CHECK(status.find("\"fault\":\"feedback_stale\"") != std::string::npos);
         CHECK(status.find("\"lastMoveFailure\":{\"targetDeg\":10.0,\"positionDeg\":null,"
@@ -384,7 +400,7 @@ static void test_all_public_stop_and_disable_paths_preempt_program() {
         rig.poll(10);
         CHECK(rig.state(1, 10).program == DeviceProgramStage::Running);
         setMillis(10);
-        DeviceReceipt result = {DeviceAdmission::Failed, 0, "", 0};
+        DeviceReceipt result = {DeviceAdmission::Failed, 0, "", 0, 0};
         switch (path) {
             case 0: result = rig.api.requestStop(1); break;
             case 1: result = rig.api.requestStopAll(); break;
@@ -404,6 +420,7 @@ static void test_all_public_stop_and_disable_paths_preempt_program() {
             }
         }
         CHECK(result.accepted());
+        CHECK(result.operationId == 0);
         CHECK(rig.state(1, 10).program == DeviceProgramStage::Cancelled);
         for (uint32_t t = 20; t <= 1200; t += 20) rig.poll(t);
         CHECK(countWireEnableOn(1) == 0);
@@ -451,6 +468,289 @@ static void test_snapshot_reads_create_no_delayed_query_demand() {
     CHECK(capturedTX.size() == baselineFrames);
 }
 
+static void test_manual_operation_ids_and_results() {
+    Rig rig;
+    rig.begin();
+    const DeviceReceipt early = rig.api.requestMove(move(1));
+    CHECK(!early.accepted());
+    CHECK(early.operationId == 0);
+    CHECK(rig.api.requestEnable(0, true).operationId == 0);
+    enableAndFeed(rig, 1);
+
+    setMillis(40);
+    const DeviceReceipt started = rig.api.requestMove(move(1));
+    CHECK(started.accepted());
+    CHECK(started.runId == 0);
+    CHECK(started.operationId != 0);
+    CHECK(rig.api.requestHome(1, 0).operationId == 0); // busy is not a new run
+    DeviceOperationResult result = rig.api.readOperation(started.operationId);
+    CHECK(result.operationId == started.operationId);
+    CHECK(result.motorId == 1);
+    CHECK(result.kind == DeviceOperationKind::Move);
+    CHECK(result.state == DeviceOperationState::Running);
+    CHECK(!result.protocolAck);
+    CHECK(!result.reached);
+
+    injectRx(makeAck(1, kFrameMove, 0x02));
+    rig.poll(60);
+    result = rig.api.readOperation(started.operationId);
+    CHECK(result.state == DeviceOperationState::Running);
+    CHECK(result.protocolAck);
+    CHECK(!result.reached);
+    injectRx(makePosition(1, 96));
+    injectRx(makeVelocity(1, 0));
+    rig.poll(80);
+    CHECK(rig.api.readOperation(started.operationId).state == DeviceOperationState::Running);
+    injectRx(makePosition(1, 100));
+    injectRx(makeVelocity(1, 0));
+    rig.poll(100);
+    result = rig.api.readOperation(started.operationId);
+    CHECK(result.state == DeviceOperationState::Reached);
+    CHECK(result.reached);
+
+    // Repeated history reads are memory-only; snapshot tests also check that
+    // observation does not arm a query for a later poll.
+    const size_t beforeRead = capturedTX.size();
+    for (int i = 0; i < 20; ++i) {
+        CHECK(rig.api.readOperation(started.operationId).state == DeviceOperationState::Reached);
+    }
+    CHECK(capturedTX.size() == beforeRead);
+
+    setMillis(110);
+    const DeviceReceipt homing = rig.api.requestHome(1, 0);
+    CHECK(homing.accepted());
+    CHECK(homing.operationId > started.operationId);
+    CHECK(homing.runId == 0);
+    CHECK(rig.api.readOperation(homing.operationId).kind == DeviceOperationKind::Home);
+    injectRx(makeAck(1, 0x9A, 0x12));
+    rig.poll(120);
+    result = rig.api.readOperation(homing.operationId);
+    CHECK(result.state == DeviceOperationState::NoMotion);
+    CHECK(!result.reached);
+    CHECK(rig.api.readOperation(started.operationId).state == DeviceOperationState::Reached);
+
+    DirectPositionRequest direct;
+    direct.id = 1;
+    direct.angleTenths = 100;
+    direct.speedTenths = 300;
+    setMillis(130);
+    const DeviceReceipt directMove = rig.api.requestDirectPosition(direct);
+    CHECK(directMove.accepted());
+    CHECK(directMove.operationId > homing.operationId);
+    CHECK(rig.api.readOperation(directMove.operationId).kind ==
+          DeviceOperationKind::DirectPosition);
+    const DeviceReceipt stopped = rig.api.requestStop(1);
+    CHECK(stopped.operationId == 0);
+    CHECK(rig.api.readOperation(directMove.operationId).state ==
+          DeviceOperationState::Cancelled);
+    CHECK(rig.state(1, 130).motor.stopPending); // software cancellation is not stop proof
+    injectRx(makeAck(1, 0xFB, 0x9F)); // late answer cannot revive the handle
+    rig.poll(140);
+    CHECK(rig.api.readOperation(directMove.operationId).state ==
+          DeviceOperationState::Cancelled);
+    injectRx(makePosition(1, 100));
+    injectRx(makeVelocity(1, 0));
+    rig.poll(150);
+    CHECK(!rig.state(1, 150).motor.stopPending);
+    CHECK(rig.api.readOperation(directMove.operationId).state ==
+          DeviceOperationState::Cancelled);
+}
+
+static void test_program_and_demo_receipts_do_not_claim_manual_operations() {
+    Rig rig;
+    rig.begin();
+    enableAndFeed(rig, 1);
+    setMillis(40);
+    const DeviceReceipt manual = rig.api.requestHome(1, 0);
+    CHECK(manual.operationId != 0);
+
+    const char waiting[] = "wait 1000\n";
+    setMillis(50);
+    const DeviceReceipt program = rig.api.startProgram(waiting, sizeof(waiting) - 1,
+                                                       1, rig.rotation, 50);
+    CHECK(program.accepted());
+    CHECK(program.runId != 0);
+    CHECK(program.operationId == 0);
+    CHECK(rig.api.readOperation(manual.operationId).state ==
+          DeviceOperationState::Superseded);
+    CHECK(rig.state(1, 50).manualHome == DeviceHomeStage::None);
+    injectRx(makeAck(1, 0x9A, 0x9F));
+    rig.poll(60);
+    CHECK(rig.api.readOperation(manual.operationId).state ==
+          DeviceOperationState::Superseded);
+    CHECK(rig.api.cancelProgram("test").operationId == 0);
+
+    Rig demoRig;
+    demoRig.begin();
+    QueueProgram demo;
+    demo.count = 1;
+    demo.steps[0].action = QueueAction::Wait;
+    demo.steps[0].waitMs = 1000;
+    const DeviceReceipt demoRun = demoRig.api.startDemo(demo, 0);
+    CHECK(demoRun.accepted());
+    CHECK(demoRun.runId != 0);
+    CHECK(demoRun.operationId == 0);
+    CHECK(demoRig.api.requestStopAll().operationId == 0);
+}
+
+static void test_raw_invalidation_and_session_expiry() {
+    Rig rig;
+    rig.begin();
+    enableAndFeed(rig, 1);
+    setMillis(40);
+    const DeviceReceipt manual = rig.api.requestMove(move(1));
+    CHECK(manual.operationId != 0);
+    rig.motor.noteRawTransmission(1); // raw CAN bypass invalidates software evidence
+    CHECK(rig.api.readOperation(manual.operationId).state ==
+          DeviceOperationState::Invalidated);
+    CHECK(rig.state(1, 40).manualMove == DeviceMoveStage::None);
+
+    // Reinitializing the same instance starts a fresh session. The counter is
+    // monotonic in this process, so an old handle never aliases a new request.
+    CHECK(rig.api.begin(4, 5, 500000));
+    CHECK(rig.api.readOperation(manual.operationId).state ==
+          DeviceOperationState::Expired);
+    CHECK(rig.api.readOperation(0).state == DeviceOperationState::Unknown);
+}
+
+static void test_raw_manual_commands_share_the_operation_contract() {
+    {
+        Rig rig;
+        rig.begin();
+        enableAndFeed(rig, 1);
+        const uint8_t rawMove[] =
+            {1, 0xCD, 0, 0, 60, 0, 60, 0, 100, 0, 0, 0, 100, 2, 0, 3, 32, 0x6B};
+        setMillis(40);
+        const DeviceReceipt sent = rig.api.requestRawCommand(rawMove, sizeof(rawMove));
+        CHECK(sent.accepted());
+        CHECK(sent.operationId != 0);
+        CHECK(sent.runId == 0);
+        CHECK(rig.api.readOperation(sent.operationId).kind == DeviceOperationKind::Move);
+        CHECK(rig.api.readOperation(sent.operationId).state == DeviceOperationState::Running);
+        const uint8_t read[] = {1, 0x36, 0x6B};
+        CHECK(rig.api.requestRawCommand(read, sizeof(read)).operationId == 0);
+        const uint8_t stop[] = {1, 0xFE, 0x98, 0, 0x6B};
+        CHECK(rig.api.requestRawCommand(stop, sizeof(stop)).operationId == 0);
+        CHECK(rig.api.readOperation(sent.operationId).state ==
+              DeviceOperationState::Cancelled);
+    }
+    {
+        Rig rig;
+        rig.begin();
+        enableAndFeed(rig, 1);
+        const uint8_t rawDirect[] =
+            {1, 0xFB, 0, 0x01, 0x2C, 0, 0, 0, 100, 1, 0, 0x6B};
+        setMillis(40);
+        const DeviceReceipt sent = rig.api.requestRawCommand(rawDirect, sizeof(rawDirect));
+        CHECK(sent.accepted());
+        CHECK(sent.operationId != 0);
+        CHECK(rig.api.readOperation(sent.operationId).kind ==
+              DeviceOperationKind::DirectPosition);
+        CHECK(rig.api.readOperation(sent.operationId).state == DeviceOperationState::Running);
+    }
+    {
+        Rig rig;
+        rig.begin();
+        enableAndFeed(rig, 1);
+        const uint8_t rawHome[] = {1, 0x9A, 0, 0, 0x6B};
+        setMillis(40);
+        const DeviceReceipt sent = rig.api.requestRawCommand(rawHome, sizeof(rawHome));
+        CHECK(sent.accepted());
+        CHECK(sent.operationId != 0);
+        CHECK(rig.api.readOperation(sent.operationId).kind == DeviceOperationKind::Home);
+        CHECK(rig.api.readOperation(sent.operationId).state == DeviceOperationState::Running);
+    }
+    {
+        Rig rig;
+        rig.begin();
+        rig.motor.watch(1);
+        injectRx(flags(1, false));
+        injectRx(makePosition(1, 0));
+        injectRx(makeVelocity(1, 0));
+        rig.poll(20);
+        const uint8_t configure[] = {1, 0x46, 0x69, 0, 1, 0x6B};
+        const DeviceReceipt sent = rig.api.requestRawCommand(configure, sizeof(configure));
+        CHECK(sent.accepted());
+        CHECK(sent.operationId == 0);
+    }
+}
+
+static void test_rejected_ack_and_bus_off_have_operation_faults() {
+    {
+        Rig rig;
+        rig.begin();
+        enableAndFeed(rig, 1);
+        setMillis(40);
+        const DeviceReceipt moveRun = rig.api.requestMove(move(1));
+        CHECK(moveRun.operationId != 0);
+        injectRx(makeAck(1, kFrameMove, 0xEE));
+        rig.poll(60);
+        const DeviceOperationResult failed = rig.api.readOperation(moveRun.operationId);
+        CHECK(failed.state == DeviceOperationState::Failed);
+        CHECK(failed.fault == DeviceOperationFault::AckRejected);
+        CHECK(!failed.protocolAck);
+        CHECK(!failed.reached);
+    }
+    {
+        Rig rig;
+        rig.begin();
+        enableAndFeed(rig, 1);
+        setMillis(40);
+        const DeviceReceipt homeRun = rig.api.requestHome(1, 0);
+        CHECK(homeRun.operationId != 0);
+        injectRx(makeAck(1, 0x9A, 0xEE));
+        rig.poll(60);
+        const DeviceOperationResult failed = rig.api.readOperation(homeRun.operationId);
+        CHECK(failed.state == DeviceOperationState::Failed);
+        CHECK(failed.fault == DeviceOperationFault::AckRejected);
+        CHECK(!failed.protocolAck);
+        CHECK(!failed.reached);
+    }
+    {
+        Rig rig;
+        rig.begin();
+        enableAndFeed(rig, 1);
+        setMillis(40);
+        const DeviceReceipt moveRun = rig.api.requestMove(move(1));
+        CHECK(moveRun.operationId != 0);
+        busState = CanControllerState::BusOff;
+        rig.poll(60);
+        const DeviceOperationResult failed = rig.api.readOperation(moveRun.operationId);
+        CHECK(failed.state == DeviceOperationState::Failed);
+        CHECK(failed.fault == DeviceOperationFault::BusOff);
+        CHECK(!failed.reached);
+    }
+    {
+        Rig rig;
+        rig.begin();
+        enableAndFeed(rig, 1);
+        setMillis(40);
+        const DeviceReceipt homeRun = rig.api.requestHome(1, 0);
+        CHECK(homeRun.operationId != 0);
+        rig.motor.watch(2); // UI selection changes, but Home still owns axis 1.
+        busState = CanControllerState::BusOff;
+        rig.poll(60);
+        const DeviceOperationResult failed = rig.api.readOperation(homeRun.operationId);
+        CHECK(failed.state == DeviceOperationState::Failed);
+        CHECK(failed.fault == DeviceOperationFault::BusOff);
+        CHECK(rig.state(1, 60).motor.stopPending);
+    }
+}
+
+static void test_broadcast_disable_records_cancellation() {
+    Rig rig;
+    rig.begin();
+    enableAndFeed(rig, 1);
+    setMillis(40);
+    const DeviceReceipt moveRun = rig.api.requestMove(move(1));
+    CHECK(moveRun.operationId != 0);
+    const DeviceReceipt disabled = rig.api.requestBroadcastEnable(false);
+    CHECK(disabled.operationId == 0);
+    CHECK(rig.api.readOperation(moveRun.operationId).state ==
+          DeviceOperationState::Cancelled);
+    CHECK(rig.state(1, 40).manualMove == DeviceMoveStage::None);
+}
+
 int main() {
     test_receipt_ack_and_observation_are_distinct();
     test_manual_move_reached_needs_new_evidence();
@@ -466,6 +766,12 @@ int main() {
     test_all_public_stop_and_disable_paths_preempt_program();
     test_invalid_target_never_preempts_program();
     test_snapshot_reads_create_no_delayed_query_demand();
+    test_manual_operation_ids_and_results();
+    test_program_and_demo_receipts_do_not_claim_manual_operations();
+    test_raw_invalidation_and_session_expiry();
+    test_raw_manual_commands_share_the_operation_contract();
+    test_rejected_ack_and_bus_off_have_operation_faults();
+    test_broadcast_disable_records_cancellation();
     if (failures) std::printf("device-api: %d/%d checks failed\n", failures, checks);
     else std::printf("device-api: %d checks passed\n", checks);
     return failures ? 1 : 0;

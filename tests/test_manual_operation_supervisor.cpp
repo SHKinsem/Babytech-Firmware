@@ -381,6 +381,95 @@ static void millisWrapPreservesFreshnessAndDeadlines() {
     }
 }
 
+static void operationHistoryIsBoundedButNeverDisplacesTheActiveRun() {
+    Supervisor supervisor;
+    uint64_t ids[Supervisor::kTerminalHistoryCapacity + 1] = {};
+    for (uint8_t i = 0; i < Supervisor::kTerminalHistoryCapacity; ++i) {
+        CHECK(supervisor.startHome(1, 0, 100 + i * 10, 3000));
+        ids[i] = supervisor.activeOperationId();
+        CHECK(ids[i] != 0);
+        if (i) CHECK(ids[i] > ids[i - 1]);
+        CHECK(supervisor.readOperation(ids[i]).state ==
+              motion::DeviceOperationState::Running);
+        supervisor.noMotion(1);
+        const auto ended = supervisor.readOperation(ids[i]);
+        CHECK(ended.state == motion::DeviceOperationState::NoMotion);
+        CHECK(ended.kind == motion::DeviceOperationKind::Home);
+        CHECK(!ended.reached);
+    }
+    CHECK(supervisor.readOperation(ids[0]).state ==
+          motion::DeviceOperationState::NoMotion);
+
+    CHECK(supervisor.startHome(1, 0, 200, 3000));
+    ids[Supervisor::kTerminalHistoryCapacity] = supervisor.activeOperationId();
+    CHECK(supervisor.readOperation(ids[0]).state ==
+          motion::DeviceOperationState::NoMotion); // active slot is separate
+    CHECK(supervisor.readOperation(ids[Supervisor::kTerminalHistoryCapacity]).state ==
+          motion::DeviceOperationState::Running);
+    supervisor.noMotion(1);
+    CHECK(supervisor.readOperation(ids[0]).state ==
+          motion::DeviceOperationState::Evicted);
+    CHECK(supervisor.readOperation(ids[1]).state ==
+          motion::DeviceOperationState::NoMotion);
+    CHECK(supervisor.readOperation(ids[Supervisor::kTerminalHistoryCapacity]).state ==
+          motion::DeviceOperationState::NoMotion);
+    CHECK(supervisor.readOperation(0).state == motion::DeviceOperationState::Unknown);
+    CHECK(supervisor.readOperation(ids[Supervisor::kTerminalHistoryCapacity] + 1).state ==
+          motion::DeviceOperationState::Unknown);
+}
+
+static void sessionBoundaryAndCounterExhaustionDoNotReuseHandles() {
+    Supervisor supervisor;
+    CHECK(supervisor.startMove(moveAt(100)));
+    const uint64_t old = supervisor.activeOperationId();
+    supervisor.beginSession();
+    CHECK(supervisor.readOperation(old).state == motion::DeviceOperationState::Expired);
+    CHECK(!supervisor.active());
+    CHECK(supervisor.startHome(1, 0, 110, 3000));
+    const uint64_t current = supervisor.activeOperationId();
+    CHECK(current > old);
+    CHECK(supervisor.readOperation(current).state == motion::DeviceOperationState::Running);
+    supervisor.supersede();
+    CHECK(supervisor.readOperation(current).state == motion::DeviceOperationState::Superseded);
+    CHECK(supervisor.homeOutcome() == Supervisor::HomeOutcome::None);
+
+    Supervisor nearLimit(UINT64_MAX - 1);
+    CHECK(nearLimit.canStartOperation());
+    CHECK(nearLimit.startHome(1, 0, 100, 3000));
+    CHECK(nearLimit.activeOperationId() == UINT64_MAX);
+    CHECK(!nearLimit.canStartOperation());
+    nearLimit.noMotion(1);
+    CHECK(nearLimit.readOperation(UINT64_MAX).state ==
+          motion::DeviceOperationState::NoMotion);
+    CHECK(!nearLimit.startHome(1, 0, 200, 3000));
+    CHECK(!nearLimit.startMove(moveAt(200)));
+    CHECK(nearLimit.activeOperationId() == 0);
+    nearLimit.beginSession();
+    CHECK(nearLimit.readOperation(UINT64_MAX).state ==
+          motion::DeviceOperationState::Expired);
+    CHECK(!nearLimit.canStartOperation());
+}
+
+static void historyRecordsRawInvalidationAndMatchingAckOnly() {
+    Supervisor supervisor;
+    CHECK(supervisor.startMove(moveAt(100)));
+    const uint64_t moveId = supervisor.activeOperationId();
+    supervisor.acceptedAck(2, 0xFD, false, 110);
+    CHECK(!supervisor.readOperation(moveId).protocolAck);
+    supervisor.acceptedAck(1, 0xFD, false, 111);
+    CHECK(supervisor.readOperation(moveId).protocolAck);
+    supervisor.rawInvalidation(2);
+    CHECK(supervisor.readOperation(moveId).state == motion::DeviceOperationState::Running);
+    supervisor.rawInvalidation(1);
+    CHECK(supervisor.readOperation(moveId).state ==
+          motion::DeviceOperationState::Invalidated);
+    CHECK(supervisor.readOperation(moveId).protocolAck);
+    CHECK(supervisor.moveOutcome() == Supervisor::MoveOutcome::None);
+    supervisor.acceptedAck(1, 0xFD, true, 120);
+    CHECK(supervisor.readOperation(moveId).state ==
+          motion::DeviceOperationState::Invalidated);
+}
+
 int main() {
     moveNeedsMatchingAckAndTwoIndependentPairs();
     directMovesNeedTheirOwnTargetReadback();
@@ -390,6 +479,9 @@ int main() {
     deadlinesAndFailureSnapshotAreOwnedBySupervisor();
     cancellationAndExclusivityDoNotLoseOwnership();
     millisWrapPreservesFreshnessAndDeadlines();
+    operationHistoryIsBoundedButNeverDisplacesTheActiveRun();
+    sessionBoundaryAndCounterExhaustionDoNotReuseHandles();
+    historyRecordsRawInvalidationAndMatchingAckOnly();
     if (failures) {
         std::printf("FAIL manual operation supervisor: %d/%d checks\n", failures, checks);
         return 1;

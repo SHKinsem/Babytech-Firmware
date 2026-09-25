@@ -114,7 +114,8 @@ public:
 
     // Operator-requested software reset, after the caller has cancelled writers
     // and attempted broadcast stop. No CAN re-init, NVS write, enable or motion.
-    // Clears stale ownership; it is NOT evidence of physical stop.
+    // Clears stale ownership; it is NOT evidence of physical stop. An active
+    // manual handle becomes Superseded unless its caller already stopped it.
     void clearControlState();
     // Relinquish manual supervisors without CAN traffic or erasing observed
     // feedback, confirmed enables, or still-pending hardware evidence.
@@ -202,6 +203,10 @@ public:
     const char* faultTag() const { return faultTag_; }
     bool ready() const { return canReady(); }
     MoveOutcome moveOutcome() const { return manual_.moveOutcome(); }
+    uint64_t activeOperationId() const { return manual_.activeOperationId(); }
+    DeviceOperationResult readOperation(uint64_t operationId) const {
+        return manual_.readOperation(operationId);
+    }
     // Homing accessors. homeId()/homeMode() keep the last requested run so a
     // finished outcome can still be attributed; homeActive() tells whether one
     // is running right now.

@@ -23,14 +23,14 @@
 
 ## 已实现范围与未完成项
 
-PR #15 最初提交完成了 P1 的软件基线、`MotorBus` 发送薄封装，以及 HTTP、主控板 UART、显示板 Demo 到 `DeviceAPI` 的入口迁移。随后将全板唯一的自动查询调度器和派发时机迁入 `MotorBus`，各生产调用方通过窄接口登记/释放需求。手动 `4C` 配置写入的 ACK、`0x22` 三包读回、校验、超时及取消状态已迁入独立的 `ConfigTransaction`；它只报告查询需求和结果，实际发送仍走 `MotorBus` 的共享预算。`ManualOperationSupervisor` 独占手动 Move、DirectPosition 和 Home 的单一活动槽、ACK、完成证据、结果及失败快照；`MotorControl` 继续采集节点反馈、发送 CAN、维护停止待确认和故障锁存。新监督器契约测试与旧入口集成回归共同验证迁移。`CommandQueue` 的程序运行状态与 `SyncRuntime` 的同步状态机仍在原执行器，`DeviceAPI` 尚无手动操作句柄或有界结果历史。因此这批工作是**入口迁移与部分核心状态所有权拆分**，不能称为整个控制逻辑重构完成。PR 保持草稿，后续核心拆分与验收另行记录。
+PR #15 最初提交完成了 P1 的软件基线、`MotorBus` 发送薄封装，以及 HTTP、主控板 UART、显示板 Demo 到 `DeviceAPI` 的入口迁移。随后将全板唯一的自动查询调度器和派发时机迁入 `MotorBus`，各生产调用方通过窄接口登记/释放需求。手动 `4C` 配置写入的 ACK、`0x22` 三包读回、校验、超时及取消状态已迁入独立的 `ConfigTransaction`；它只报告查询需求和结果，实际发送仍走 `MotorBus` 的共享预算。`ManualOperationSupervisor` 独占手动 Move、DirectPosition 和 Home 的单一活动槽、ACK、完成证据、结果及失败快照；`MotorControl` 继续采集节点反馈、发送 CAN、维护停止待确认和故障锁存。当前 `DeviceAPI` 的 C++ 收据给已接受的手动动作分配操作编号，可从一活动槽加八条终态记录中只读查询；程序 `runId` 保持独立，旧 HTTP/UART/Demo 报文不变。新监督器契约测试与旧入口集成回归共同验证迁移。`CommandQueue` 的程序运行状态与 `SyncRuntime` 的同步状态机仍在原执行器，跨入口统一执行权与对外结果协议未完成。因此这批工作是**入口迁移与部分核心状态所有权拆分**，不能称为整个控制逻辑重构完成。PR 保持草稿，后续核心拆分与验收另行记录。
 
 | 目标阶段 | 当前实现事实 | 尚需完成 |
 | --- | --- | --- |
 | P1 行为基线 | 主机回归及两种 UART 配置编译通过；五轴 Demo/页面与 `await` 组合测试已加入。 | 本提交镜像的实机 CAN/机械验收。 |
 | P2 总线与观测 | `MotorBus` 已持有唯一 `X42sProtocol` 与 `CanQueryScheduler`，负责自动查询预算、派发和 TX 后让行；`CommandQueue`、Demo、页面/配置入口改用窄接口。`ConfigTransaction` 独占手动 `4C` 的事务状态，但 `0x22` 读回仍经同一预算。 | `SyncRuntime` 仍通过兼容出口直接持有可变调度器；显式原始读取不受自动查询配额约束。电机注册/观测所有权、完整流量仲裁及实机测量仍需完成。 |
-| P3–P4 指令与程序运行 | `ManualOperationSupervisor` 是手动 Move/DirectPosition/Home 状态的单一所有者，独立契约测试与 DeviceAPI 公共边界测试覆盖 ACK、到位、回零、取消和停止证据。`CommandQueue` 与 `SyncRuntime` 仍执行旧程序和同步逻辑。 | 统一指令实例与结果句柄、有界历史、程序运行器迁移；手动监督器的结果还未成为跨入口统一契约。 |
-| P5 统一入口与执行权 | `DeviceAPI` 已接入现有 HTTP、UART、Demo 动作；新接口测试覆盖接收、回执、反馈与取消。 | 统一执行权、手动操作编号和结果历史；不能把现有薄边界当成最终服务。 |
+| P3–P4 指令与程序运行 | `ManualOperationSupervisor` 是手动 Move/DirectPosition/Home 状态的单一所有者；进程内单调操作编号可查询一条活动记录和八条终态历史，ACK、到位、回零、取消和停止证据有独立测试。`CommandQueue` 与 `SyncRuntime` 仍执行旧程序和同步逻辑。 | 程序运行器迁移、Sync 结果句柄及跨重启/跨协议标识；手动操作结果尚未成为所有入口的统一契约。 |
+| P5 统一入口与执行权 | `DeviceAPI` 已接入现有 HTTP、UART、Demo 动作；C++ 收据把程序 `runId` 与手动 `operationId` 分开，结果读取无 CAN 副作用。 | 统一执行权和对外版本化结果协议；不能把当前类型化边界当成最终服务。 |
 | P6–P7 存储与传感器 | 未实施。 | 程序版本化存储、业务程序化和传感器等待。 |
 
 每完成一块核心拆分，应更新这张表、相应新契约测试和实机待验项；本地编译与 CI 通过只说明该块的软件回归可审查。
