@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 using namespace motion;
 using namespace fakecan;
@@ -142,6 +143,48 @@ static void test_manual_move_reached_needs_new_evidence() {
     CHECK(!stale.motor.velocityValid);
     CHECK(stale.motor.positionAgeMs == 601);
     CHECK(capturedTX.size() == beforeRead);
+}
+
+static void test_manual_failure_json_keeps_diagnostic_snapshot() {
+    {
+        Rig rig;
+        rig.begin();
+        DebugLimits limits;
+        limits.maxMoveDurationMs = 2000;
+        CHECK(rig.motor.setDebugLimits(limits));
+        enableAndFeed(rig, 1);
+        setMillis(60);
+        CHECK(rig.api.requestMove(move(1)).accepted());
+        injectRx(makeAck(1, kFrameMove, 0x02));
+        rig.poll(80);
+        for (uint32_t now = 100; now <= 2100; now += 400) {
+            injectRx(makePosition(1, 25));
+            injectRx(makeVelocity(1, 100));
+            rig.poll(now);
+        }
+        CHECK(rig.state(1, 2100).manualMove == DeviceMoveStage::Failed);
+        const std::string status = rig.motor.statusJson(1).str();
+        CHECK(status.find("\"fault\":\"move_timeout\"") != std::string::npos);
+        CHECK(status.find("\"lastMoveFailure\":{\"targetDeg\":10.0,\"positionDeg\":2.5,"
+                          "\"speedRpm\":10.0,\"elapsedMs\":2040,\"deadlineMs\":2000,"
+                          "\"enabled\":true}") != std::string::npos);
+    }
+    {
+        Rig rig;
+        rig.begin();
+        enableAndFeed(rig, 1);
+        setMillis(60);
+        CHECK(rig.api.requestMove(move(1)).accepted());
+        injectRx(makeAck(1, kFrameMove, 0x02));
+        rig.poll(80);
+        rig.poll(800); // No new position or velocity after command.
+        CHECK(rig.state(1, 800).manualMove == DeviceMoveStage::Failed);
+        const std::string status = rig.motor.statusJson(1).str();
+        CHECK(status.find("\"fault\":\"feedback_stale\"") != std::string::npos);
+        CHECK(status.find("\"lastMoveFailure\":{\"targetDeg\":10.0,\"positionDeg\":null,"
+                          "\"speedRpm\":null,\"elapsedMs\":740,\"deadlineMs\":60000,"
+                          "\"enabled\":true}") != std::string::npos);
+    }
 }
 
 static void test_home_response_modes_need_fresh_evidence() {
@@ -411,6 +454,7 @@ static void test_snapshot_reads_create_no_delayed_query_demand() {
 int main() {
     test_receipt_ack_and_observation_are_distinct();
     test_manual_move_reached_needs_new_evidence();
+    test_manual_failure_json_keeps_diagnostic_snapshot();
     test_home_response_modes_need_fresh_evidence();
     test_home_no_motion_is_distinct_from_reached();
     test_manual_move_and_home_share_one_slot();

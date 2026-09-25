@@ -13,6 +13,8 @@ with tempfile.TemporaryDirectory(prefix='babytech-motion-') as output:
         '-I', str(root / 'device-controller/include'), '-I', str(root / 'device-controller/lib/XMotor/src')]
     suites = [
         ('query-scheduler', [str(root / 'tests/test_query_scheduler.cpp')]),
+        ('manual-operation-supervisor', ['-I', str(root / 'device-controller/src'),
+            str(root / 'tests/test_manual_operation_supervisor.cpp')]),
         ('motor-bus-queries', ['-I', str(root / 'tests/fakes'), '-I', str(root / 'device-controller/src'),
             str(root / 'tests/test_motor_bus_queries.cpp'), str(root / 'tests/fakes/fake_x42s.cpp')]),
         ('sync-planner', [str(root / 'tests/test_sync_planner.cpp')]),

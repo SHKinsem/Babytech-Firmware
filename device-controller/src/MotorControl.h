@@ -17,6 +17,7 @@
 #include "MotionCore.h"
 #include "MotorBus.h"
 #include "ConfigTransaction.h"
+#include "ManualOperationSupervisor.h"
 #include "QueueDiagnostics.h"
 #include "CanQueryScheduler.h"
 
@@ -161,7 +162,7 @@ public:
     bool anyMotorOnline() const;
     bool hasActiveMotion() const;
 
-    enum class MoveOutcome : uint8_t { None, Running, Done, Cancelled, Failed };
+    using MoveOutcome = ManualOperationSupervisor::MoveOutcome;
     // Homing outcome. NoMotion is the manual's 12/22 answer ("already at the
     // origin or the limit is already triggered, the motor does not move"): it is
     // a finished attempt, but it is NOT a completion claim and not a fault.
@@ -172,7 +173,7 @@ public:
     //   statusJson.homeOrg  is the raw 0x3B homing status byte of that node
     //                       (the manual's Org), with homeRunning = bit2 and
     //                       homeFailed = bit3 decoded from the same byte.
-    enum class HomeOutcome : uint8_t { None, Running, Done, NoMotion, Cancelled, Failed };
+    using HomeOutcome = ManualOperationSupervisor::HomeOutcome;
     static const char* homeOutcomeName(HomeOutcome outcome);
     struct Snapshot {
         bool positionValid=false, velocityValid=false, currentValid=false;
@@ -200,14 +201,14 @@ public:
     // generic "fault_active".
     const char* faultTag() const { return faultTag_; }
     bool ready() const { return canReady(); }
-    MoveOutcome moveOutcome() const { return moveOutcome_; }
+    MoveOutcome moveOutcome() const { return manual_.moveOutcome(); }
     // Homing accessors. homeId()/homeMode() keep the last requested run so a
     // finished outcome can still be attributed; homeActive() tells whether one
     // is running right now.
-    HomeOutcome homeOutcome() const { return homeOutcome_; }
-    uint8_t homeId() const { return homeId_; }
-    uint8_t homeMode() const { return homeMode_; }
-    bool homeActive() const { return home_.active; }
+    HomeOutcome homeOutcome() const { return manual_.homeOutcome(); }
+    uint8_t homeId() const { return manual_.homeId(); }
+    uint8_t homeMode() const { return manual_.homeMode(); }
+    bool homeActive() const { return manual_.homeActive(); }
 
 private:
     friend class CommandQueue;
@@ -219,13 +220,7 @@ private:
     uint32_t txFrameCount_=0;
     uint32_t rxMissedCount_=0, rxOverrunCount_=0, txFailedCount_=0;
     uint8_t queueObserveId_ = 0;
-    struct MoveFailure {
-        uint8_t id = 0;
-        int64_t target = 0;
-        int32_t position = 0, velocity = 0;
-        uint32_t elapsed = 0, deadline = 0;
-        bool positionValid = false, velocityValid = false, enabled = false;
-    } moveFailure_;
+    ManualOperationSupervisor manual_;
     // The transaction owns manual 4C/22 evidence and transitions; this class
     // bridges it to the shared CAN/query budget and command policy.
     ConfigTransaction config_;
@@ -303,33 +298,6 @@ private:
         uint8_t syncAck=0;
     };
 
-    struct MoveJob {
-        bool active = false;
-        uint8_t id = 0;
-        // Opcode this job was started with (0xCD for a trapezoid move, 0xFB/0xCB
-        // for a direct one). An acknowledgement may only ever confirm the job
-        // whose opcode it matches, so an ack of another command cannot complete
-        // this one.
-        uint8_t opcode = kFrameMove;
-        // The position feedback is a full int32 and the travel is added to it,
-        // so the target and the error are kept in int64 to avoid overflow.
-        int64_t startTenths = 0;
-        int64_t targetTenths = 0;
-        int32_t toleranceTenths = 0;
-        uint32_t expectedDurationMs = 0;
-        uint32_t startMs = 0;
-        uint32_t deadlineMs = 0;
-        bool ackSeen = false;
-        // Direct (FB/CB) jobs additionally prove completion with the driver's own
-        // target sample: a fresh 0x33 that reports the resolved target.
-        bool targetProof = false;
-        uint8_t doneUpdates = 0;
-        // Timestamp of the last sample pair counted towards completion, so the
-        // same feedback sample is never counted twice.
-        uint32_t lastDonePosMs = 0;
-        uint32_t lastDoneVelMs = 0;
-    };
-
     // CAN plumbing.
     bool canReady() const;
     void refreshBusStatus();
@@ -371,22 +339,21 @@ private:
     void serviceEnableTimeouts(uint32_t now);
     void serviceJob(uint32_t now);
     void serviceHome(uint32_t now);
+    ManualOperationSupervisor::Observation manualObservation(uint8_t id, uint32_t now) const;
     void serviceStopConfirmations(uint32_t now);
     void serviceQueries(uint32_t now, bool rxDrained);
 
-    // Homing supervision. endHome() only records the outcome; cancelHome() and
-    // failHome() also abort the run on the wire (9C interrupts homing, FE halts
-    // the motor) and a failure latches a fault, which invalidates the enable.
-    void endHome(HomeOutcome outcome);
+    // Homing cancellation and failure also abort the run on the wire (9C
+    // interrupts homing, FE halts the motor). Only the supervisor can judge done.
     void cancelHome(bool interruptWire, bool stopWire);
-    void failHome(const char* tag, uint32_t now);
+    void failHome(const char* tag, uint32_t now, uint8_t terminalId = 0);
 
     // Fault handling. A latched fault always invalidates the enable
     // confirmation (and cancels a pending enable) so a fresh explicit enable is
     // required.
     void latchFault(uint8_t id, const char* tag, bool global);
     void clearFault(uint8_t id);
-    void failJob(const char* tag, uint32_t now);
+    void failJob(const char* tag, uint32_t now, uint8_t terminalId = 0);
     // `enableDesired` may only be true while an enable is confirmed or still in
     // flight. Without this, dropping a confirmation while a request was pending
     // leaves a phantom desire behind: hasActiveMotion() would stay true forever
@@ -409,40 +376,6 @@ private:
 
     NodeState nodes_[kNodeCount];
     uint8_t selectedId_ = 0;
-
-    // Homing supervision state. The trigger is a single 0x9A frame; completion
-    // is never taken from the ack alone.
-    //
-    // Two independent proofs exist and both are timestamped, because a stationary
-    // sample may only count when it is NEWER than the proof:
-    //   * stoppedMs — inferred proof: the first post-start 0x3B sample that
-    //     reported "not running, no failure" AFTER bit2 had been observed set.
-    //     It is only usable while the 0x3B status is still fresh, and it is
-    //     withdrawn (0) as soon as a newer status reports running again, so a
-    //     stale "not homing" byte can never complete a later run.
-    //   * completedMs — explicit proof: the documented 9A/9F completion reply
-    //     arrived at this time. This path needs no 0x3B at all.
-    struct HomeJob {
-        bool active = false;
-        uint32_t startMs = 0;
-        // Duration budget taken from the configured limits (no extra hardcoded
-        // timeout); it is a duration, compared wrap-safely against startMs.
-        uint32_t deadlineMs = 0;
-        bool ackSeen = false;
-        bool runningSeen = false;
-        uint32_t stoppedMs = 0;
-        uint32_t completedMs = 0;
-        uint8_t doneUpdates = 0;
-        uint32_t lastDonePosMs = 0;
-        uint32_t lastDoneVelMs = 0;
-    };
-
-    MoveJob job_;
-    MoveOutcome moveOutcome_ = MoveOutcome::None;
-
-    HomeJob home_;
-    HomeOutcome homeOutcome_ = HomeOutcome::None;
-    uint8_t homeId_ = 0, homeMode_ = 0;
 
     const char* faultTag_ = "none";
     uint8_t faultId_ = 0;
