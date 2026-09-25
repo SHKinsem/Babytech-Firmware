@@ -19,7 +19,7 @@ import { planManualMove, MANUAL_DEFAULTS } from './simulation.js';
 import { decodeCanReply, decodeBulkCanReply } from './manual-reference.js';
 import { deviceDefaults, experimentWindowText, limitsEqual, limitsToManualLimits, readLimitsPayload } from './device-limits.js';
 import { readDrafts, writeDrafts, safeStorage, getForm, putForm, lastVariantFor, getManual, putManual, putSelection, pickFields } from './device-drafts.js';
-import { request, supportReason, directPositionBoardNote, isMotionOpcode, isLimitDependentOpcode, stateLabels, errorLabels, readQueueStatus, queueProgressText, homeStatusText, queueConflictReason } from './device-api.js';
+import { request, supportReason, directPositionBoardNote, isMotionOpcode, isLimitDependentOpcode, stateLabels, enableStatusPresentation, errorLabels, readQueueStatus, queueProgressText, homeStatusText, queueConflictReason } from './device-api.js';
 
 const EMPTY = {id:0, enabled:false, online:false, positionDeg:null, speedRpm:null, currentMa:null};
 
@@ -96,6 +96,7 @@ function formatClock(timestamp) {
 }
 
 function DeviceFeedback({ status, connected, live, notice, lab, address, opcode, records, experiment, limitsReady, queue, queueRunning, queueStale, directNote, draftNote }) {
+  const enableStatus = enableStatusPresentation(status, connected);
   // Latest decoded reply for the address and function code currently selected.
   // Read-only history: it never feeds the gate, the metrics or the enable state.
   const query = lab && live && Number.isInteger(opcode)
@@ -105,7 +106,7 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
   // "this run finished", so the wording stays with the board's outcome.
   const home = connected ? homeStatusText(status) : null;
   return <section className="panel panel--feedback" aria-label="电机反馈">
-    <div className="feedback__head"><h2 className="panel__title">电机反馈</h2><span className={`chip ${status.enabled && connected ? 'chip--ok' : 'chip--muted'}`}>{connected ? status.enabled ? '使能已确认' : '使能未确认' : '反馈未知'}</span></div>
+    <div className="feedback__head"><h2 className="panel__title">电机反馈</h2><span className={`chip ${enableStatus.confirmed ? 'chip--ok' : 'chip--muted'}`}>{enableStatus.text}</span></div>
     <p className="feedback__address">电机 {status.id || '—'} · {connected && status.online ? '实时反馈' : '等待新鲜反馈'}</p>
     <dl className="metrics"><div className="metrics__row"><dt>位置</dt><dd>{metric(status.positionDeg,'°')}</dd></div><div className="metrics__row"><dt>速度</dt><dd>{metric(status.speedRpm,'RPM')}</dd></div><div className="metrics__row"><dt>电流</dt><dd>{metric(status.currentMa,'mA')}</dd></div></dl>
     {lab ? <>
@@ -155,7 +156,7 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
     </> : null}
     <div className="divider"/><h3 className="section__title">请求结果</h3><p className="device-notice" role="status">{notice || '尚未提交操作'}</p>
     {draftNote ? <p className="capabilities__note">{draftNote}</p> : null}
-    <p className="capabilities__note">只有收到 202 才表示指令已入队；超时或断线时请求结果未知，本页不会自动重发。使能及停止仍以真实应答／反馈确认，未知应答仅保留原始字节。</p>
+    <p className="capabilities__note">收到 202 仅表示请求已被接受或帧已发送，不证明电机已到位、停止或失能；超时或断线时结果未知，本页不会自动重发。实际状态以新鲜反馈为准。</p>
     <div className="divider"/><details className="device-compat device-boundaries"><summary>试验边界与协议说明</summary><p className="capabilities__note">{experiment ? `速度／力矩试验：${experiment}；反馈超时提前停止。` : '速度／力矩试验的时长由板端策略决定（未读取到限制）。'}回零（9A）已接入板端监督：等待应答、3B 回零标志与新鲜静止反馈；直通位置（FB/CB）也已接入：保留原功能码与字节，等待匹配的 FB/CB 应答、驱动器目标位置读值（0x33，手册 p70）与两对新鲜静止反馈；同步缓存与 FD 仍只可预览。参数写入需要驱动关闭使能且静止。</p>
     <p className="capabilities__note">{limitsReady ? '运动数值按「调试限制」中已确认的板端策略校验。' : '尚未确认板端限制（/api/limits）：运动指令保持禁用，读取、停止与失能不受影响。'}</p>
     {directNote ? <p className="capabilities__note">直通位置（FB/CB）由板端解析：{directNote}</p> : null}
@@ -173,14 +174,15 @@ function DeviceFeedback({ status, connected, live, notice, lab, address, opcode,
 
 function LabStatusSummary({ connected, status, onOpen, triggerRef }) {
   const fresh = connected && status.online;
-  const fault = fresh
+  const enableStatus = enableStatusPresentation(status, connected);
+  const fault = connected
     ? [status.fault, status.control?.fault].find(value => value && value !== 'none')
     : null;
   return <div className="lab-status-summary" role="group" aria-label="当前电机状态">
     <span className="lab-status-summary__identity">电机 {status.id || '—'} · {connected ? fresh ? '反馈新鲜' : '等待新鲜反馈' : '设备未连接'}</span>
     <div className="lab-status-summary__signals">
-      <span>{fresh ? status.enabled ? '使能已确认' : '使能未确认' : '使能未知'}</span>
-      <span className={fault ? 'lab-status-summary__fault' : ''}>{fresh ? fault ? `故障：${errorLabels[fault] || fault}` : '未报告故障' : '故障未知'}</span>
+      <span>{enableStatus.text}</span>
+      <span className={fault ? 'lab-status-summary__fault' : ''}>{connected ? fault ? `故障：${errorLabels[fault] || fault}` : '未报告故障' : '故障未知'}</span>
       <span className="lab-status-summary__ack">应答：{fresh && status.lastAck ? oneLine(status.lastAck) : '—'}</span>
     </div>
     <button type="button" className="lab-status-summary__details" ref={triggerRef} onClick={onOpen}>详细反馈</button>
@@ -252,10 +254,10 @@ export function DeviceApp() {
   const [queue,setQueue] = useState(null), [queueState,setQueueState] = useState('loading'), [queueError,setQueueError] = useState(null);
   const [queueLock,setQueueLock] = useState({pending:false,unconfirmed:false}), [queueNonce,setQueueNonce] = useState(0);
   const idleStreakRef = useRef(0);
-  // 清除板端状态 (POST /api/control/reset). Not a re-enable flow: it takes the
-  // board back to a clean volatile state and the operator must enable again
-  // explicitly. `resetGeneration` invalidates answers of requests that were
-  // already in flight, so a late submission cannot overwrite the reset notice.
+  // POST /api/control/reset clears software ownership and requests a stop;
+  // confirmed enable, pending stops and fault evidence remain on the board.
+  // `resetGeneration` invalidates answers already in flight so a late
+  // submission cannot overwrite the reset notice.
   const [resetPending,setResetPending] = useState(false);
   const resetPendingRef = useRef(false);
   const resetGenerationRef = useRef(0);
@@ -509,7 +511,7 @@ export function DeviceApp() {
     const announce = (text) => { if (resetGenerationRef.current === generation) setNotice(text); };
     try {
       const result = await request(path,data);
-      if (path === '/api/enable-all') { announce(`全部${Number(data.enabled) ? '使能' : '失能'}广播已发送，未逐台确认`); return {ok:true}; }
+      if (path === '/api/enable-all') { announce(`全部${Number(data.enabled) ? '使能' : '失能'}广播已发送；电机是否实际${Number(data.enabled) ? '使能' : '失能'}仍待逐台反馈确认`); return {ok:true}; }
       // The trial window is whatever the board is configured with — never a
       // hardcoded number in the page.
       const queued = result?.message === 'queued_experiment' || result?.message === 'queued_auto_stop_5s';
@@ -551,10 +553,8 @@ export function DeviceApp() {
     } catch { /* the status poll owns connection state */ }
   }
 
-  // 清除板端状态: cancels the queue, asks the board to stop once and clears its
-  // volatile ownership. It is not a re-enable flow and it proves nothing about
-  // the shaft: the page only reports what the board answered and then re-reads
-  // the real status, so no confirmation is invented locally.
+  // Clear software ownership and request a stop. Confirmed enable, pending
+  // stops and faults survive on the board until hardware evidence resolves them.
   async function resetControlState() {
     if (resetPendingRef.current) return;      // one at a time; 全部停止 stays usable
     resetPendingRef.current = true;
@@ -565,13 +565,12 @@ export function DeviceApp() {
     try {
       const payload = await request('/api/control/reset',{});
       if (payload?.stateCleared === true) {
-        // The board cleared its own bookkeeping. Local ownership is dropped and
-        // the state is re-read instead of assumed.
+        // Local queue ownership is dropped; the board keeps hardware evidence.
         setQueueLock({pending:false,unconfirmed:false});
         idleStreakRef.current = 0;
         setNotice(payload.stopSent === true
-          ? '已清除板端内部状态；停止帧已发送（发送成功不等于电机已物理停止）。需要时请显式重新使能。'
-          : `板端已清除内部状态，但停止发送未确认：${errorLabels.control_state_cleared_stop_unconfirmed}`);
+          ? '软件控制占用已清理，停止帧已发送；板端仍保留使能、待停止与故障证据。请核对电机反馈，发送成功不代表已停止或失能。'
+          : errorLabels.control_state_cleared_stop_unconfirmed);
       } else {
         setNotice('板端返回了未预期的内容，未清除本地状态；请重新读取状态后再操作。');
       }
@@ -780,9 +779,9 @@ export function DeviceApp() {
       </div>
       <div className="device-toolbar__actions" role="group" aria-label="全局控制">
         <span className="device-toolbar__actions-label">全局控制</span>
-        <button type="button" className="button button--outline" disabled={resetPending} title="取消编排队列并尝试停止一次，然后清除板端易失的忙／故障／应答状态；不改配置、不改草稿、不重启。停止帧发送成功也不代表电机已物理停止，之后需要显式重新使能。" onClick={resetControlState}>{resetPending ? '正在清除…' : '清除板端状态'}</button>
+        <button type="button" className="button button--outline" disabled={resetPending} title="取消编排及串口控制占用并请求停止；保留板端已确认使能、待停止与故障证据。不改配置、不重启。停止帧发出也不证明电机已停或失能。" onClick={resetControlState}>{resetPending ? '正在清理…' : '清理软件占用'}</button>
         <button type="button" className="button button--outline" disabled={!connected || busy || resetPending || queueBusy} title="广播使能总线上所有电机；不自动开始运动" onClick={()=>submit('/api/enable-all',{enabled:1})}>全部使能</button>
-        <button type="button" className="button button--danger" title="取消队列并广播失能，总线上所有电机释放保持力" onClick={()=>submit('/api/enable-all',{enabled:0},{stop:true})}>全部失能</button>
+        <button type="button" className="button button--danger" title="取消队列并广播失能；帧已发送不代表每台电机已失能，仍需核对反馈" onClick={()=>submit('/api/enable-all',{enabled:0},{stop:true})}>全部失能</button>
         <button type="button" className="button button--danger device-toolbar__stop" onClick={()=>submit('/api/stop-all',{}, {stop:true})}>全部停止</button>
       </div>
     </header>

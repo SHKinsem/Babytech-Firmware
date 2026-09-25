@@ -19,6 +19,7 @@ import {
 } from '../src/queue-program.js';
 import { DEFAULT_LIMITS } from '../src/device-limits.js';
 import {
+  enableStatusPresentation,
   homeStatusText,
   isMotionOpcode,
   queueConflictReason,
@@ -31,6 +32,22 @@ import {
 
 test('old firmware isolation refusal points to the new firmware',()=>{
   assert.match(errorLabels.sync_cache_isolation_unverified,/更新控制板固件/);
+});
+
+test('enable summary does not turn a retained bit into proof after stop or disable failure',()=>{
+  const lastEnabled = {state:'idle',enabled:true,online:true,fault:'none'};
+  assert.deepEqual(enableStatusPresentation(lastEnabled,true), {text:'使能已确认',confirmed:true});
+  const waiting = enableStatusPresentation({...lastEnabled,state:'stop_requested'},true);
+  assert.equal(waiting.confirmed,false);
+  assert.match(waiting.text,/停止待确认/);
+  const failed = enableStatusPresentation({...lastEnabled,state:'fault',fault:'disable_tx_failed'},true);
+  assert.equal(failed.confirmed,false);
+  assert.match(failed.text,/失能发送失败/);
+  const controlFault = enableStatusPresentation({...lastEnabled,control:{fault:'disable_tx_failed'}},true);
+  assert.equal(controlFault.confirmed,false);
+  assert.match(controlFault.text,/失能发送失败/);
+  assert.equal(enableStatusPresentation({...lastEnabled,online:false},true).confirmed,false);
+  assert.equal(enableStatusPresentation(lastEnabled,false).confirmed,false);
 });
 
 const errorsOf = (text, options) => validateProgram(text, options).errors.map((entry) => entry.message);

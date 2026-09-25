@@ -314,7 +314,23 @@ export const isMotionOpcode = (op) => MOTION_OPS.includes(op);
 export const LIMIT_DEPENDENT_OPS = [...MOTION_OPS, 0x45];
 export const isLimitDependentOpcode = (op) => LIMIT_DEPENDENT_OPS.includes(op);
 
-export const stateLabels = { idle:'已使能 · 静止', disabled:'未使能', enabled:'已使能', moving:'运动中', homing:'回零中', stop_requested:'等待停止反馈', enable_pending:'等待使能应答', fault:'故障', experiment_running:'试验运行中' };
+export const stateLabels = { idle:'板端未报告受监督动作', disabled:'板端未确认使能', enabled:'已使能', moving:'运动中', homing:'回零中', stop_requested:'等待停止反馈', enable_pending:'等待使能应答', fault:'故障', experiment_running:'试验运行中' };
+
+/** The enable bit can outlive a stop or broadcast-disable request. Give the
+ * unresolved operation priority over that last confirmed bit in the UI. */
+export function enableStatusPresentation(status, connected) {
+  if (!connected) return { text:'使能未知', confirmed:false };
+  if (status?.fault === 'disable_tx_failed' || status?.control?.fault === 'disable_tx_failed')
+    return { text:'失能发送失败 · 使能状态待核对', confirmed:false };
+  if (status?.state === 'stop_requested')
+    return { text:'停止待确认 · 使能状态待核对', confirmed:false };
+  if (status?.state === 'enable_pending')
+    return { text:'使能应答待确认', confirmed:false };
+  if (!status?.online) return { text:'使能反馈待刷新', confirmed:false };
+  return status.enabled
+    ? { text:'使能已确认', confirmed:true }
+    : { text:'使能未确认', confirmed:false };
+}
 
 /**
  * Homing outcome reported by the controller (`status.homeOutcome`, frozen names
@@ -538,6 +554,7 @@ export const errorLabels = {
   enable_ack_timeout:'未确认本次使能：需 F3 应答与新的 3A 实际状态',
   wifi_busy:'Wi-Fi 正忙，请稍后再试', busy:'设备忙，请先停止并关闭使能',
   not_enabled:'尚未收到使能确认', can_unavailable:'CAN 控制器不可用', can_tx_failed:'CAN 发送失败，检查接线与终端电阻',
+  disable_tx_failed:'广播失能发送失败；电机可能仍使能，请检查 CAN 与逐台反馈',
   feedback_unavailable:'缺少新鲜位置／速度反馈', feedback_stale:'电机反馈中断', stop_pending:'等待真实静止反馈',
   enable_and_wait_for_stationary_feedback:'请先使能，并等待静止反馈',
   disable_and_wait_for_stationary_feedback:'配置前请关闭使能，并等待真实静止反馈',
@@ -562,7 +579,7 @@ export const errorLabels = {
   motion_mode_invalid:'运动模式只能是 0（相对上一输入目标）／1（绝对坐标零点）／2（相对当前位置）',
   direct_sync_not_supported:'板端只监督立即执行的直通位置（FB/CB）；缓存待 FF 触发的方式未接入，可用队列的原始帧下发',
   // 清除板端状态 (POST /api/control/reset)
-  control_state_cleared_stop_unconfirmed:'板端已清除内部状态，但停止发送未确认：不要假定电机已停止，请先看反馈，再显式重新使能',
+  control_state_cleared_stop_unconfirmed:'软件控制占用已清理，但停止帧发送未确认；板端保留使能、待停止与故障证据，请核对 CAN 与电机反馈',
   control_reset_unavailable:'板端没有 /api/control/reset 接口（固件未更新）：该按钮需要较新的固件',
   // Homing parameter writes (0x4C) and homing supervision (0x9A).
   home_current_out_of_range:'碰撞检测电流超出板端当前电流策略，请查看「调试限制」',
