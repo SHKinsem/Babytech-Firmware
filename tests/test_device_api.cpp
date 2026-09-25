@@ -767,6 +767,47 @@ static void test_rejected_ack_and_bus_off_have_operation_faults() {
     }
 }
 
+static void test_clear_control_state_keeps_fault_and_stop_evidence() {
+    Rig rig;
+    rig.begin();
+    enableAndFeed(rig, 1);
+    setMillis(40);
+    const DeviceReceipt started = rig.api.requestMove(move(1));
+    CHECK(started.accepted());
+    injectRx(makeAck(1, kFrameMove, 0xEE));
+    rig.poll(60);
+    CHECK(rig.api.readOperation(started.operationId).fault ==
+          DeviceOperationFault::AckRejected);
+    CHECK(rig.state(1, 60).motor.stopPending);
+
+    // The public reset cancels software ownership and requests a stop, but it
+    // cannot erase the fault or turn that stop request into physical evidence.
+    setMillis(70);
+    const DeviceReceipt cleared = rig.api.clearControlState();
+    CHECK(cleared.accepted());
+    CHECK(cleared.operationId == 0);
+    const DeviceSnapshot afterClear = rig.state(1, 70);
+    CHECK(afterClear.fault);
+    CHECK(afterClear.motor.fault);
+    CHECK(std::strcmp(afterClear.faultTag, "ack_rejected") == 0);
+    CHECK(afterClear.motor.stopPending);
+    const std::string status = rig.motor.statusJson(1).str();
+    CHECK(status.find("\"fault\":\"ack_rejected\"") != std::string::npos);
+
+    injectRx(makeAck(1, kFrameStop, 0x02));
+    rig.poll(80);
+    CHECK(rig.state(1, 80).motor.stopPending); // FE receipt is not stop proof.
+    injectRx(makePosition(1, 0));
+    rig.poll(90);
+    CHECK(rig.state(1, 90).motor.stopPending); // Both measurements are needed.
+    injectRx(makeVelocity(1, 0));
+    rig.poll(100);
+    const DeviceSnapshot stopped = rig.state(1, 100);
+    CHECK(!stopped.motor.stopPending);
+    CHECK(stopped.fault); // Stopping does not silently recover the failed move.
+    CHECK(std::strcmp(stopped.faultTag, "ack_rejected") == 0);
+}
+
 static void test_broadcast_disable_records_cancellation() {
     Rig rig;
     rig.begin();
@@ -801,6 +842,7 @@ int main() {
     test_raw_invalidation_and_session_expiry();
     test_raw_manual_commands_share_the_operation_contract();
     test_rejected_ack_and_bus_off_have_operation_faults();
+    test_clear_control_state_keeps_fault_and_stop_evidence();
     test_broadcast_disable_records_cancellation();
     if (failures) std::printf("device-api: %d/%d checks failed\n", failures, checks);
     else std::printf("device-api: %d checks passed\n", checks);
