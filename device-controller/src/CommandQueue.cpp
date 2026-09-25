@@ -760,6 +760,16 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
     if (active() || motor_.operationBusy()) return Result{409, "queue_busy"};
     if (!motor_.ready() || motor_.hasFault()) return Result{503, "can_unavailable"};
     if (!program.count || program.hasRaw) return Result{400, "invalid_demo_program"};
+    for (uint8_t i = 0; i < program.count; ++i) {
+        const auto& step = program.steps[i];
+        if (step.action != QueueAction::SyncBegin) continue;
+        SyncSettings settings = syncSettings_;
+        if (step.syncToleranceProgress > 0)
+            settings.tolerance.progress = fmin(settings.tolerance.progress, step.syncToleranceProgress);
+        const char* reason = sync_.validate(program.steps + i + 1, step.groupSize,
+                                            settings, nullptr, step.syncTriggerOnly);
+        if (reason) { errorLine_ = step.line; setMessage(reason); return Result{400, reason}; }
+    }
     program_ = program;
     strictHome_ = true;
     sync_.reset();

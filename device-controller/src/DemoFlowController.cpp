@@ -22,6 +22,7 @@ bool DemoFlowController::apply(DemoConfig config) {
 bool DemoFlowController::settled(bool zero) const {
     if (!executor_.healthy() || !executor_.configurationValid() || config_.axes.empty()) return false;
     for (const auto& axis : config_.axes) {
+        if (zero && !axis.zero) continue;
         const auto e = executor_.evidence(axis.id);
         if (!e.fresh || !e.stationary || e.fault) return false;
         const int64_t delta = int64_t(e.position) - zeros_[axis.id];
@@ -48,7 +49,7 @@ bool DemoFlowController::initialize(uint32_t now) {
         reason_ = resetPending_ ? "reset_wait_feedback" : "reset_failed";
         return resetPending_;
     }
-    if (!executor_.healthy() || !settled(false)) return false;
+    if (!executor_.healthy()) return false;
     full_ = false;
     if (reference_) {
         if (!settled(true)) { reason_ = "zero_or_feedback_required"; return false; }
@@ -67,7 +68,7 @@ bool DemoFlowController::start(uint32_t now) {
 }
 bool DemoFlowController::single(uint8_t index, uint32_t now) {
     if (index >= 5 || busy() || stage_ == DisplayStage::Error || !reference_ ||
-        !config_.configured || !executor_.available() || !settled(false)) return false;
+        !config_.configured || !executor_.available() || !executor_.healthy()) return false;
     full_ = false;
     return begin(index, now);
 }
@@ -126,30 +127,30 @@ void DemoFlowController::tick(uint32_t now) {
         if (!executor_.healthy()) {
             reference_ = false; fail(DisplayError::CanFault, "can_fault", now); return;
         }
-        if (uint32_t(now - began_) > kDemoFeedbackMs) for (const auto& axis : config_.axes) {
-            if (!executor_.evidence(axis.id).fresh) {
-                reference_ = false; fail(DisplayError::CanFault, "feedback_stale", now); return;
-            }
-        }
         const DemoScript& script = index_ < 0 ? config_.initialization : config_.stages[index_];
         if (uint32_t(now - began_) >= script.timeoutMs) {
             fail(index_ < 0 ? DisplayError::Unknown : timeouts[index_], "stage_timeout", now); return;
         }
         if (launchPending_) {
+            // A preceding stage may have sent an immediate enable/disable whose
+            // driver confirmation is still pending. Keep the stage timeout
+            // supervising this handoff instead of turning a transient busy
+            // state into script_rejected.
+            if (!executor_.available()) return;
             launchPending_ = false;
             if (!executor_.start(script, index_ < 0, zeros_, now)) fail(DisplayError::Unknown, "script_rejected", now);
             return;
         }
         const auto execution = executor_.execution();
         if (execution == DemoExecution::Failed) { fail(executor_.failureError(), "execution_failed", now); return; }
-        if (execution != DemoExecution::Done || !settled(false)) return;
+        if (execution != DemoExecution::Done) return;
         if (index_ == -1) {
-            for (const auto& axis : config_.axes) zeros_[axis.id] = executor_.evidence(axis.id).position;
+            for (const auto& axis : config_.axes) if (axis.zero)
+                zeros_[axis.id] = executor_.evidence(axis.id).position;
             reference_ = true; running_ = false; stage_ = DisplayStage::Ready; reason_ = "ready";
         } else if (full_ && index_ < 4) {
             begin(index_ + 1, now);
         } else if (full_) {
-            if (!settled(true)) return; // mixing timeout continues to supervise zero verification
             running_ = false; stage_ = DisplayStage::Complete; completeAt_ = now; reason_ = "complete";
         } else {
             running_ = false; stage_ = DisplayStage::NotReady; reason_ = "single_stage_done";
@@ -158,8 +159,7 @@ void DemoFlowController::tick(uint32_t now) {
     }
     if (stage_ == DisplayStage::Ready || stage_ == DisplayStage::Complete) {
         if (!executor_.healthy()) { reference_ = false; fail(DisplayError::CanFault, "can_fault", now); return; }
-        if (!reference_ || !settled(true) || !executor_.available()) {
-            for (const auto& axis : config_.axes) if (!executor_.evidence(axis.id).fresh) reference_ = false;
+        if (!reference_) {
             stage_ = DisplayStage::NotReady; reason_ = "zero_or_feedback_required"; return;
         }
         if (stage_ == DisplayStage::Complete && uint32_t(now - completeAt_) >= 3000) {

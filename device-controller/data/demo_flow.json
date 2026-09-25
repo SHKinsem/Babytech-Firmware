@@ -1,14 +1,127 @@
 {
   "schema_version": 1,
-  "name": "unconfigured-not-for-feeding",
-  "display": {"baby_name": "DEMO", "formula_brand": "NOT FOR FEEDING", "water_ml": 180, "temperature_c": 45},
-  "axes": [],
-  "initialization": {"timeout_ms": 60000, "zero_axes": [], "commands": []},
+  "name": "latest-bench-script-draft-not-for-feeding",
+  "display": {
+    "baby_name": "lx",
+    "formula_brand": "Friso",
+    "water_ml": 100,
+    "temperature_c": 45
+  },
+  "axes": [
+    {
+      "motor_id": 1,
+      "rotation_distance_mm": 2
+    },
+    {
+      "motor_id": 2,
+      "rotation_distance_mm": 0
+    },
+    {
+      "motor_id": 3,
+      "rotation_distance_mm": 40
+    },
+    {
+      "motor_id": 4,
+      "rotation_distance_mm": 0
+    },
+    {
+      "motor_id": 5,
+      "rotation_distance_mm": 0
+    }
+  ],
+  "initialization": {
+    "timeout_ms": 120000,
+    "zero_axes": [
+      {
+        "motor_id": 1,
+        "zero_tolerance_deg": 1
+      },
+      {
+        "motor_id": 3,
+        "zero_tolerance_deg": 1
+      }
+    ],
+    "commands": [
+      "enable 1",
+      "enable 3",
+      "move 1 -5 mm 300 300 300 200 await",
+      "home 1 2 await",
+      "move 1 -2 mm 300 300 300 200 await",
+      "home 3 2 await",
+      "move 3 2 mm 300 300 300 650 await",
+      "disable 1",
+      "disable 3"
+    ]
+  },
   "stages": [
-    {"id": "open_cap", "timeout_ms": 120000, "commands": []},
-    {"id": "water", "timeout_ms": 30000, "commands": []},
-    {"id": "powder", "timeout_ms": 15000, "commands": []},
-    {"id": "close_cap", "timeout_ms": 60000, "commands": []},
-    {"id": "mix", "timeout_ms": 60000, "commands": []}
+    {
+      "id": "open_cap",
+      "timeout_ms": 120000,
+      "commands": [
+        "enable 1",
+        "enable 2",
+        "enable 3",
+        "move 3 76.7 mm 60 60 60 650 await",
+        "move 1 -70 mm 300 300 300 200 await",
+        "move 2 1000 deg 200 60 60 500 await",
+        "move 1 2 mm 300 300 300 200 await",
+        "move 2 1400 deg 200 60 60 500 await",
+        "move 1 15 mm 300 300 300 200 await",
+        "move 3 -76.7 mm 60 60 60 650 await",
+        "move 1 -48 mm 300 300 300 200 await"
+      ]
+    },
+    {
+      "id": "water",
+      "timeout_ms": 90000,
+      "commands": [
+        "enable 5",
+        "move 5 50 rev 1000 5000 5000 800 await",
+        "disable 5 ",
+        "wait 500"
+      ]
+    },
+    {
+      "id": "powder",
+      "timeout_ms": 180000,
+      "commands": [
+        "enable 4",
+        "move 4 10 rev 100 5000 5000 800 await",
+        "disable 4 ",
+        "wait 500"
+      ]
+    },
+    {
+      "id": "close_cap",
+      "timeout_ms": 120000,
+      "commands": [
+        "move 1 48 mm 300 300 300 200 await",
+        "move 3 76.7 mm 60 60 60 650 await",
+        "move 1 -12 mm 300 300 300 200 await",
+        "sync begin trigger",
+        "move 1 -1.2 mm 100 300 300 200",
+        "move 2 1000 deg 400 1500 1500 500",
+        "sync end",
+        "sync begin trigger",
+        "move 1 -2 mm 100 300 300 200",
+        "move 2 -2400 deg 500 1500 1500 500",
+        "sync end",
+        "torque 2 -500 2000 300 1000",
+        "move 2 300 deg 500 1500 1500 500 await"
+      ]
+    },
+    {
+      "id": "mix",
+      "timeout_ms": 60000,
+      "commands": [
+        "move 1 68.2 mm 300 300 300 200 await",
+        "move 3 -76.7 mm 60 60 60 650 await",
+        "move 2 2000 deg 400 1500 1500 500 await",
+        "move 2 -2000 deg 400 1500 1500 500 await",
+        "disable 1",
+        "disable 2",
+        "disable 3"
+      ]
+    }
   ]
 }

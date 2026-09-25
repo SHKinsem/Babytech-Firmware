@@ -53,7 +53,7 @@ git switch -c codex/your-task
 
 新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
 
-可选 DISPLAY 构建配置已接入产品显示板 UART v3、非阻塞流程、阶段调试和 JSON 配置。采用“调试用内存、演示用内置 JSON”，默认脚本未配置，上电不运动。见 [演示操作说明](docs/motion-display-demo.md) 与 [开发验收计划](docs/motion-display-demo-plan.md)。默认 BRAIN 构建仍使用 Brain/Motion v2；机械与双板实机验收尚未完成。
+默认 DISPLAY 构建已接入产品显示板 UART v3、非阻塞流程、阶段调试和内置 JSON 配置；上电不自动运动。见 [演示操作说明](docs/motion-display-demo.md) 与 [开发验收计划](docs/motion-display-demo-plan.md)。Brain/Motion v2 需显式以 `-DMOTION_UART_PEER=1` 编译；机械与双板实机验收尚未完成。
 
 ## 目录
 

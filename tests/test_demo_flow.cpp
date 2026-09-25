@@ -8,12 +8,15 @@ using namespace babytech::display;
 
 struct Fake : DemoExecutor {
     bool ok = true, free = true, fresh = true, stationary = true;
+    std::array<bool, 256> missingFeedback{};
     int starts = 0, stops = 0, resets = 0;
     int32_t position = 100;
     DemoExecution state = DemoExecution::Done;
     bool healthy() const override { return ok; }
     bool available() const override { return free; }
-    DemoEvidence evidence(uint8_t) const override { return {fresh, stationary, !ok, position}; }
+    DemoEvidence evidence(uint8_t id) const override {
+        return {fresh && !missingFeedback[id], stationary, !ok, position};
+    }
     bool start(const DemoScript&, bool, const std::array<int32_t,256>&, uint32_t) override {
         ++starts; state = DemoExecution::Running; return true;
     }
@@ -87,6 +90,16 @@ int main() {
     }
     {
         Fake e; DemoFlowController f(e); ready(f, e);
+        assert(f.start(20)); f.tick(20); assert(e.starts == 2);
+        e.state = DemoExecution::Done; f.tick(21); // advance to water
+        e.free = false; f.tick(22); // previous disable acknowledgement is pending
+        assert(f.stage() == DisplayStage::DispensingWater && f.busy());
+        assert(f.error() == DisplayError::None && e.starts == 2);
+        e.free = true; f.tick(23);
+        assert(e.starts == 3 && e.state == DemoExecution::Running);
+    }
+    {
+        Fake e; DemoFlowController f(e); ready(f, e);
         assert(f.start(20)); f.tick(20);
         f.tick(5020); assert(f.error() == DisplayError::CapUnscrewTimeout && e.stops == 1);
         f.tick(5021); assert(!f.busy() && f.stage() == DisplayStage::Error);
@@ -96,12 +109,27 @@ int main() {
     {
         Fake e; DemoFlowController f(e); ready(f,e);
         e.position = 200; f.tick(12);
-        assert(!f.startEnabled() && f.referenceValid());
+        assert(f.startEnabled() && f.referenceValid()); // no continuous telemetry gate
         assert(!f.initialize(13)); // reset does not invent a new zero
         e.position = 100; assert(f.initialize(14));
         assert(f.start(20)); f.tick(20); e.fresh = false; f.tick(1021);
-        assert(f.error() == DisplayError::CanFault && !f.referenceValid() && e.stops == 1);
-        f.tick(4021); assert(!f.busy() && f.stage() == DisplayStage::Error);
+        assert(f.error() == DisplayError::None && e.stops == 0);
+        f.tick(5020); assert(f.error() == DisplayError::CapUnscrewTimeout && e.stops == 1);
+        e.fresh = true; f.tick(5021);
+        assert(!f.busy() && f.stage() == DisplayStage::Error);
+    }
+    {
+        Fake e; DemoFlowController f(e);
+        DemoConfig c = config();
+        for (uint8_t id = 2; id <= 5; ++id) c.axes.push_back({id, 10, 0, id == 3});
+        e.missingFeedback[1] = e.missingFeedback[2] =
+            e.missingFeedback[4] = e.missingFeedback[5] = true;
+        assert(f.apply(c));
+        assert(f.initialize(10)); f.tick(10);
+        e.state = DemoExecution::Done; f.tick(11);
+        assert(f.stage() == DisplayStage::Ready && f.startEnabled());
+        f.tick(12); assert(f.stage() == DisplayStage::Ready);
+        assert(f.single(0, 13)); // unrelated axes do not block a stage entry
     }
     {
         Fake e; DemoFlowController f(e); ready(f,e);
