@@ -2328,16 +2328,17 @@ static void test_stop_all_does_not_invent_unseen_target() {
     const auto savedLimits = rig.mc.debugLimits();
     const size_t beforeClear = capturedTX.size();
     rig.mc.clearControlState();
-    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.operationBusy()); // Reset cannot prove the stop of node 99.
     CHECK(!rig.mc.hasFault());
-    CHECK(!rig.mc.snapshot(2).enabled);
-    CHECK(!rig.mc.snapshot(2).positionValid);
+    CHECK(rig.mc.snapshot(99).stopPending);
+    CHECK(rig.mc.snapshot(2).enabled); // Physical enable evidence survives.
+    CHECK(rig.mc.snapshot(2).positionValid);
     CHECK(rig.mc.debugLimits().maxCurrentMa == savedLimits.maxCurrentMa);
     CHECK(capturedTX.size() == beforeClear); // no enable, move, retry or CAN reinit
     injectRx(makeAck(2, kFrameEnable, 0x02));
     setMillis(240);
     rig.mc.poll();
-    CHECK(!rig.mc.snapshot(2).enabled); // stale ACK cannot resurrect confirmation
+    CHECK(rig.mc.snapshot(2).enabled); // stale ACK changes nothing
     rig.mc.watch(2);
     injectRx(makeAck(2, kFrameEnable, 0xE2));
     injectRx(makeAck(2, kFrameMove, 0xEE));
@@ -2345,7 +2346,224 @@ static void test_stop_all_does_not_invent_unseen_target() {
     setMillis(260);
     rig.mc.poll();
     CHECK(!rig.mc.hasFault());
+    CHECK(rig.mc.operationBusy());
+    setMillis(280);
+    injectRx(makePosition(99, 0));
+    injectRx(makeVelocity(99, 0));
+    rig.mc.poll();
+    CHECK(!rig.mc.snapshot(99).stopPending);
     CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_waits_for_driver_and_stop_proof() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    CHECK(rig.mc.snapshot(1).enabled);
+    CHECK(startMove(rig, 1, 30.0f, 40).code == kCodeQueued);
+    const uint64_t operationId = rig.mc.activeOperationId();
+    CHECK(operationId != 0);
+
+    setMillis(60);
+    const Result disabled = rig.mc.broadcastEnable(false);
+    CHECK(disabled.code == 202);
+    CHECK(std::string(disabled.message) == "broadcast_sent");
+    CHECK(!capturedTX.empty());
+    const CanRawFrame& broadcast = capturedTX.back();
+    CHECK(x42sCanAddress(broadcast.identifier) == 0);
+    CHECK(broadcast.length == 5 && broadcast.data[0] == 0xF3 &&
+          broadcast.data[1] == 0xAB && broadcast.data[2] == 0);
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Cancelled);
+    CHECK(rig.mc.snapshot(1).enabled); // TX is not physical disable proof.
+    CHECK(rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.snapshot(1).positionValid); // Existing observations survive.
+    CHECK(rig.mc.operationBusy());
+    CHECK(rig.mc.hasActiveMotion());
+    CHECK(status(rig, 1).find("\"state\":\"stop_requested\"") != std::string::npos);
+    CHECK(status(rig, 1).find("\"reason\":\"stop_pending\"") != std::string::npos);
+    rig.mc.clearControlState();
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Cancelled);
+    CHECK(rig.mc.snapshot(1).enabled && rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.operationBusy() && rig.mc.hasActiveMotion());
+
+    // The pre-broadcast flags and then post-broadcast stationary telemetry are
+    // each insufficient alone. The broadcast has no per-node ACK.
+    setMillis(80);
+    injectRx(makePosition(1, 10));
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    setMillis(100);
+    injectRx(makeFlags(1, 1));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.snapshot(1).enabled);
+    setMillis(120);
+    injectRx(makeFlags(1, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending); // Earlier stillness may predate coasting.
+    CHECK(!rig.mc.snapshot(1).enabled);
+    CHECK(rig.mc.operationBusy());
+    setMillis(140);
+    injectRx(makePosition(1, 20));
+    injectRx(makeVelocity(1, 100)); // Released shaft is still moving.
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    setMillis(160);
+    injectRx(makePosition(1, 30));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending); // Old moving velocity cannot prove stop.
+    setMillis(180);
+    injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(!rig.mc.hasActiveMotion());
+    CHECK(status(rig, 1).find("\"state\":\"disabled\"") != std::string::npos);
+
+    // An uncommanded, unseen UI selection must not create a permanent OTA
+    // blocker simply because the operator broadcast a disable.
+    Rig idle;
+    CHECK(idle.mc.begin(4, 5, 500000));
+    idle.mc.watch(99);
+    CHECK(idle.mc.broadcastEnable(false).code == 202);
+    CHECK(!idle.mc.snapshot(99).stopPending);
+    CHECK(!idle.mc.operationBusy());
+}
+
+static void test_failed_broadcast_disable_retains_fault_and_stop_waits() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    enableAndFeedStationary(rig, 2, 100);
+    CHECK(startMove(rig, 1, 30.0f, 140).code == kCodeQueued);
+    const uint64_t operationId = rig.mc.activeOperationId();
+    CHECK(operationId != 0);
+
+    setMillis(160);
+    failNextMoveTx = true; // Fail the raw F3 before any packet is captured.
+    const Result disabled = rig.mc.broadcastEnable(false);
+    CHECK(disabled.code == 503);
+    CHECK(std::string(disabled.message) == "can_tx_failed");
+    CHECK(sawStopFor(0)); // One best-effort FE on the failure path.
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Cancelled);
+    CHECK(rig.mc.hasFault());
+    CHECK(rig.mc.snapshot(1).fault && rig.mc.snapshot(2).fault);
+    CHECK(rig.mc.snapshot(1).enabled && rig.mc.snapshot(2).enabled);
+    CHECK(rig.mc.snapshot(1).stopPending && rig.mc.snapshot(2).stopPending);
+    CHECK(rig.mc.operationBusy());
+    const auto otaMotionGate = [&rig]() {
+        return !rig.mc.hasActiveMotion() && !rig.mc.operationBusy();
+    };
+    CHECK(!otaMotionGate()); // The motion portion of safeForOta() stays closed.
+    const std::string json = status(rig, 1);
+    CHECK(json.find("\"state\":\"fault\"") != std::string::npos);
+    CHECK(json.find("\"fault\":\"disable_tx_failed\"") != std::string::npos);
+    CHECK(json.find("\"id\":1,\"reason\":\"stop_pending\"") != std::string::npos);
+    CHECK(json.find("\"id\":2,\"reason\":\"stop_pending\"") != std::string::npos);
+    rig.mc.clearControlState();
+    CHECK(rig.mc.hasFault());
+    CHECK(std::string(rig.mc.faultTag()) == "disable_tx_failed");
+    CHECK(rig.mc.snapshot(1).enabled && rig.mc.snapshot(2).enabled);
+    CHECK(rig.mc.snapshot(1).stopPending && rig.mc.snapshot(2).stopPending);
+    CHECK(!otaMotionGate());
+    CHECK(status(rig, 1).find("\"fault\":\"disable_tx_failed\"") != std::string::npos);
+
+    // Old observations, and even new stationary feedback, cannot stand in for
+    // disabled driver flags. This also proves one completed node cannot clear
+    // the other node's OTA blocker.
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending && rig.mc.snapshot(2).stopPending);
+    setMillis(180);
+    injectRx(makePosition(1, 10)); injectRx(makeVelocity(1, 0));
+    injectRx(makePosition(2, 0)); injectRx(makeVelocity(2, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending && rig.mc.snapshot(2).stopPending);
+    setMillis(200);
+    injectRx(makeFlags(1, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.snapshot(2).stopPending);
+    CHECK(!otaMotionGate());
+    setMillis(210);
+    injectRx(makePosition(1, 10)); injectRx(makeVelocity(1, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(1).stopPending);
+    CHECK(rig.mc.snapshot(2).stopPending);
+    setMillis(220);
+    injectRx(makeFlags(2, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(2).stopPending);
+    setMillis(230);
+    injectRx(makePosition(2, 0)); injectRx(makeVelocity(2, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(2).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(!rig.mc.hasActiveMotion());
+    CHECK(otaMotionGate());
+    CHECK(rig.mc.hasFault()); // Fault is diagnostic until explicit recovery.
+
+    // Fresh stationary evidence now permits the existing explicit enable
+    // recovery path to clear the fault and start a new request.
+    CHECK(rig.mc.enable(1, true).code == kCodeQueued);
+    CHECK(!rig.mc.hasFault());
+}
+
+static void test_broadcast_disable_tracks_observed_selection_without_enable() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(10);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).enabled);
+
+    setMillis(30);
+    failNextMoveTx = true;
+    CHECK(rig.mc.broadcastEnable(false).code == 503);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    CHECK(rig.mc.operationBusy());
+    rig.mc.clearControlState();
+    CHECK(rig.mc.snapshot(7).stopPending);
+    CHECK(rig.mc.hasFault());
+    CHECK(rig.mc.operationBusy());
+    setMillis(50);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending); // Pre-flag stillness is too old.
+    setMillis(70);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.hasFault());
+}
+
+static void test_broadcast_disable_aborts_home_before_f3() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    enableAndFeedStationary(rig, 1, 0);
+    setMillis(40);
+    CHECK(rig.mc.home(1, 0).code == kCodeQueued);
+    const uint64_t operationId = rig.mc.activeOperationId();
+    CHECK(operationId != 0);
+    const size_t before = capturedTX.size();
+    setMillis(60);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    CHECK(capturedTX.size() == before + 2);
+    const CanRawFrame& abort = capturedTX[before];
+    const CanRawFrame& disable = capturedTX[before + 1];
+    CHECK(x42sCanAddress(abort.identifier) == 1);
+    CHECK(abort.length == 3 && abort.data[0] == 0x9C &&
+          abort.data[1] == 0x48 && abort.data[2] == 0x6B);
+    CHECK(x42sCanAddress(disable.identifier) == 0);
+    CHECK(disable.length == 5 && disable.data[0] == 0xF3 &&
+          disable.data[1] == 0xAB && disable.data[2] == 0);
+    CHECK(rig.mc.readOperation(operationId).state == DeviceOperationState::Cancelled);
+    CHECK(rig.mc.snapshot(1).stopPending);
 }
 
 struct TestCase {
@@ -2355,6 +2573,10 @@ struct TestCase {
 
 int main() {
     const TestCase tests[] = {
+        {"broadcast disable keeps state until flags and stop proof", test_broadcast_disable_waits_for_driver_and_stop_proof},
+        {"failed broadcast disable retains fault, waits and OTA gate", test_failed_broadcast_disable_retains_fault_and_stop_waits},
+        {"broadcast disable tracks an observed selected node", test_broadcast_disable_tracks_observed_selection_without_enable},
+        {"broadcast disable aborts home before F3", test_broadcast_disable_aborts_home_before_f3},
         {"broadcast stop does not lock the board on an unseen UI selection", test_stop_all_does_not_invent_unseen_target},
         {"configurable limits and trial timeout, continuous freshness guard", test_configurable_debug_limits},
         {"protocol truncation, limits and sync rejection", test_protocol_validation_bounds},

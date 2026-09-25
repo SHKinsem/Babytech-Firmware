@@ -530,7 +530,8 @@ bool MotorControl::nodeOfInterest(uint8_t id) const {
     if (manual_.moveActive() && manual_.moveId() == id) return true;
     if (manual_.homeActive() && manual_.homeId() == id) return true;
     const NodeState& node = nodes_[id];
-    return node.enablePending || node.stopRequested || node.enableDesired;
+    return node.enablePending || node.stopRequested || node.enableDesired ||
+        node.broadcastDisablePending;
 }
 
 bool MotorControl::anyStopPending() const {
@@ -654,9 +655,18 @@ void MotorControl::serviceStopConfirmations(uint32_t now) {    for (uint16_t id 
         if (manual_.moveActive() && manual_.moveId() == id) continue;
         // A stop only clears on a NEW stationary position/velocity sample, so a
         // stop or disable on a fresh target still has to be seen on the wire.
-        if (stationaryFeedback(static_cast<uint8_t>(id), now, node.stopRequestedMs)) {
-            node.stopRequested = false;
+        if (!stationaryFeedback(static_cast<uint8_t>(id), now, node.stopRequestedMs)) continue;
+        if (node.broadcastDisablePending) {
+            // F3 broadcast has no per-node ACK. An old 3A sample cannot prove
+            // this disable. Nor can a stationary sample taken before the
+            // disabled flag prove the released shaft has finished coasting.
+            if (!node.flagsValid || (node.flags & 1) ||
+                !isStrictlyNewerThan(node.flagsMs, node.stopRequestedMs)) continue;
+            if (!isStrictlyNewerThan(node.positionMs, node.flagsMs) ||
+                !isStrictlyNewerThan(node.velocityMs, node.flagsMs)) continue;
+            node.broadcastDisablePending = false;
         }
+        node.stopRequested = false;
     }
 }
 
@@ -672,7 +682,8 @@ void MotorControl::serviceQueries(uint32_t now, bool rxDrained) {
         if (moving || node.stopRequested) {
             demand(id,0x36,200,2); demand(id,0x35,200,2);
         }
-        if (moving || node.enablePending) demand(id,0x3A,500,1);
+        if (moving || node.enablePending || node.broadcastDisablePending)
+            demand(id,0x3A,500,1);
     }
     if (manual_.homeActive()) demand(manual_.homeId(),0x3B,300,2);
     if (manual_.moveActive() && manual_.moveNeedsTargetProof() &&
@@ -1455,23 +1466,89 @@ Result MotorControl::stopAll() {
 
 Result MotorControl::broadcastEnable(bool enabled) {
     const uint8_t frame[] = {0, 0xF3, 0xAB, uint8_t(enabled ? 1 : 0), 0, 0x6B};
-    // Broadcast has no per-node acknowledgement; do not invent confirmations.
-    if (!enabled) {
-        if (manual_.moveActive()) manual_.cancelMove(manual_.moveId());
-        if (manual_.homeActive()) manual_.cancelHome(manual_.homeId());
+    if (enabled) {
+        // Broadcast has no per-node acknowledgement; do not invent confirmations.
+        const bool sent = queueSendLogical(frame, sizeof(frame));
+        return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
     }
-    const bool sent = queueSendLogical(frame, sizeof(frame));
-    if (!enabled) clearControlState();
-    return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
+
+    // A broadcast disable can fail before it reaches any motor, and even a
+    // successful CAN submission is not proof that a motor has stopped or
+    // disabled. Cancel the local operation, but retain the last observations
+    // and require new stationary feedback for every known controlled node.
+    const uint32_t now = millis();
+    const uint8_t manualId = manual_.activeId();
+    const uint8_t homeId = manual_.homeActive() ? manual_.homeId() : 0;
+    const uint8_t trialId = experimentId_;
+    if (manual_.moveActive()) manual_.cancelMove(manual_.moveId());
+    if (homeId) manual_.cancelHome(homeId);
+    // Keep the terminal operation result, but clear the legacy current-stage
+    // view just as the old control reset did after a broadcast disable.
+    manual_.supersede();
+    experimentId_ = 0;
+    experimentStart_ = 0;
+    cancelConfig();
+    targetPollId_ = 0;
+    targetPollArmedMs_ = 0;
+    bus_.releaseQueries(CanQueryScheduler::Controller);
+    bus_.releaseQueries(CanQueryScheduler::Await);
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        NodeState& node = nodes_[id];
+        const bool touched = id == manualId || id == trialId ||
+            (id == selectedId_ && node.seenEver) || node.stopRequested ||
+            node.enablePending || node.enableDesired || node.enableConfirmed;
+        if (!touched) continue;
+        node.stopRequested = true;
+        node.stopRequestedMs = now;
+        node.broadcastDisablePending = true;
+        // A pending addressed enable must not be confirmed by a late F3 ACK.
+        // An earlier confirmed enable remains true until real disabled flags
+        // arrive: a failed broadcast might have left the driver enabled.
+        node.enablePending = false;
+        node.enableAck = false;
+        node.enableTimedOut = false;
+        node.enableDesired = false;
+    }
+    invalidateTarget(0);
+
+    // F3 disables the driver but does not replace the documented 9C homing
+    // abort. Keep the same 9C -> disable ordering as addressed disable.
+    if (homeId) sendHomeInterrupt(homeId);
+
+    // Keep the queue's raw transport tracing behavior, without its addressed
+    // F3 bookkeeping (which would falsely drop every enable confirmation).
+    bool sent = false;
+    if (canReady()) {
+        bus_.clearTransmissionError();
+        queueTransport_ = true;
+        sent = bus_.sendRawLogical(frame, sizeof(frame));
+        queueTransport_ = false;
+        if (bus_.hasTransmissionError()) sent = false;
+        bus_.clearTransmissionError();
+    }
+    if (!sent) {
+        // A failed disable is a global safety fault. Retain the old confirmed
+        // enable values and stop waits; a best-effort FE cannot erase either.
+        faultTag_ = kFaultDisableTxFailed;
+        faultId_ = 0;
+        faultGlobal_ = true;
+        sendStop(0);
+        return Result{503, "can_tx_failed"};
+    }
+    return Result{202, "broadcast_sent"};
 }
 
 void MotorControl::takeQueueControl() {
     manual_.supersede();
     experimentId_ = 0;
     experimentStart_ = 0;
-    faultTag_ = kFaultNone;
-    faultId_ = 0;
-    faultGlobal_ = false;
+    // A failed broadcast disable is still unresolved hardware evidence. A
+    // queue takeover must not erase the diagnostic while the driver may run.
+    if (strcmp(faultTag_, kFaultDisableTxFailed) != 0) {
+        faultTag_ = kFaultNone;
+        faultId_ = 0;
+        faultGlobal_ = false;
+    }
     // Keep terminal config evidence for diagnosis, but end a pending transaction.
     cancelConfig();
     targetPollId_ = 0;
@@ -1482,9 +1559,10 @@ void MotorControl::takeQueueControl() {
 
 void MotorControl::clearControlState() {
     takeQueueControl();
-    for (uint16_t id = 0; id < kNodeCount; ++id) nodes_[id] = NodeState{};
-    // limits_, trace_, config evidence, and lastMoveFailure remain available.
-    // A real bus fault will be observed again by the next poll.
+    queueObserveId_ = 0;
+    // This resets software ownership only. Confirmed enables, pending stops,
+    // broadcast disable evidence and feedback describe hardware that this
+    // function cannot reset; clearing them could falsely open safeForOta().
 }
 
 const char* MotorControl::stateString(uint8_t id) const {

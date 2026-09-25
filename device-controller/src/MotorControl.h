@@ -290,6 +290,9 @@ private:
 
         bool stopRequested = false;
         uint32_t stopRequestedMs = 0;
+        // A broadcast F3 disable has no per-node ACK. Keep the node blocked
+        // until later 3A disabled flags and still-later stationary feedback arrive.
+        bool broadcastDisablePending = false;
 
         const char* lastAck = "none";
         uint8_t queueAckFunction = 0, queueAckStatus = 0;
