@@ -511,7 +511,9 @@ export function DeviceApp() {
     const announce = (text) => { if (resetGenerationRef.current === generation) setNotice(text); };
     try {
       const result = await request(path,data);
-      if (path === '/api/enable-all') { announce(`全部${Number(data.enabled) ? '使能' : '失能'}广播已发送；电机是否实际${Number(data.enabled) ? '使能' : '失能'}仍待逐台反馈确认`); return {ok:true}; }
+      if (path === '/api/enable-all') { announce(Number(data.enabled)
+        ? '全部使能广播已发送；逐台反馈仍待核对。此广播不会清除故障，故障恢复请在停止确认后逐轴显式使能。'
+        : '全部失能广播已发送；电机是否实际失能仍待逐台反馈确认'); return {ok:true}; }
       // The trial window is whatever the board is configured with — never a
       // hardcoded number in the page.
       const queued = result?.message === 'queued_experiment' || result?.message === 'queued_auto_stop_5s';
@@ -738,7 +740,9 @@ export function DeviceApp() {
   const prediction=planManualMove(manual,manualLimits);
   const moveEncoded=prediction.ok ? encodeCommand({item:getCommandItem('position'),variantKey:'limit',values:prediction.plan,address:address || 1}) : {bytes:[],labels:[]};
   const moveFrames=buildFrames(moveEncoded.bytes || []);
-  const manualGate=!address ? check.error : !connected ? '等待设备连接' : !current.canReady ? 'CAN 控制器不可用' : queueBusy ? (queueRunning ? '板端队列正在运行：常规试动已锁定，请先「取消队列」或使用「全部停止」' : '队列提交结果未知：请先「取消队列」核对状态，再试动') : busy ? '等待请求返回' : !limitsReady ? '未读取到板端限制（/api/limits）：常规试动已禁用' : !prediction.ok ? Object.values(prediction.errors)[0] : !current.enabled ? '请先发送使能，并等待确认' : !current.online ? '等待新鲜电机反馈' : current.fault && current.fault !== 'none' ? '故障未清除，请停止后重新使能' : current.activeId || current.state === 'moving' || current.state === 'homing' || current.state === 'experiment_running' || current.state === 'stop_requested' ? '电机忙，请等待停止' : null;
+  const manualFault=current.fault && current.fault !== 'none' ? current.fault : null;
+  const manualStopPending=current.state === 'stop_requested' || current.control?.blockers?.some(entry=>entry.id === address && entry.reason === 'stop_pending');
+  const manualGate=!address ? check.error : !connected ? '等待设备连接' : !current.canReady ? 'CAN 控制器不可用' : queueBusy ? (queueRunning ? '板端队列正在运行：常规试动已锁定，请先「取消队列」或使用「全部停止」' : '队列提交结果未知：请先「取消队列」核对状态，再试动') : busy ? '等待请求返回' : manualFault ? `故障锁存：${errorLabels[manualFault] || manualFault}。${manualStopPending ? '先等待新的静止位置／速度反馈确认停止，' : '先核对新鲜静止反馈，'}再显式使能，等待默认 Receive 模式的 F3 02 接收应答与新的 3A 已使能反馈` : manualStopPending ? '停止待确认：等待新的静止位置／速度反馈；广播失能还需新的 3A 已失能反馈。确认后按实际使能状态继续' : !limitsReady ? '未读取到板端限制（/api/limits）：常规试动已禁用' : !prediction.ok ? Object.values(prediction.errors)[0] : current.state === 'enable_pending' ? '使能待确认：等待默认 Receive 模式的 F3 02 接收应答与新的 3A 已使能反馈' : !current.enabled ? '请显式发送使能；默认 Receive 模式需 F3 02 接收应答与新的 3A 已使能反馈' : !current.online ? '等待新鲜电机反馈' : current.activeId || current.state === 'moving' || current.state === 'homing' || current.state === 'experiment_running' ? '电机忙，请等待停止' : null;
   const pollingPaused = status.autoQueriesEnabled === false;
   async function togglePolling() {
     if (pollingBusy) return;
@@ -780,7 +784,7 @@ export function DeviceApp() {
       <div className="device-toolbar__actions" role="group" aria-label="全局控制">
         <span className="device-toolbar__actions-label">全局控制</span>
         <button type="button" className="button button--outline" disabled={resetPending} title="取消编排及串口控制占用并请求停止；保留板端已确认使能、待停止与故障证据。不改配置、不重启。停止帧发出也不证明电机已停或失能。" onClick={resetControlState}>{resetPending ? '正在清理…' : '清理软件占用'}</button>
-        <button type="button" className="button button--outline" disabled={!connected || busy || resetPending || queueBusy} title="广播使能总线上所有电机；不自动开始运动" onClick={()=>submit('/api/enable-all',{enabled:1})}>全部使能</button>
+        <button type="button" className="button button--outline" disabled={!connected || busy || resetPending || queueBusy} title="广播使能总线上所有电机；不自动开始运动，也不会清除故障。故障恢复请逐轴显式使能并等待确认" onClick={()=>submit('/api/enable-all',{enabled:1})}>全部使能</button>
         <button type="button" className="button button--danger" title="取消队列并广播失能；帧已发送不代表每台电机已失能，仍需核对反馈" onClick={()=>submit('/api/enable-all',{enabled:0},{stop:true})}>全部失能</button>
         <button type="button" className="button button--danger device-toolbar__stop" onClick={()=>submit('/api/stop-all',{}, {stop:true})}>全部停止</button>
       </div>
