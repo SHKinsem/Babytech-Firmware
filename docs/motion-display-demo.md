@@ -4,11 +4,7 @@
 
 ## 构建与接线
 
-默认 `pio run -d device-controller` 仍构建 BRAIN/v2。需要演示时，在 `device-controller/platformio.ini` 的 `build_flags` 增加 `-DMOTION_UART_PEER=2` 后构建同一个 `motion` environment。也可使用临时环境变量（须保留既有编译参数）：
-
-```sh
-PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DMOTION_UART_PEER=2' pio run -d device-controller
-```
+默认 `pio run -d device-controller` 构建 DISPLAY/v3；`device-controller/platformio.ini` 的 `build_flags` 已包含 `-DMOTION_UART_PEER=2`。需要恢复 BRAIN/v2 时，显式改用 `-DMOTION_UART_PEER=1` 并重新编译烧录同一个 `motion` environment。
 
 启动日志 `peer=display-v3` 表示显示分支；`peer=brain-v2` 表示原协议。非法宏值不能编译。DISPLAY 分支不消费 Brain 协议或向屏幕发送 Brain 帧。
 
@@ -21,9 +17,9 @@ Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，�
 1. 连接 Motion 热点，进入网页“屏幕流程”。BRAIN 构建会明确显示功能不可用。
 2. 内置 `device-controller/data/demo_flow.json` 保存台架配置；上电只校验并载入，不自动运动。网页 Load 与编辑只改变本机草稿。配置可解析不代表机构已验收或已经 Ready。
 3. Apply 校验后整份替换 RAM 配置，不运动；失败保留旧配置。配置替换撤销旧软件参考。Export 导出编辑器中的配置，可保存到上述工程路径后重新编译烧录。没有文件系统上传、永久保存按钮或自动恢复中断流程。
-4. 在 Apply 可接受配置后，确认机构可运动、电机反馈新鲜且静止，点击网页“复位 / 初始化”，或配套新版显示板圆环右侧的 `Initialize`。两者共用 Motion 初始化入口；屏幕找零中仍显示 NotReady，不增加 initializing 状态。初始化成功才显示 Ready；若缺反馈、驱动拒绝、配置不匹配，不能进入 Ready。
+4. 在 Apply 可接受配置后，由现场确认机构安全，点击网页“复位 / 初始化”，或配套新版显示板圆环右侧的 `Initialize`。两者共用 Motion 初始化入口；屏幕找零中仍显示 NotReady，不增加 initializing 状态。入口只要求配置有效、执行器空闲且 CAN 可用，不以五轴位置/速度轮询完整为前提；队列的 `await`、已知故障及脚本超时仍可使本次初始化失败。
 5. 先逐个调试业务阶段。单阶段结束停在 NotReady，不自动执行其他阶段；需回零时运行包含回程动作的混合阶段，再点复位重新检查。软件参考仍有效时复位不会重新碰撞找零。
-6. Ready 时用屏幕 Start 或网页“完整流程运行”：开盖 → 加水 → 加粉 → 关盖 → 混合（脚本内升降回软件零点）→ Complete 保持 3 秒 → Ready。没有额外回起始位置阶段；展示计时不发送运动指令。下次 Start 前操作者自行换瓶。
+6. Ready 时用屏幕 Start 或网页“完整流程运行”：开盖 → 加水 → 加粉 → 关盖 → 混合（脚本内按相对位移回程）→ Complete 保持 3 秒 → Ready。流程层不再额外核验五轴实时位置/速度或混合后的零位；队列 `await` 与阶段超时仍生效。没有额外回起始位置阶段；展示计时不发送运动指令。下次 Start 前操作者自行换瓶。
 7. 任何阶段可用顶部“全部停止”。取消剩余脚本并发送广播回零中断/停止；新鲜静止反馈才证明停止，超过 3 秒仍未确认则 Error。Error 由显式复位解除，参考失效时重新初始化，不续跑旧动作。
 
 当前内置配置在关盖阶段使用 `sync begin trigger` 同步组；轴 1 的 68.2 mm 回程仅为位移账面平衡，两者均尚未完成这套演示流程的实机验收。
@@ -61,13 +57,13 @@ zero ID RPM ACCEL DECEL CURRENT
 
 ## 参考、停止与故障
 
-初始化结束后，Motion 对声明轴逐个设置 X 固件手册 p77 的易失掉电标志（`50 01`），读回新鲜 `3A.bit7=1` 才完成初始化。之后标志变回 0 视为驱动重启，撤销软件参考并停止。实际 X28S/X42S 必须验证支持该标志；不支持时初始化不能通过。
+初始化脚本的 `await` 完成后，Motion 只对 `zero_axes` 设置 X 固件手册 p77 的易失掉电标志（`50 01`），读回 `3A.bit7=1` 才进入 Ready。之后标志变回 0 视为找零轴驱动重启，撤销软件参考并停止。实际 X28S/X42S 必须验证支持该标志；不支持时初始化不能通过。
 
-上电、配置替换、手动运动/原点相关操作与坐标换算修改撤销参考；故障、运行中反馈丢失、已观察到的驱动重启同样撤销。正常循环、屏幕重启、Wi-Fi 断线和位置可信的已确认 Stop 不撤销。位置与速度采样不能证明两次采样之间的全部机械行为；仍需实机验收方向、滑移与机械干涉。
+上电、配置替换、手动运动/原点相关操作与坐标换算修改撤销参考；已知故障、队列执行失败和已观察到的找零轴驱动重启仍会中止流程，其中已知故障和驱动重启会撤销参考。普通状态轮询偶发缺样不撤销 Ready；这也意味着 Ready 不证明机构仍在机械零位。屏幕重启和 Wi-Fi 断线不改变参考；停止确认仍要求新鲜静止反馈。实机仍需验收方向、滑移与机械干涉。
 
 自动流程、初始化、停止确认和 Complete 展示期间独占执行器，手动插入动作及配置写入会收到 `demo_busy`。演示的必要反馈查询不受普通“暂停自动查询”开关影响。日志记录 `demo.state`；详细位置、队列错误与 CAN 帧仍在原诊断页面。
 
-五阶段超时映射对应的屏幕超时错误；CAN/驱动拒绝/缺反馈使用 CanFault，未分类失败和首次初始化超时使用 Unknown。非 Error 阶段 error=None；不会产生没有真实依据的缺水、温控或瓶位错误。
+五阶段超时映射对应的屏幕超时错误；明确的 CAN/驱动故障使用 CanFault，队列 `await` 失败及首次初始化超时仍会进入 Error。普通轮询缺样本身不再直接报错。非 Error 阶段 error=None；不会产生没有真实依据的缺水、温控或瓶位错误。
 
 ## HTTP API
 

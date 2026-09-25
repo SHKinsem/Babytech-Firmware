@@ -98,6 +98,7 @@ int main() {
     assert(logical[1] == 1 && logical[11] == 123); // negative recorded zero
     assert(executor.stop()); assert(!executor.evidence(1).fresh);
     feedback(motor,21,500); assert(executor.evidence(1).fresh);
+    c.axes.push_back({3,10,0,false}); executor.configure(c);
     script.commands={"home 1 2 await"};
     assert(executor.start(script,true,zeros,30)); setMillis(31); queue.poll(31);
     injectRx(makeAck(1,0x9A,2)); setMillis(40); motor.poll(); queue.poll(40);
@@ -115,6 +116,8 @@ int main() {
     feedback(motor,1450,0); setMillis(1460); executor.poll(1460);
     setMillis(1480); executor.poll(1480);
     assert(executor.execution()==DemoExecution::Done);
+    for (const auto& frame : capturedTX) if (frame.data[0] == 0x50)
+        assert(uint8_t(frame.identifier >> 8) == 1); // non-zero axes do not gate initialization
     const uint8_t rebootFlags[]={0x3A,3,0x6B};
     setMillis(1490); injectRx(makeFrame(1,rebootFlags,3)); motor.poll();
     assert(!executor.healthy()); // actual driver power-cycle marker disappeared
@@ -126,7 +129,7 @@ int main() {
     assert(executor.reset()); feedback(motor,1600,0);
     injectRx(makeAck(1,0xF3,0xE2)); setMillis(1601); motor.poll();
     assert(!executor.healthy());
-    c.axes.push_back({3,10,0,false}); executor.configure(c);
+    executor.configure(c);
     setMillis(1610); injectRx(makePosition(3,700)); injectRx(makeVelocity(3,0));
     const uint8_t flags3[]={0x3A,0x83,0x6B}; injectRx(makeFrame(3,flags3,3)); motor.poll();
     assert(executor.evidence(3).fresh && executor.evidence(3).position==700);

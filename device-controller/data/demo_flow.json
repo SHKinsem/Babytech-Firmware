@@ -8,17 +8,38 @@
     "temperature_c": 45
   },
   "axes": [
-    {"motor_id": 1, "rotation_distance_mm": 2},
-    {"motor_id": 2, "rotation_distance_mm": 0},
-    {"motor_id": 3, "rotation_distance_mm": 40},
-    {"motor_id": 4, "rotation_distance_mm": 0},
-    {"motor_id": 5, "rotation_distance_mm": 0}
+    {
+      "motor_id": 1,
+      "rotation_distance_mm": 2
+    },
+    {
+      "motor_id": 2,
+      "rotation_distance_mm": 0
+    },
+    {
+      "motor_id": 3,
+      "rotation_distance_mm": 40
+    },
+    {
+      "motor_id": 4,
+      "rotation_distance_mm": 0
+    },
+    {
+      "motor_id": 5,
+      "rotation_distance_mm": 0
+    }
   ],
   "initialization": {
     "timeout_ms": 120000,
     "zero_axes": [
-      {"motor_id": 1, "zero_tolerance_deg": 1.0},
-      {"motor_id": 3, "zero_tolerance_deg": 1.0}
+      {
+        "motor_id": 1,
+        "zero_tolerance_deg": 1
+      },
+      {
+        "motor_id": 3,
+        "zero_tolerance_deg": 1
+      }
     ],
     "commands": [
       "enable 1",
@@ -55,8 +76,9 @@
       "timeout_ms": 90000,
       "commands": [
         "enable 5",
-        "move 5 500 rev 1000 1000 1000 800 await",
-        "disable 5"
+        "move 5 50 rev 1000 5000 5000 800 await",
+        "disable 5 ",
+        "wait 500"
       ]
     },
     {
@@ -64,8 +86,9 @@
       "timeout_ms": 180000,
       "commands": [
         "enable 4",
-        "move 4 50 rev await",
-        "disable 4"
+        "move 4 10 rev 100 5000 5000 800 await",
+        "disable 4 ",
+        "wait 500"
       ]
     },
     {
@@ -93,6 +116,8 @@
       "commands": [
         "move 1 68.2 mm 300 300 300 200 await",
         "move 3 -76.7 mm 60 60 60 650 await",
+        "move 2 2000 deg 400 1500 1500 500 await",
+        "move 2 -2000 deg 400 1500 1500 500 await",
         "disable 1",
         "disable 2",
         "disable 3"

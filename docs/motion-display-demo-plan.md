@@ -6,6 +6,8 @@ Milestone：V1 流程演示。更新日期：2026-09-23。
 
 状态：软件接入已实现，机械脚本和双板实机验收待完成。操作、实际 JSON/API 与验证边界见 [演示操作说明](motion-display-demo.md)。本文保留已确认设计及验收目标，不代表真实出料、温控或机械安全已验收。
 
+台架试验暂按最小门禁运行：Initialize 不以五轴实时位置/速度反馈为前提；各阶段依赖队列 `await`、已知故障和超时，Ready 不持续复核五轴零位。下文较严格的反馈与零位条款保留为未完成的验收目标，当前行为以操作说明为准。
+
 ## 1. 范围与已有基础
 
 目标是用工具已验证的电机能力尽快完成流程演示，不重构完整产品 Product，不转换 actuatorcfg，不统一两个仓库的底层驱动。
@@ -33,11 +35,11 @@ Motion ESP32 ---- non-blocking flow ---- existing command queue ---- CAN motors
 #define MOTION_UART_PEER_BRAIN 1
 #define MOTION_UART_PEER_DISPLAY 2
 #ifndef MOTION_UART_PEER
-#define MOTION_UART_PEER MOTION_UART_PEER_BRAIN
+#define MOTION_UART_PEER MOTION_UART_PEER_DISPLAY
 #endif
 ```
 
-- 默认 BRAIN 保留现有行为；演示编译增加 `-DMOTION_UART_PEER=MOTION_UART_PEER_DISPLAY`，非法值编译报错。
+- 默认 DISPLAY，`platformio.ini` 的 `build_flags` 包含 `-DMOTION_UART_PEER=2`；BRAIN 需显式以 `-DMOTION_UART_PEER=1` 编译，非法值编译报错。
 - 两个分支仅启用各自 UART 协议入口；DISPLAY 分支接入演示流程，不让原 Brain 解析器同时消费同一串口。
 - 沿用主控 GPIO43 TX / GPIO44 RX，115200、8N1、3.3 V TTL。TX/RX 交叉，共地；各自 USB 供电时不互接 5 V。确认实际屏幕板引脚，不仅依赖排针丝印。
 - 调试日志走 USB Serial，不混入板间二进制 UART。切换对端需重新编译烧录 Motion，不增加另一套 environment。

@@ -12,7 +12,6 @@ using babytech::display::DisplayError;
 
 constexpr size_t kDemoMaxAxes = 5;
 constexpr size_t kDemoMaxJsonBytes = 16384;
-constexpr uint32_t kDemoFeedbackMs = 1000;
 
 struct DemoAxis {
     uint8_t id = 0;

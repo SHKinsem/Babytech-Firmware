@@ -22,6 +22,7 @@ public:
         motor_.demoProbe(config_->axes[probe_ % count].id, (probe_ / count) % 4);
         probe_ = (probe_ + 1) % (count * 4);
         if (marking_ && queue_.state() == QueueState::Done) {
+            while (markIndex_ < count && !config_->axes[markIndex_].zero) ++markIndex_;
             if (markIndex_ >= count) { marking_ = false; return; }
             const auto id = config_->axes[markIndex_].id;
             if (!markSent_) {
