@@ -1,5 +1,7 @@
 # 电机协议工作台交付说明
 
+> 历史切片：文中的 brain/脑板/上板指主控板 `main-controller`，motion/运动板/下板指设备板 `device-controller`。当前设备板默认连接外部显示板；与主控板联调须显式选择 `DEVICE_UART_PEER=1`。现行术语与兼容标识见[控制板命名](controller-naming.md)。下文保留当时的功能范围。
+
 本版把 Claude Code 开发的桌面工作台接入 Motion 固件，整合原有 Wi-Fi 配网与电机控制。`device-controller/data/index.html` 是构建生成的单文件页面，CSS、JavaScript 均已内联，烧录后不依赖电脑网页服务、CDN 或单独文件系统分区。
 
 目标硬件：ESP32-S3 N16R8，16 MB Flash、8 MB OPI PSRAM。CAN TX GPIO4、RX GPIO5，500 kbit/s；需要外接 CAN 收发器。UART brain 链路维持 GPIO43/44、115200。

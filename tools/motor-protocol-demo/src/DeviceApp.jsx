@@ -187,7 +187,7 @@ function LabStatusSummary({ connected, status, onOpen, triggerRef }) {
   </div>;
 }
 
-const DEVICE_TABS = [['manual','常规试动'],['queue','编排队列'],['demo','屏幕流程'],['scale','称重传感器'],['lab','指令实验室'],['limits','调试限制'],['log','调试日志'],['wifi','Wi-Fi 设置']];
+const DEVICE_TABS = [['manual','常规试动'],['queue','编排队列'],['demo','显示板流程'],['scale','称重传感器'],['lab','指令实验室'],['limits','调试限制'],['log','调试日志'],['wifi','Wi-Fi 设置']];
 
 export function DeviceApp() {
   useEffect(() => {document.body.classList.add('device-body');return () => document.body.classList.remove('device-body');},[]);

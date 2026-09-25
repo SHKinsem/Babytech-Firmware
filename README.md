@@ -24,34 +24,36 @@ git switch -c codex/your-task
 
 如果本地 main 已分叉，先保留独有工作再整合，不要强制覆盖。优先复验昨晚相同的 sync 程序与参数；修改反馈轮询、目标确认、查询预算或停止判定时，记录提交 SHA、构建配置、镜像哈希与实测结果。其他功能的整合不得静默改变这些行为。
 
-两块 ESP32-S3 N16R8 的最小固件仓库。每块板是独立、标准的 PlatformIO Arduino 工程。
+两块 ESP32-S3 N16R8 的最小固件仓库。项目内统一称 `main-controller/` 为**主控板**、`device-controller/` 为**设备板**；产品仓库 `Embeded_System/DisplayController` 中的板卡单独称**显示板**。每块板是独立、标准的 PlatformIO Arduino 工程。旧名称的兼容范围见[控制板命名](docs/controller-naming.md)。
 
 ```text
 浏览器 / 后续 App 与云端
           │ Wi-Fi
- main-controller：显示与网络 MCU
-          │ 3.3 V UART
- device-controller：传感器与电机 MCU
+ main-controller：主控板，交互与网络 MCU
+          │ 3.3 V UART v2（设备板显式选择）
+ device-controller：设备板，传感器与电机 MCU
 ```
+
+设备板的 UART 接口当前默认按外部**显示板**（DisplayController，协议 v3）配置；主控板协议 v2 与显示板协议 v3 是两个互斥的编译选择，不能在同一接口混用。
 
 ## 当前可运行的内容
 
-当前提供两条调试路径：主控板的 UART 状态页，以及设备控制板独立热点的 CAN 电机调试页。
+当前提供两条调试路径：主控板的 UART 状态页，以及设备板独立热点的 CAN 电机调试页。使用主控板状态页联调时，设备板须编译为主控板 UART 协议。
 
 - `main-controller/`：`Babytech-Debug` 热点与中文状态页，使用 v2 四指令查询状态、修改 RAM 参数、显式使能、执行单电机阶段和停止。
-- `device-controller/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。下板默认从 GPIO1/2 采样 HX711，网页可修改并持久化 DOUT/SCK，同时提供称重状态、去皮和标定 API。
-- `shared/BoardProtocol/`：板间 UART v2 四指令协议、客户端与执行入口。完成状态来自真实电机反馈；机构尚未接入，称重数据暂未加入板间载荷。
+- `device-controller/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。设备板默认从 GPIO1/2 采样 HX711，网页可修改并持久化 DOUT/SCK，同时提供称重状态、去皮和标定 API。
+- `shared/BoardProtocol/`：主控板与设备板之间的 UART v2 四指令协议、客户端与执行入口。设备板显式选择该协议时，完成状态来自真实电机反馈；机构尚未接入，称重数据暂未加入板间载荷。
 - `tools/test_protocol.py`、`tools/test_motion.py`：主机协议、参数与反馈解析检查。
 
-调试热点暂放下板，便于独立台架调试；未来网络和显示由 brain 承担。当前只接入 HX711 称重，尚未接入其他传感器、LCD/触摸或云端；同步组与 DISPLAY 演示已有软件实现，完整机械流程仍待实机验收。上电不发送使能或运动指令。
+调试热点暂放设备板，便于独立台架调试；主控板承担项目内的网络与交互，外部显示板是独立的产品端。当前只接入 HX711 称重，尚未接入其他传感器、主控板 LCD/触摸或云端；同步组与显示板演示已有软件实现，完整机械流程仍待实机验收。上电不发送使能或运动指令。
 
-详细操作和接口见 [下板网页调试](docs/motion-debug.md)。
+详细操作和接口见 [设备板网页调试](docs/motion-debug.md)。
 
 直发队列、执行诊断、全局查询预算及同步/螺旋动作见 [电机编排队列](docs/motor-queue.md)。软件验证和待实测项目见 [同步开发与验收记录](docs/motion-sync-development.md)；已完成部分低速、小幅及多圈同步实测，完整负载与机械验收仍待完成。
 
 新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
 
-默认 DISPLAY 构建已接入产品显示板 UART v3、非阻塞流程、阶段调试和内置 JSON 配置；上电不自动运动。见 [演示操作说明](docs/motion-display-demo.md) 与 [开发验收计划](docs/motion-display-demo-plan.md)。Brain/Motion v2 需显式以 `-DMOTION_UART_PEER=1` 编译；机械与双板实机验收尚未完成。
+设备板默认构建选择**显示板 UART v3**，已接入非阻塞流程、阶段调试和内置 JSON 配置；上电不自动运动。见 [演示操作说明](docs/motion-display-demo.md) 与 [开发验收计划](docs/motion-display-demo-plan.md)。主控板与设备板联调 UART v2 时，须将 `device-controller/platformio.ini` 的对端选择改为 `-DDEVICE_UART_PEER=1`，重新编译并烧录设备板；默认是 `-DDEVICE_UART_PEER=2`。机械与双板实机验收尚未完成。
 
 ## 目录
 
@@ -96,7 +98,7 @@ python tools/test_raw_can.py
 python tools/test_demo.py
 ```
 
-主机测试需要 `g++` 在 PATH 中，也可通过 `CXX` 指定兼容编译器。目录已改名，但 PlatformIO 环境仍为 `brain` / `motion`，OTA board ID 和 WSL 导出目录也保留这些兼容标识。
+主机测试需要 `g++` 在 PATH 中，也可通过 `CXX` 指定兼容编译器。PlatformIO 环境、OTA board ID 和 WSL 导出目录仍保留 `brain` / `motion` 兼容标识；它们不再用作面向人的板名。
 
 修改工作台后，先重建内嵌页面，再编译设备固件：
 
@@ -109,13 +111,13 @@ cd ../..
 pio run -d device-controller
 ```
 
-GitHub Actions 执行前端与主机回归，并编译主控、设备 BRAIN 和 DISPLAY 配置，见 [CI 配置](.github/workflows/firmware-checks.yml)。浏览器 mock 测试与编译通过不代表实机验收完成。
+GitHub Actions 执行前端与主机回归，并编译主控板、设备板的主控板协议和显示板协议配置，见 [CI 配置](.github/workflows/firmware-checks.yml)。浏览器 mock 测试与编译通过不代表实机验收完成。
 
 ## 接线
 
 两块板的实际 GPIO 定义在各自 `include/board_config.h` 中：
 
-| brain GPIO | motion GPIO |
+| 主控板 GPIO | 设备板 GPIO |
 | --- | --- |
 | 43 / TX | 44 / RX |
 | 44 / RX | 43 / TX |
@@ -129,37 +131,37 @@ UART 为 115200、8N1、3.3 V TTL。按实际 GPIO 连接；旧屏幕排针的 T
 确认端口对应的板子后分别烧录，例如：
 
 ```text
-pio run -d device-controller -t upload --upload-port COM_MOTION
-pio run -d main-controller -t upload --upload-port COM_BRAIN
+pio run -d device-controller -t upload --upload-port COM_DEVICE
+pio run -d main-controller -t upload --upload-port COM_MAIN
 ```
 
-`COM_MOTION` / `COM_BRAIN` 是占位符，替换为实际端口。
+`COM_DEVICE` / `COM_MAIN` 是占位符，替换为实际端口。以下主控板状态页联调步骤要求设备板已按上文显式选择 UART v2 并烧录；默认 UART v3 固件用于连接显示板。
 
 1. 连接 Wi-Fi `Babytech-Debug`，开发热点密码为 `babytech-demo`。
 2. 浏览器打开 `http://192.168.4.1/`。
-3. 点击「查询小脑状态」，应看到小脑在线、运行时间和响应计数更新。
-4. 拔掉小脑 USB，约 1.5 秒后页面应显示小脑未连接，运行时间变为 `—`。
+3. 点击「查询设备板状态」，应看到设备板在线、运行时间和响应计数更新。
+4. 拔掉设备板 USB，约 1.5 秒后页面应显示设备板未连接，运行时间变为 `—`。
 5. 恢复供电，应自动恢复在线，运行时间从新启动开始计数。
 
-上面是 brain 状态页。调试电机时改连 `Babytech-Motion`（同一开发密码），访问 `http://192.168.4.1/`，输入驱动器 CAN ID，读取反馈后显式使能并试动。HTTP 202 只代表板卡已提交指令，不代表电机已执行。
+上面是主控板状态页。调试电机时改连设备板热点 `Babytech-Motion`（同一开发密码），访问 `http://192.168.4.1/`，输入驱动器 CAN ID，读取反馈后显式使能并试动。HTTP 202 只代表设备板已提交指令，不代表电机已执行。
 
 ## 后续工作优先级
 
 1. 优先复验主线 sync，保住昨晚验证的触发后目标确认、查询预算、目标窗口和真实完成判定，再扩展负载与机构流程。
 2. 实机验收已实现的 UART「改 RAM 参数 → 单电机阶段 → 返回结果 → 停止」闭环，见 [v2 指令表](docs/protocol-v2.md)。
-3. 将下板称重状态加入板间协议；下板调试页已接入称重、漂移诊断、去皮和标定。
-4. 迁入已验证的屏幕/触摸驱动，在大脑上显示同一份小脑状态。
+3. 将设备板称重状态加入主控板与设备板协议；设备板调试页已接入称重、漂移诊断、去皮和标定。
+4. 迁入已验证的屏幕/触摸驱动，在主控板上显示同一份设备板状态。
 5. 根据真实调试反馈补齐开盖、关盖、混合与参数保存。
 
 App、Cloud、多家庭权限、复杂恢复和全量测试平台不进入本阶段。
-未来大脑负责页面和网络，小脑独占机械状态机与驱动；网络回调不直接操作电机。
+未来主控板负责项目内页面和网络，设备板独占机械状态机与驱动；网络回调不直接操作电机。
 
 ## 来源与迁移边界
 
 - 原项目：`hellowenshenghui/Babytech_Formula_Device`，参考本地 `V1-device` 的 `2ffcde2`。
 - 网页交互参考：`SHKinsem/Project-Tenny`。
 - CAN 传输库和 HX711 称重核心分别从旧工程 BabytechActuatorHal、BabytechSensorHal 按需迁入 `device-controller/lib/`；新工程不依赖旧仓库路径，旧仓库未修改。
-- 新 UART v2 四指令协议要求上下板一起更新；不能与旧 v1 或 DisplayController/Product 协议混用。
+- 主控板与设备板的 UART v2 四指令协议要求两板一起更新；不能与旧 v1 或显示板协议 v3 混用。
 
 Wi-Fi OTA 的设计与操作见 [实施计划](docs/wifi-ota-plan.md) 和 [使用说明](docs/wifi-ota-implementation.md)。
 

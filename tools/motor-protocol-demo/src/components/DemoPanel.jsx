@@ -89,15 +89,15 @@ export function DemoPanel() {
     const a = document.createElement('a'); a.href=url; a.download='demo_flow.json'; a.click();
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
-  return <main className="demo-workbench" aria-label="屏幕流程演示">
+  return <main className="demo-workbench" aria-label="显示板流程演示">
     <section className="panel demo-status">
-      <h2 className="panel__title">屏幕流程演示</h2>
+      <h2 className="panel__title">显示板流程演示</h2>
       <p>仅供演示，产物不得用于喂养。水量与温度为配置值。</p>
-      <p role="status">{!online ? '状态未连接' : !status?.available ? '当前为 BRAIN 固件，请编译 DISPLAY 分支。' : status.initializing ? '正在初始化找零' : stageNames[status.stage] || status.stage}</p>
+      <p role="status">{!online ? '设备板状态未连接' : !status?.available ? '当前固件未启用显示板串口协议。' : status.initializing ? '正在初始化找零' : stageNames[status.stage] || status.stage}</p>
       <dl><dt>软件参考</dt><dd>{online && status?.referenceValid ? '有效' : '无有效确认'}</dd><dt>流程配置</dt><dd>{status?.configured ? '已配置' : '需要填写脚本和轴配置'}</dd><dt>板端原因</dt><dd>{status?.reason || '—'}</dd><dt>Error</dt><dd>{status?.error || '—'}</dd></dl>
       <button className="button button--outline" disabled={locked || dirty || !status?.configured} onClick={()=>post('/api/demo/action',{action:'initialize'})}>复位 / 初始化</button>
       <button className="button button--primary" disabled={locked || dirty || !status?.startEnabled} onClick={()=>post('/api/demo/action',{action:'start'})}>完整流程运行</button>
-      <p>上电不运动。首次点击初始化才找零；后续从屏幕 Start 启动。停止请使用顶部“全部停止”。</p>
+      <p>上电不运动。首次点击初始化才找零；后续从显示板 Start 启动。停止请使用顶部“全部停止”。</p>
       <p>开盖 → 加水 → 加粉 → 关盖 → 混合（先回软件零点）→ Complete 3 秒 → Ready</p>
       {message && <p className="device-notice" role="alert">{message}</p>}
     </section>

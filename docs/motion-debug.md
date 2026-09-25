@@ -1,5 +1,7 @@
 # Babytech 运动控制 —— AP + 单电机调试页（MVP）
 
+> 历史切片：文中的 brain/脑板/上板指主控板 `main-controller`，motion/运动板/下板指设备板 `device-controller`。当前设备板默认连接外部显示板；与主控板联调须显式选择 `DEVICE_UART_PEER=1`。现行术语与兼容标识见[控制板命名](controller-naming.md)。下文保留当时的功能范围。
+
 > 本文保留基础 API 与控制器行为说明。最新工作台、Wi-Fi 集成、扩展命令范围和交付流程见 [工作台交付说明](motion-workbench-release.md)；下文旧页面布局说明已被新版替代。
 
 DISPLAY 编译分支的“屏幕流程”、JSON 与 `/api/demo*` 接口见 [演示操作说明](motion-display-demo.md)。其运行期间现有 Stop 保持可用，手动动作和配置修改受流程所有权约束。

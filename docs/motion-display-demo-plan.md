@@ -1,10 +1,10 @@
-# Motion / Display 流程演示开发计划
+# 设备板与显示板流程演示开发计划
 
-描述对象：工具 Motion 主控、完整产品 DisplayController 屏幕板、非阻塞流程状态机和网页调试工具的联动方案。
+描述对象：设备板（`device-controller/`）、产品显示板（`Embeded_System/DisplayController`）、非阻塞流程状态机和网页调试工具的联动方案。显示板是独立对端，不是主控板（`main-controller/`）。
 
 Milestone：V1 流程演示。更新日期：2026-09-23。
 
-状态：软件接入已实现，机械脚本和双板实机验收待完成。操作、实际 JSON/API 与验证边界见 [演示操作说明](motion-display-demo.md)。本文保留已确认设计及验收目标，不代表真实出料、温控或机械安全已验收。
+状态：软件接入已实现，机械脚本和双板实机验收待完成。操作、实际 JSON/API 与验证边界见 [演示操作说明](motion-display-demo.md)。本文保留 2026-09-23 的设计及验收目标，不代表真实出料、温控或机械安全已验收。下文“显示板只有 Start、初始化只在网页”等旧提案已被后续 `Initialize` 意图实现替代；当前行为以操作说明为准。
 
 台架试验暂按最小门禁运行：Initialize 不以五轴实时位置/速度反馈为前提；各阶段依赖队列 `await`、已知故障和超时，Ready 不持续复核五轴零位。下文较严格的反馈与零位条款保留为未完成的验收目标，当前行为以操作说明为准。
 
@@ -15,34 +15,34 @@ Milestone：V1 流程演示。更新日期：2026-09-23。
 ```text
 Web workbench ---- stage scripts / initialize / run / existing Stop
        |
-Motion ESP32 ---- non-blocking flow ---- existing command queue ---- CAN motors
+device-controller ESP32 ---- non-blocking flow ---- existing command queue ---- CAN motors
        |
-       +-------- display UART v3 -------- DisplayController ESP32
+       +-------- display UART v3 -------- display-controller ESP32
                                            stages / timeout / Start
 ```
 
-- Motion 保留现有热点、网页、电机指令解析和执行能力；显示板继续烧录完整项目的 display 构建，不需要 Brain 板。
-- 工具当前已有 [Brain/Motion UART v2](protocol-v2.md)、[电机队列](motor-queue.md)、[调试网页](motion-debug.md)。v2 不是 DisplayController 协议，不能直接混用，也不能因 v2 已实现就认为显示链路已接通。
+- 设备板保留现有热点、网页、电机指令解析和执行能力；显示板继续烧录完整产品的 `display` 构建，这条演示链路不需要主控板。
+- 项目当前已有 [主控板与设备板 UART v2](protocol-v2.md)、[电机队列](motor-queue.md)、[设备板调试网页](motion-debug.md)。v2 不是显示板协议，不能直接混用，也不能因 v2 已实现就认为显示链路已接通。
 - 不以完整产品中发现的 CD/FD 差异为前置条件，不主动改变工具电机底层。工具实际执行有问题时再定位。
 - 不接入云端、App、MQTT、喂养记录或新屏幕 UI。不新增通用配方平台。
 - 本文取代完整项目旧演示计划中的“LittleFS 持久保存”方案：调试用 RAM，演示用编译内置 JSON。
 
 ## 2. 编译与板间串口
 
-保持单个 motion environment，通过宏选择 UART 对端：
+设备板保留单个 `[env:motion]` PlatformIO 兼容环境，通过宏选择 UART 对端：
 
 ```cpp
-#define MOTION_UART_PEER_BRAIN 1
-#define MOTION_UART_PEER_DISPLAY 2
-#ifndef MOTION_UART_PEER
-#define MOTION_UART_PEER MOTION_UART_PEER_DISPLAY
+#define DEVICE_UART_PEER_MAIN 1
+#define DEVICE_UART_PEER_DISPLAY 2
+#ifndef DEVICE_UART_PEER
+#define DEVICE_UART_PEER DEVICE_UART_PEER_DISPLAY
 #endif
 ```
 
-- 默认 DISPLAY，`platformio.ini` 的 `build_flags` 包含 `-DMOTION_UART_PEER=2`；BRAIN 需显式以 `-DMOTION_UART_PEER=1` 编译，非法值编译报错。
-- 两个分支仅启用各自 UART 协议入口；DISPLAY 分支接入演示流程，不让原 Brain 解析器同时消费同一串口。
-- 沿用主控 GPIO43 TX / GPIO44 RX，115200、8N1、3.3 V TTL。TX/RX 交叉，共地；各自 USB 供电时不互接 5 V。确认实际屏幕板引脚，不仅依赖排针丝印。
-- 调试日志走 USB Serial，不混入板间二进制 UART。切换对端需重新编译烧录 Motion，不增加另一套 environment。
+- 默认选择显示板协议 v3，`device-controller/platformio.ini` 的 `build_flags` 包含 `-DDEVICE_UART_PEER=2`；与主控板联调 v2 时，把该项改为 `-DDEVICE_UART_PEER=1` 后重新编译烧录设备板。非法值编译报错。旧 `MOTION_UART_PEER` 宏保留兼容，但同时指定新旧宏时取值必须一致。
+- 两种配置仅启用各自 UART 协议入口；显示板协议配置接入演示流程，不让主控板协议解析器同时消费同一串口。
+- 设备板 GPIO43 TX / GPIO44 RX，115200、8N1、3.3 V TTL。TX/RX 交叉，共地；各自 USB 供电时不互接 5 V。确认显示板实际引脚，不仅依赖排针丝印。
+- 调试日志走 USB Serial，不混入板间二进制 UART。切换对端需重新编译烧录设备板，不增加另一套 PlatformIO 环境。
 
 ### 显示协议契约
 
@@ -55,8 +55,8 @@ Motion ESP32 ---- non-blocking flow ---- existing command queue ---- CAN motors
 | State | 阶段变化立即发送；无变化每 1 秒发送完整快照 |
 | Intent | 现有 StartFeeding，屏幕和网页启动共用入口与门禁 |
 | Ack | 回显请求 sequence，accepted 与最多 31 字符 reason；接受不代表完成 |
-| 重试 | 屏幕每 500 ms 重试，最多额外两次；Motion 缓存近期请求与 ACK，重复请求不再次启动 |
-| 离线 | 屏幕 2.5 秒无有效快照显示离线；主控不因屏幕断线自动中止动作 |
+| 重试 | 显示板每 500 ms 重试，最多额外两次；设备板缓存近期请求与 ACK，重复请求不再次启动 |
+| 离线 | 显示板 2.5 秒无有效快照显示离线；设备板不因显示板断线自动中止动作 |
 | 无效帧 | 错版本、CRC、长度及未知 intent 不触发运动 |
 
 只传业务阶段、完成、阶段超时和必要停止/错误终态，不传单条指令、位置或详细电机反馈。详细日志留网页/USB。明确电机故障仍立即停止，不等超时才处理；屏幕使用通用错误。五个冲奶阶段超时映射既有对应错误，首次找零超时使用通用错误，不新增协议枚举。Stop 后不能还显示正在冲奶。
@@ -67,13 +67,13 @@ Motion ESP32 ---- non-blocking flow ---- existing command queue ---- CAN motors
 
 - babyName、formulaBrand、waterMl、temperatureC 可以是演示配置；水量/温度不是实测值。
 - 未接温控时 thermalSimulated=true，保留 sim 提示；cloudConnected=false，接受原屏幕 Cloud offline，不伪造联网。
-- stage、startEnabled 和 error 必须对应实际执行情况。`startEnabled` 不维护第二套隐藏门禁，固定等于 `stage == Ready`；Motion 收到 Start intent 时重新确认当前仍为 Ready。条件提示只传有依据的值，不伪造传感器读数。
+- stage、startEnabled 和 error 必须对应实际执行情况。`startEnabled` 不维护第二套隐藏门禁，固定等于 `stage == Ready`；设备板收到 Start intent 时重新确认当前仍为 Ready。条件提示只传有依据的值，不伪造传感器读数。
 - 加水/加粉初版建议非阻塞等待模拟，具体是否模拟及等待时间待确认。屏幕无专用模拟出料标志，网页须标明演示边界，演示产物不用于喂养。
 
 ### V1 最小状态、条件与错误映射
 
 - `DemoFlowController.stage` 是对外生命周期的唯一状态源；`startEnabled` 只由 `stage == Ready` 派生，`error` 只由 Error 终态及其锁存原因派生。不得再维护平行的 UI 状态、可启动标志或页面专用阶段。
-- DISPLAY 构建直接用 DemoFlowController 和演示 JSON 生成 `DisplaySnapshot`，复用既有协议编码/解码；不原样调用完整产品中依赖云连接门禁的 snapshot 组装逻辑，避免 `cloudConnected=false` 把演示 Start 永久禁用。
+- 设备板的显示板协议配置直接用 DemoFlowController 和演示 JSON 生成 `DisplaySnapshot`，复用既有协议编码/解码；不原样调用完整产品中依赖云连接门禁的 snapshot 组装逻辑，避免 `cloudConnected=false` 把演示 Start 永久禁用。
 - V1 没有真实传感器证据时，`primaryCondition=None`、`footerCondition=None`。控制器离线和协议不匹配继续由 DisplayController 本地判断，不伪造 LowWater、OverTemperature、BottleRemoved 或传感器异常。
 - 非 Error 阶段一律发送 `error=None`。Error 锁存到网页明确执行“复位/初始化”，不因心跳、屏幕重连或超时展示结束自行清除。复位时参考仍可信且轴在零位/静止/反馈新鲜，只重新检查后进入 Ready；参考已失效才重新碰撞找零。
 
@@ -106,23 +106,23 @@ Screen/Web Start (Ready only)
 Stop / fault / timeout -> Cancel remaining stages -> Stop handling -> Latched state
 ```
 
-- 初始化找零是独立按钮，通过堵转/碰撞建立软件零点；只在 Motion 上电后或坐标参考明确失效时执行一次。上电不自动动作，不恢复中断流程。
+- 初始化找零是独立按钮，通过堵转/碰撞建立软件零点；只在设备板上电后或坐标参考明确失效时执行一次。上电不自动动作，不恢复中断流程。
 - 后续每轮不重新碰撞找零，也不增加独立的起始归位阶段。只有首次初始化成功并处于 Ready 才接受 Start。
 - 初始化结束以及混合结束时，在配置容差内且静止才算处于软件零位。缺失/过期反馈不得当作在零位；混合阶段本身负责让升降轴回零后再混合。
 - 当前工具 `move` 为相对实际位置，不可用 `move ... 0` 冒充绝对归零。实施时核对现有绝对定位/位置反馈能力，明确工具原点和软件零点关系；没有现成入口时只补薄适配。不在未验证情况下硬套 home 模式代替软件归位。
 - 已实现的薄适配是演示专用 `zero ID RPM ACCEL DECEL CURRENT`：以初始化完成时记录的驱动坐标为绝对目标，使用既有 CD 编码和 await；不改变普通队列 move 的相对语义。
 - 初始化末尾设置并读回各轴易失掉电标志 `50 01` / `3A.bit7`，标志恢复 0 时撤销参考。此步骤不运动；需实机确认各型号支持该标志。首次找零须有运行到完成状态或明确 9F 完成应答，ACK 加空闲、12/22 未运动均不建立零点。
 - 混合脚本完成、所需轴仍在软件零位、反馈新鲜且静止后才能进入 Complete。没有独立“回到起始位置”动作；Complete 到 Ready 的 3 秒仅用于屏幕展示，不发送电机指令。
-- Motion 或驱动器重启、坐标换算/轴配置变化、改变原点的手动或 raw 操作、检测到位置跳变或其他坐标不可信情况会清除参考。正常完成、屏幕重启、网络断开以及位置仍可信的已确认 Stop 不清除参考。
+- 设备板或驱动器重启、坐标换算/轴配置变化、改变原点的手动或 raw 操作、检测到位置跳变或其他坐标不可信情况会清除参考。正常完成、显示板重启、网络断开以及位置仍可信的已确认 Stop 不清除参考。
 - Stop、故障或阶段超时先退出运行状态并锁存结果。复位后参考仍有效、所需轴在零位且反馈新鲜静止时可恢复 Ready；参考不可信才要求重新初始化找零，不自动续跑中断流程。
 - Complete 固定展示 3 秒；期间故障/Stop 仍优先，结束时再次确认参考有效、所需轴在零位且反馈新鲜静止，满足才回到 Ready，全程不发送电机指令。无可靠瓶位检测时，Ready 只表示控制器可以接受下一次 Start，不表示已经检测到换瓶；操作者须在下一次启动前自行换瓶。
 - 原开盖脚本含 home/disable，拆分初始化时人工确认哪些动作迁移，不自动删改；承重轴失能风险须实机确认。
 
 ### Ready 与 Start
 
-- 对外只使用 NotReady、Ready、五个业务阶段、Complete 和 Error；Idle、Cleaning、Offline、Unknown 不作为正常 Motion 流程阶段发送。屏幕链路离线仍由 DisplayController 自行判断。
+- 对外只使用 NotReady、Ready、五个业务阶段、Complete 和 Error；Idle、Cleaning、Offline、Unknown 不作为正常设备板流程阶段发送。显示板链路离线仍由显示板本地判断。
 - `stage == Ready` 是唯一启动资格，快照中的 `startEnabled` 直接由该条件生成；其他所有阶段一律为 false。屏幕仅用 startEnabled 控制 Start 按钮，不从阶段名称自行推导额外规则。
-- 配置、首次找零、零位/静止确认、故障和所有权检查都在 Motion 进入 Ready 之前完成，不再维护与 Ready 并行的第二套启动条件。
+- 配置、首次找零、零位/静止确认、故障和所有权检查都在设备板进入 Ready 之前完成，不再维护与 Ready 并行的第二套启动条件。
 - Ready 期间只维护同一状态：参考、零位、静止或反馈条件失效时立即转回 NotReady，因此 startEnabled 同步变为 false。
 - 屏幕快照可能已经过期，因此收到 Start intent 时仍须原子地重读当前阶段：仍为 Ready 则接受并立即离开 Ready，否则只返回 `not_ready`，不启动动作。
 
@@ -165,7 +165,7 @@ loop: Web/Stop -> UART -> CAN feedback / queue poll -> flow tick -> State heartb
 ### 同一格式，两种来源
 
 ```text
-调试：Load/edit JSON -> explicit Apply -> Motion RAM -> stage/full run -> Export
+调试：Load/edit JSON -> explicit Apply -> device-controller RAM -> stage/full run -> Export
 演示：Export -> device-controller/data/demo_flow.json -> build embedding -> flash -> boot parse
 ```
 
@@ -237,13 +237,13 @@ commands 中每项就是一行原工具指令，例如：
 
 | 步骤 | 工作 | 验收 |
 | --- | --- | --- |
-| 1 | 编译宏、协议复用、DisplayLink、State/Start/ACK | BRAIN 原功能不回归；DISPLAY 与原显示板互通、重试不重复启动 |
+| 1 | 编译宏、协议复用、DisplayLink、State/Start/ACK | 主控板协议既有功能不回归；设备板与显示板互通、重试不重复启动 |
 | 2 | JSON schema、内置构建、RAM 配置解析、fake executor 状态机 | 同 JSON 两种来源结果一致；无电机验证首次找零、Ready/Start、阶段顺序、Complete 展示计时及非阻塞超时 |
 | 3 | 对接现有队列/反馈、阶段监督、Stop 取消流程 | 混合完成时真实确认回零/静止；失败/停止不进入下一阶段，不重构电机驱动 |
 | 4 | 阶段编辑/运行、独立找零、完整运行、Load/Apply/Export | 上次 JSON 可继续调试；导入不运动；忙碌不能替换配置；无需新增停止按钮 |
 | 5 | 双板实机与文档交付 | 逐轴、单阶段、完整流程通过；断线/重启/故障可恢复；内置版本可脱离电脑演示 |
 
-建议文件：motion 中新增 DisplayLink、DemoFlowController、DemoFlowConfig；main.cpp 只接轮询；platformio.ini 增加宏/嵌入资源；device-controller/data/demo_flow.json 提供内置配置；网页源文件增加最小流程控件并重建内嵌页面。已有队列只补必要接口。文档同步 motor-queue、motion-debug、构建说明，不能把新功能写成旧功能已具备。
+建议文件：`device-controller/` 中新增 DisplayLink、DemoFlowController、DemoFlowConfig；`device-controller/src/main.cpp` 只接轮询；`device-controller/platformio.ini` 增加宏/嵌入资源；`device-controller/data/demo_flow.json` 提供内置配置；网页源文件增加最小流程控件并重建内嵌页面。已有队列只补必要接口。文档同步 motor-queue、motion-debug、构建说明，不能把新功能写成旧功能已具备。
 
 初始内置配置应明确未配置或禁止运动，不能附带未经验收的通用机械脚本。每个子任务验证完成后按一笔逻辑提交组织，实际提交需授权。
 

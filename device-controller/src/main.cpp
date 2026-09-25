@@ -1,7 +1,7 @@
-// ESP32-S3 motion board MVP.
+// ESP32-S3 device-controller MVP.
 //
 // Responsibilities of this file:
-//   * brain link (BoardProtocol v2 READ/WRITE/EXEC/STOP frames) over UART1,
+//   * selected main-controller or display-controller UART protocol over UART1,
 //   * CAN bring-up + motor command HTTP API (delegated to motion::MotorControl),
 //   * WiFi soft-AP + single embedded debug page (device-controller/data/index.html).
 //
@@ -29,7 +29,7 @@
 #include "board_config.h"
 #include "ota_identity.h"
 #include "UartPeer.h"
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY
 #include "DemoMotorExecutor.h"
 #include "DisplayLinkCore.h"
 #endif
@@ -44,7 +44,7 @@ extern const uint8_t demoJsonStart[] asm("_binary_data_demo_flow_json_start");
 
 namespace {
 
-HardwareSerial brain(1);
+HardwareSerial peerSerial(1);
 babytech::v2::Parser parser;
 motion::MotorControl motor;
 motion::Hx711Scale powderScale;
@@ -67,7 +67,7 @@ bool canStarted = false;
 bool safeForOta() { return !controlBusy() && !motor.operationBusy() && !wifiSetup.busy(); }
 bool otaHealthy() { return canStarted && wifiSetup.apReady() &&
                            WiFi.softAPIP() != IPAddress(0,0,0,0); }
-uint32_t lastBrainByteAt = 0;
+uint32_t lastPeerByteAt = 0;
 int scaleDoutPin = kScaleDoutPin;
 int scaleSckPin = kScaleSckPin;
 
@@ -317,7 +317,7 @@ public:
 };
 BoardRotationSource boardRotation;
 
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY
 motion::DemoMotorExecutor demoExecutor(motor, queue, boardRotation, []() { return !wifiSetup.busy(); });
 motion::DemoFlowController demo(demoExecutor);
 motion::DisplayLinkCore displayLink(demo);
@@ -557,25 +557,25 @@ bool argDecimal(const char* name, double& out) {
 }
 
 // ---------------------------------------------------------------------------
-// Brain link: v2 shared endpoint, bounded receive and event servicing.
+// Selected UART peer: bounded receive and event servicing.
 // ---------------------------------------------------------------------------
 void sendFrame(const babytech::v2::Frame& frame) {
-#if MOTION_UART_PEER == MOTION_UART_PEER_BRAIN
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_MAIN
     uint8_t bytes[babytech::v2::kMaxFrameSize];
     const size_t n=babytech::v2::encode(frame,bytes,sizeof(bytes));
-    if (n) brain.write(bytes,n);
+    if (n) peerSerial.write(bytes,n);
 #else
     (void)frame;
 #endif
 }
-void serviceBrainLink() {
-#if MOTION_UART_PEER == MOTION_UART_PEER_BRAIN
+void servicePeerLink() {
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_MAIN
     using namespace babytech::v2;
-    if (millis()-lastBrainByteAt>kByteTimeoutMs) parser.reset();
+    if (millis()-lastPeerByteAt>kByteTimeoutMs) parser.reset();
     boardMotion.setRadioBusy(wifiSetup.busy() || queue.active() || ota.maintenanceActive());
-    for (size_t count=0;count<kLinkBytesPerPass && brain.available()>0;++count) {
-        lastBrainByteAt=millis(); Frame request,response;
-        if (parser.push(uint8_t(brain.read()),request)) {
+    for (size_t count=0;count<kLinkBytesPerPass && peerSerial.available()>0;++count) {
+        lastPeerByteAt=millis(); Frame request,response;
+        if (parser.push(uint8_t(peerSerial.read()),request)) {
             // Endpoint validates and deduplicates before QueueBoardMotion::stop
             // cancels any queue. Reads cannot acquire mechanical ownership.
             if (endpoint.handle(request,millis(),response)) sendFrame(response);
@@ -584,20 +584,20 @@ void serviceBrainLink() {
     Frame event;
     for (uint8_t i=0;i<2 && endpoint.tick(millis(),event);++i) sendFrame(event);
 #else
-    if (ota.maintenanceActive()) { while (brain.available() > 0) brain.read(); return; }
+    if (ota.maintenanceActive()) { while (peerSerial.available() > 0) peerSerial.read(); return; }
     uint8_t bytes[babytech::display::kDisplayMaxFrameSize];
-    for (size_t count = 0; count < kLinkBytesPerPass && brain.available() > 0; ++count) {
-        const auto n = displayLink.receive(uint8_t(brain.read()), millis(), bytes, sizeof(bytes));
-        if (n) brain.write(bytes, n);
+    for (size_t count = 0; count < kLinkBytesPerPass && peerSerial.available() > 0; ++count) {
+        const auto n = displayLink.receive(uint8_t(peerSerial.read()), millis(), bytes, sizeof(bytes));
+        if (n) peerSerial.write(bytes, n);
     }
     const auto n = displayLink.state(millis(), bytes, sizeof(bytes));
-    if (n) brain.write(bytes, n);
+    if (n) peerSerial.write(bytes, n);
 #endif
 }
 
 bool demoManualMutation() {
     if (demoBusy()) { sendError(409, F("demo_busy")); return false; }
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY
     demo.invalidate();
 #endif
     return true;
@@ -605,7 +605,7 @@ bool demoManualMutation() {
 
 // Stop remains reachable in every phase, including gaps between scripts.
 bool stopDemoOwnership() {
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY
     if (demo.busy() || demo.referenceValid()) {
         demo.stop(millis());
         return true;
@@ -620,7 +620,7 @@ bool stopDemoIfOwned() {
     return true;
 }
 
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY
 String demoStatusJson() {
     String s = "{\"available\":true,\"stage\":\"";
     s += babytech::display::displayStageKey(demo.stage());
@@ -945,7 +945,7 @@ void handleStop() {
 // it never claims the shaft physically stopped - clearing internal bookkeeping
 // is not evidence of that. GET cannot reach this handler.
 void handleControlReset() {
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY
     demo.invalidate();
     if (demo.busy()) demo.stop(millis());
 #endif
@@ -962,7 +962,7 @@ void handleControlReset() {
                   motor.faultTag() ? motor.faultTag() : "none");
 
     // Terminate UART ownership first: at most one exec and one stop record, each
-    // finished as Cancelled exactly once and answered to the brain.
+    // finished as Cancelled exactly once and answered to the main controller.
     babytech::v2::Frame event;
     uint8_t cancelled = 0;
     while (cancelled < 2 && endpoint.cancelPending(event)) {
@@ -1340,7 +1340,7 @@ bool rejectDuringOta() {
 void setup() {
     Serial.begin(115200);
     Serial.println();
-    Serial.println("[boot] Babytech Motion: AP + HTTP debug bridge. No motion on boot.");
+    Serial.println("[boot] Babytech Device Controller: AP + HTTP debug bridge. No motion on boot.");
 
     uint64_t boot=(uint64_t(esp_random())<<32)|esp_random();
     // The diagnostic log starts with this boot's identity and the reset reason,
@@ -1349,9 +1349,10 @@ void setup() {
     debugLog.addf(millis(), "info", "boot", "boot=%s reset=%d",
                   debugLog.bootId(), static_cast<int>(esp_reset_reason()));
     endpoint.begin(boot);
-    brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
-    Serial.printf("[uart] peer=%s TX43/RX44 @115200\n",
-        MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY ? "display-v3" : "brain-v2");
+    peerSerial.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
+    Serial.printf("[uart] peer=%s protocol=%u TX43/RX44 @115200\n",
+        DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY ? "display-controller" : "main-controller",
+        DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY ? 3u : 2u);
 
     loadScalePins();
     if (!powderScale.begin(makeScaleConfig(), millis())) {
@@ -1376,7 +1377,7 @@ void setup() {
     loadQueryBudget();
     loadSyncSettings();
     loadRotationDistances();
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY
     std::string configError;
     if (!applyDemoJson(reinterpret_cast<const char*>(demoJsonStart), configError))
         Serial.printf("[demo] configuration rejected: %s\n", configError.c_str());
@@ -1439,7 +1440,7 @@ void setup() {
     server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
     server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);
     server.on("/api/motor-distance", HTTP_POST, []() { if (!rejectDuringOta()) handleMotorDistance(); });
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if DEVICE_UART_PEER == DEVICE_UART_PEER_DISPLAY
     server.on("/api/demo", HTTP_GET, []() { sendJson(200, demoStatusJson()); });
     server.on("/api/demo/config", HTTP_GET, []() { sendJson(200, demoConfigJson); });
     server.on("/api/demo/config", HTTP_POST, []() { if (!rejectDuringOta()) handleDemoConfig(); });
@@ -1462,7 +1463,7 @@ void loop() {
     debugLogPoll(millis());
     powderScale.poll(millis());
     motor.poll(false);
-    serviceBrainLink();
+    servicePeerLink();
     server.handleClient();
     ota.poll();
     // Process explicit stop/cancel inputs before demo or queue advancement.
@@ -1471,7 +1472,7 @@ void loop() {
     wifiSetup.poll();
     powderScale.poll(millis());
     motor.poll(false);
-    serviceBrainLink();
+    servicePeerLink();
     pollDemo();
     queue.poll(millis());
     motor.dispatchQueries();
