@@ -135,6 +135,9 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
     if (busState_ == CanControllerState::BusOff) {
         // No auto-resume: latch the fault, invalidate every pending/confirmed
         // enable and cancel the jobs. Nothing resumes by itself.
+        // A configuration write must still reach its existing timeout state;
+        // otherwise bus-off leaves config_pending stuck indefinitely.
+        pollConfig(now);
         if (strcmp(faultTag_, kFaultBusOff) != 0) {
             latchFault(0, kFaultBusOff, true);
         }
@@ -157,7 +160,7 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
         return;
     }
 
-    drainRx(now);
+    const bool rxDrained = drainRx(now);
     pollConfig(now);
     if (experimentId_) {
         int32_t pos = 0, vel = 0;
@@ -174,7 +177,7 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
     serviceJob(now);
     serviceHome(now);
     serviceStopConfirmations(now);
-    serviceQueries(now);
+    serviceQueries(now, rxDrained);
     if (dispatchAutomaticQueries) dispatchQueries();
 }
 
@@ -215,13 +218,16 @@ const char* MotorControl::busStateString() const { return busStateName(busState_
 
 uint32_t MotorControl::txErrorCount() const { return txErrorCounter_; }
 
-void MotorControl::drainRx(uint32_t now) {
-    if (!canReady()) return;
+bool MotorControl::drainRx(uint32_t now) {
+    if (!canReady()) return false;
     CanRawFrame frame;
     for (uint32_t i = 0; i < kMaxFramesPerPoll; ++i) {
-        if (!bus_.receive(frame, 0)) break;
+        if (!bus_.receive(frame, 0)) return true;
         handleFrame(frame, now);
     }
+    // The 16-frame work limit might leave older packets buffered. In
+    // particular, do not send a fresh 0x22 read until an empty RX is observed.
+    return false;
 }
 
 void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
@@ -770,7 +776,7 @@ void MotorControl::serviceStopConfirmations(uint32_t now) {    for (uint16_t id 
     }
 }
 
-void MotorControl::serviceQueries(uint32_t now) {
+void MotorControl::serviceQueries(uint32_t now, bool rxDrained) {
     bus_.releaseQueries(CanQueryScheduler::Controller);
     const auto demand = [this,now](uint8_t id,uint8_t field,uint32_t period,uint8_t priority) {
         bus_.demandQuery(id,field,CanQueryScheduler::Controller,period,1000,priority,now);
@@ -793,14 +799,15 @@ void MotorControl::serviceQueries(uint32_t now) {
         if (!freshTarget(targetPollId_,now,sample)) demand(targetPollId_,0x33,500,1);
         else targetPollId_=0;
     }
-    if (config_.state==2 && !config_.readIssued) demand(config_.id,0x22,3000,3);
+    // The ACK may have been the last frame this poll could process. Hold the
+    // 0x22 demand until we observe an empty RX queue, or buffered old readback
+    // packets could be mistaken for the response to our new query.
+    if (rxDrained && config_.wantsReadQuery()) demand(config_.id(),0x22,3000,3);
 }
 
 void MotorControl::querySent(void* context,uint8_t id,uint8_t field,bool sent) {
     auto& self=*static_cast<MotorControl*>(context);
-    if (field==0x22 && self.config_.state==2) {
-        self.config_.readIssued=true;self.config_.readAt=millis();
-        if (!sent) self.config_.state=8;
+    if (self.config_.readQuerySent(id,field,sent,millis())) {
         self.bus_.releaseQuery(id,field,CanQueryScheduler::Controller);
     }
 }
@@ -1353,77 +1360,44 @@ bool MotorControl::rawLogical(const uint8_t* bytes, uint8_t length) {
 }
 
 void MotorControl::startConfig(const uint8_t* b) {
-    const uint32_t next = config_.sequence + 1;
-    config_ = ConfigTransaction{};
-    config_.sequence = next;
-    config_.id = b[0];
-    config_.state = 1;
-    config_.started = millis();
-    memcpy(config_.expected, b + 4, 15);
+    config_.start(b, millis());
     watch(b[0]);
 }
 
 const char* MotorControl::configMessage() const {
-    switch (config_.state) {
-        case 1: return "config_wait_ack";
-        case 2: return "config_wait_readback";
-        case 3: return "config_verified";
-        case 4: return "config_rejected";
-        case 5: return "config_ack_timeout";
-        case 6: return "config_readback_timeout";
-        case 7: return "config_mismatch";
-        case 8: return "config_read_tx_failed";
-        case 9: return "config_cancelled";
-        default: return "none";
-    }
+    return config_.message();
 }
 
 bool MotorControl::configFrame(const CanRawFrame& f, uint32_t now) {
-    if (!configPending() || !f.extended || f.remote || f.length < 1 || f.length > 8 ||
-        (f.identifier >> 8) != config_.id) return false;
-    const uint8_t packet = uint8_t(f.identifier);
-    if (f.data[0] == 0x4C) {
-        if (packet != 0 || f.length != 3 || f.data[2] != 0x6B || config_.state != 1) return true;
-        config_.ack = f.data[1];
-        if (config_.ack != 0x02) { config_.state = 4; return true; }
-        config_.state = 2;
-        config_.readAt = now;
-        // pollConfig issues the read after this RX batch has drained, so a
-        // buffered response predating our request cannot enter the new assembly.
-        return true;
-    }
-    if (f.data[0] != 0x22 || config_.state != 2) return false;
-    if (!config_.readIssued) return true;
-    // Manual: logical reply [addr][22][15 parameter bytes][6B]. CAN repeats
-    // opcode for each 7-byte slice. Reject reordered/duplicate/truncated parts.
-    const uint8_t take = packet < 2 ? 7 : 2;
-    if (packet != config_.packet || packet > 2 || f.length != take + 1) return true;
-    memcpy(config_.actual + config_.received, f.data + 1, take);
-    config_.received += take;
-    ++config_.packet;
-    if (config_.received == 16) {
-        if (config_.actual[15] != 0x6B) { config_.packet = config_.received = 0; return true; }
-        bus_.receiveQuery(config_.id,0x22,now);
-        config_.state = memcmp(config_.expected, config_.actual, 15) == 0 ? 3 : 7;
-    }
-    return true;
+    const ConfigTransaction::FrameResult result = config_.acceptFrame(f, now);
+    if (result == ConfigTransaction::FrameResult::ReadbackComplete)
+        bus_.receiveQuery(config_.id(),0x22,now);
+    return result != ConfigTransaction::FrameResult::Ignored;
 }
 
 void MotorControl::pollConfig(uint32_t now) {
-    if (config_.state == 1 && uint32_t(now - config_.started) > 3000) config_.state = 5;
-    if (config_.state == 2 && uint32_t(now - config_.readAt) > 3000) config_.state = 6;
+    const bool awaitingRead = config_.wantsReadQuery();
+    config_.poll(now);
+    if (awaitingRead && !config_.pending())
+        bus_.releaseQuery(config_.id(),0x22,CanQueryScheduler::Controller);
+}
+
+void MotorControl::cancelConfig() {
+    if (config_.wantsReadQuery())
+        bus_.releaseQuery(config_.id(),0x22,CanQueryScheduler::Controller);
+    config_.cancel();
 }
 
 String MotorControl::configJson() const {
-    String j("{\"sequence\":"); j += config_.sequence;
-    j += ",\"id\":"; j += config_.id;
+    String j("{\"sequence\":"); j += config_.sequence();
+    j += ",\"id\":"; j += config_.id();
     j += ",\"opcode\":76,\"state\":\""; j += configMessage();
     j += "\",\"pending\":"; j += configPending() ? "true" : "false";
-    j += ",\"ack\":"; j += config_.ack;
+    j += ",\"ack\":"; j += config_.ack();
     j += ",\"expected\":[";
-    for (uint8_t i=0;i<15;++i) { if(i) j+=','; j+=config_.expected[i]; }
+    for (uint8_t i=0;i<15;++i) { if(i) j+=','; j+=config_.expected()[i]; }
     j += "],\"actual\":[";
-    for (uint8_t i=0;i<config_.received && i<15;++i) { if(i) j+=','; j+=config_.actual[i]; }
+    for (uint8_t i=0;i<config_.received() && i<15;++i) { if(i) j+=','; j+=config_.actual()[i]; }
     j += "]}";
     return j;
 }
@@ -1545,7 +1519,7 @@ bool MotorControl::broadcastAbortAll() {
 }
 
 Result MotorControl::stop(uint8_t id) {
-    if (configPending() && config_.id == id) config_.state = 9;
+    if (configPending() && config_.id() == id) cancelConfig();
     if (experimentId_ == id) experimentId_ = 0;
     const uint32_t now = millis();
     if (id == 0) return Result{kCodeInvalid, "id_reserved"};
@@ -1586,7 +1560,7 @@ Result MotorControl::stop(uint8_t id) {
 }
 
 Result MotorControl::stopAll() {
-    if (configPending()) config_.state = 9;
+    cancelConfig();
     if (job_.active) moveOutcome_ = MoveOutcome::Cancelled;
     experimentId_ = 0;
     const uint32_t now = millis();
@@ -1656,7 +1630,7 @@ void MotorControl::takeQueueControl() {
     faultId_ = 0;
     faultGlobal_ = false;
     // Keep terminal config evidence for diagnosis, but end a pending transaction.
-    if (configPending()) config_.state = 9;
+    cancelConfig();
     targetPollId_ = 0;
     targetPollArmedMs_ = 0;
     bus_.releaseQueries(CanQueryScheduler::Controller);
@@ -1814,7 +1788,7 @@ String MotorControl::statusJson(uint8_t id) const {
         json += "\",\"ageMs\":"; json += static_cast<unsigned long>(now - since);
         json += '}';
     };
-    if (configPending()) blocker(config_.id, "config_pending", config_.started);
+    if (configPending()) blocker(config_.id(), "config_pending", config_.started());
     if (job_.active) blocker(job_.id, "move_active", job_.startMs);
     if (home_.active) blocker(homeId_, "home_active", home_.startMs);
     if (experimentId_) blocker(experimentId_, "experiment_active", experimentStart_);

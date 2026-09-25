@@ -18,6 +18,8 @@ with tempfile.TemporaryDirectory(prefix='babytech-motion-') as output:
         ('sync-planner', [str(root / 'tests/test_sync_planner.cpp')]),
         ('sync-runtime', [str(root / 'tests/test_sync_runtime.cpp')]),
         ('queue-diagnostics', [str(root / 'tests/test_queue_diagnostics.cpp')]),
+        ('config-transaction', ['-I', str(root / 'tests/fakes'), '-I', str(root / 'device-controller/src'),
+            str(root / 'tests/test_config_transaction.cpp')]),
         ('config-recovery', ['-I', str(root / 'tests/fakes'), '-I', str(root / 'device-controller/src'),
             str(root / 'tests/test_config_recovery.cpp'), str(root / 'tests/fakes/fake_x42s.cpp'),
             str(root / 'device-controller/src/MotorControl.cpp'), str(root / 'device-controller/src/CommandQueue.cpp')]),

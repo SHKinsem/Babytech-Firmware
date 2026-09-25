@@ -16,6 +16,7 @@
 
 #include "MotionCore.h"
 #include "MotorBus.h"
+#include "ConfigTransaction.h"
 #include "QueueDiagnostics.h"
 #include "CanQueryScheduler.h"
 
@@ -190,8 +191,8 @@ public:
     bool stopping() const { return anyStopPending(); }
     bool hasFault() const { return faultTag_ && strcmp(faultTag_, "none") != 0; }
     bool canRecover(uint8_t id) const { return !faultGlobal_ && faultId_ == id; }
-    bool configPending() const { return config_.state == 1 || config_.state == 2; }
-    bool configFailed() const { return config_.state >= 4; }
+    bool configPending() const { return config_.pending(); }
+    bool configFailed() const { return config_.failed(); }
     const char* configMessage() const;
     String configJson() const;
     // Stable identifier of the latched fault ("none" when there is none), so a
@@ -225,17 +226,13 @@ private:
         uint32_t elapsed = 0, deadline = 0;
         bool positionValid = false, velocityValid = false, enabled = false;
     } moveFailure_;
-    // One serialized 4C write and its 22 readback. Terminal evidence is retained
-    // independently of the rolling CAN trace and ordinary feedback polling.
-    struct ConfigTransaction {
-        bool readIssued = false;
-        uint32_t sequence = 0, started = 0, readAt = 0;
-        uint8_t id = 0, state = 0, ack = 0, packet = 0, received = 0;
-        uint8_t expected[15] = {}, actual[16] = {};
-    } config_;
+    // The transaction owns manual 4C/22 evidence and transitions; this class
+    // bridges it to the shared CAN/query budget and command policy.
+    ConfigTransaction config_;
     void startConfig(const uint8_t* bytes);
     bool configFrame(const CanRawFrame& frame, uint32_t now);
     void pollConfig(uint32_t now);
+    void cancelConfig();
     DebugLimits limits_;
     static void traceSink(void* context, const CanRawFrame& frame, bool tx);
     struct TraceEntry { CanRawFrame frame; uint32_t sequence = 0, atMs = 0; bool tx = false; };
@@ -338,7 +335,9 @@ private:
     void refreshBusStatus();
     const char* busStateString() const;
     uint32_t txErrorCount() const;
-    void drainRx(uint32_t now);
+    // True only after receive() reports an empty RX queue. Hitting the bounded
+    // per-poll limit is conservatively treated as backlog.
+    bool drainRx(uint32_t now);
     void handleFrame(const CanRawFrame& frame, uint32_t now);
     void handleAck(uint8_t id, uint8_t function, uint8_t status, uint32_t now);
     bool sendStop(uint8_t id);
@@ -373,7 +372,7 @@ private:
     void serviceJob(uint32_t now);
     void serviceHome(uint32_t now);
     void serviceStopConfirmations(uint32_t now);
-    void serviceQueries(uint32_t now);
+    void serviceQueries(uint32_t now, bool rxDrained);
 
     // Homing supervision. endHome() only records the outcome; cancelHome() and
     // failHome() also abort the run on the wire (9C interrupts homing, FE halts

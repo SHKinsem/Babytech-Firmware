@@ -182,6 +182,96 @@ static void test_home_no_motion_is_distinct_from_reached() {
     rig.poll(60);
     CHECK(rig.state(1, 60).manualHome == DeviceHomeStage::NoMotion);
     CHECK(!rig.state(1, 60).fault);
+    // The driver's second no-motion code has the same terminal meaning, and a
+    // no-motion result must release the supervised slot without latching fault.
+    setMillis(60);
+    CHECK(rig.api.requestHome(1, 0).accepted());
+    injectRx(makeAck(1, 0x9A, 0x22));
+    rig.poll(80);
+    CHECK(rig.state(1, 80).manualHome == DeviceHomeStage::NoMotion);
+    CHECK(!rig.state(1, 80).fault);
+    setMillis(80);
+    CHECK(rig.api.requestMove(move(1)).accepted());
+    CHECK(rig.state(1, 80).manualMove == DeviceMoveStage::Running);
+}
+
+static void test_manual_move_and_home_share_one_slot() {
+    Rig rig;
+    rig.begin();
+    enableAndFeed(rig, 1);
+    setMillis(40);
+    CHECK(rig.api.requestMove(move(1)).accepted());
+    CHECK(rig.api.requestHome(1, 0).admission == DeviceAdmission::Busy);
+    CHECK(rig.api.requestHome(2, 0).admission == DeviceAdmission::Busy);
+    CHECK(rig.api.requestMove(move(2)).admission == DeviceAdmission::Busy);
+    CHECK(countWireOpcode(1, 0x9A) == 0);
+    CHECK(countWireOpcode(2, kFrameMove) == 0);
+    CHECK(rig.state(1, 40).manualMove == DeviceMoveStage::Running);
+    CHECK(rig.state(1, 40).manualHome == DeviceHomeStage::None);
+
+    setMillis(50);
+    CHECK(rig.api.requestStop(1).accepted());
+    CHECK(rig.state(1, 50).manualMove == DeviceMoveStage::Cancelled);
+    CHECK(rig.api.requestHome(1, 0).admission == DeviceAdmission::Busy);
+    injectRx(makeAck(1, kFrameMove, 0x9F)); // Reply to the cancelled move.
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.poll(60);
+    CHECK(rig.state(1, 60).manualMove == DeviceMoveStage::Cancelled);
+    CHECK(!rig.state(1, 60).motor.stopPending);
+
+    setMillis(60);
+    CHECK(rig.api.requestHome(1, 0).accepted());
+    CHECK(rig.api.requestMove(move(1)).admission == DeviceAdmission::Busy);
+    CHECK(rig.state(1, 60).manualHome == DeviceHomeStage::Running);
+    injectRx(makeAck(1, kFrameMove, 0x9F)); // Cannot complete a new Home.
+    rig.poll(80);
+    CHECK(rig.state(1, 80).manualHome == DeviceHomeStage::Running);
+}
+
+static void test_stop_requires_both_post_request_stationary_samples() {
+    Rig rig;
+    rig.begin();
+    enableAndFeed(rig, 1);
+    setMillis(50);
+    CHECK(rig.api.requestStop(1).accepted());
+    rig.poll(51); // Pre-stop samples are still fresh but cannot confirm the stop.
+    CHECK(rig.state(1, 51).motor.stopPending);
+    injectRx(makeAck(1, kFrameStop, 0x02));
+    injectRx(makePosition(1, 0));
+    rig.poll(60);
+    CHECK(rig.state(1, 60).motor.stopPending); // Velocity is still pre-stop.
+    injectRx(makeVelocity(1, 10));
+    rig.poll(70);
+    CHECK(rig.state(1, 70).motor.stopPending); // New feedback still moves.
+    injectRx(makeVelocity(1, 0));
+    rig.poll(80);
+    CHECK(!rig.state(1, 80).motor.stopPending);
+}
+
+static void test_queue_takeover_ignores_late_manual_home_reply() {
+    Rig rig;
+    rig.begin();
+    enableAndFeed(rig, 1);
+    setMillis(40);
+    CHECK(rig.api.requestHome(1, 0).accepted());
+    CHECK(rig.state(1, 40).manualHome == DeviceHomeStage::Running);
+
+    const char waiting[] = "wait 1000\n";
+    setMillis(50);
+    const DeviceReceipt run = rig.api.startProgram(waiting, sizeof(waiting) - 1,
+                                                    1, rig.rotation, 50);
+    CHECK(run.accepted());
+    CHECK(run.runId != 0);
+    CHECK(rig.state(1, 50).manualHome == DeviceHomeStage::None);
+    CHECK(rig.state(1, 50).program == DeviceProgramStage::Running);
+    injectRx(makeAck(1, 0x9A, 0x9F)); // Late completion for abandoned Home.
+    injectRx(makePosition(1, 0));
+    injectRx(makeVelocity(1, 0));
+    rig.poll(60);
+    CHECK(rig.state(1, 60).manualHome == DeviceHomeStage::None);
+    CHECK(rig.state(1, 60).program == DeviceProgramStage::Running);
+    CHECK(rig.state(1, 60).programRunId == run.runId);
 }
 
 static void test_program_done_is_not_motor_reached() {
@@ -323,6 +413,9 @@ int main() {
     test_manual_move_reached_needs_new_evidence();
     test_home_response_modes_need_fresh_evidence();
     test_home_no_motion_is_distinct_from_reached();
+    test_manual_move_and_home_share_one_slot();
+    test_stop_requires_both_post_request_stationary_samples();
+    test_queue_takeover_ignores_late_manual_home_reply();
     test_program_done_is_not_motor_reached();
     test_bad_program_is_atomic_and_cancel_prevents_later_step();
     test_stop_is_a_request_until_feedback_confirms();
