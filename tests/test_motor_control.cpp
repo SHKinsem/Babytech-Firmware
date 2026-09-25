@@ -2431,6 +2431,235 @@ static void test_broadcast_disable_waits_for_driver_and_stop_proof() {
     CHECK(!idle.mc.operationBusy());
 }
 
+static void test_broadcast_disable_repeated_flags_do_not_starve_stop_proof() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    for (uint8_t id = 1; id <= 5; ++id) {
+        enableAndFeedStationary(rig, id, static_cast<uint32_t>(id) * 80);
+        CHECK(rig.mc.snapshot(id).enabled);
+    }
+
+    setMillis(500);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(520);
+    for (uint8_t id = 1; id <= 5; ++id) injectRx(makeFlags(id, 0));
+    rig.mc.poll(false);
+    for (uint8_t id = 1; id <= 5; ++id) CHECK(rig.mc.snapshot(id).stopPending);
+
+    // A later enabled reply revokes axis 3's earlier disabled proof. The
+    // other four retain their fixed first disabled observation.
+    setMillis(540);
+    injectRx(makeFlags(3, 1));
+    rig.mc.poll(false);
+    setMillis(600);
+    for (uint8_t id = 1; id <= 5; ++id) {
+        injectRx(makeFlags(id, 0));
+        injectRx(makePosition(id, 0));
+    }
+    rig.mc.poll(false);
+    setMillis(700);
+    for (uint8_t id = 1; id <= 5; ++id) {
+        injectRx(makeFlags(id, 0));
+        injectRx(makeVelocity(id, 0));
+    }
+    rig.mc.poll(false);
+    for (uint8_t id = 1; id <= 5; ++id)
+        CHECK(rig.mc.snapshot(id).stopPending == (id == 3));
+    CHECK(rig.mc.operationBusy());
+
+    // Axis 3 needs a position strictly after its replacement disabled proof.
+    setMillis(720);
+    injectRx(makeFlags(3, 0));
+    injectRx(makePosition(3, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(3).stopPending);
+    CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_recovers_under_shared_10_qps_budget() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    const CanQueryScheduler::Config budget = rig.mc.queryBudget();
+    CHECK(budget.queriesPerSecond == 10 && budget.gapMs == 100);
+    for (uint8_t id = 1; id <= 5; ++id)
+        enableAndFeedStationary(rig, id, static_cast<uint32_t>(id) * 80);
+    setMillis(600);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+
+    // Reply only to reads actually emitted by MotorBus. Each pass is 100 ms,
+    // so all five motors compete for the real board-wide query scheduler.
+    size_t replyCursor = txLog.size();
+    uint32_t queryCount = 0;
+    bool complete = false;
+    uint32_t completedAt = 0;
+    for (uint32_t t = 700; t <= 9000; t += 100) {
+        setMillis(t);
+        for (size_t i = replyCursor; i < txLog.size(); ++i) {
+            const TxRecord& sent = txLog[i];
+            if (sent.kind != TxKind::ReadSysParam) continue;
+            switch (sent.param) {
+                case X42sSysParam::Flag: injectRx(makeFlags(sent.addr, 0)); break;
+                case X42sSysParam::Cpos: injectRx(makePosition(sent.addr, 0)); break;
+                case X42sSysParam::Vel: injectRx(makeVelocity(sent.addr, 0)); break;
+                default: break;
+            }
+        }
+        replyCursor = txLog.size();
+        const uint32_t before = countTx(TxKind::ReadSysParam);
+        rig.mc.poll();
+        const uint32_t after = countTx(TxKind::ReadSysParam);
+        CHECK(after - before <= 1);
+        queryCount += after - before;
+        complete = true;
+        for (uint8_t id = 1; id <= 5; ++id)
+            if (rig.mc.snapshot(id).stopPending) complete = false;
+        if (complete) { completedAt = t; break; }
+    }
+    CHECK(queryCount > 0 && queryCount <= 84);
+    CHECK(complete);
+    CHECK(completedAt <= 5000);
+    CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_new_request_resets_proof_across_millis_wrap() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(UINT32_MAX - 40);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    injectRx(makeFlags(7, 1));
+    rig.mc.poll(false);
+
+    setMillis(UINT32_MAX - 1);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(0);
+    injectRx(makeFlags(7, 0)); // First proof can have timestamp zero.
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    setMillis(4);
+    injectRx(makePosition(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+
+    // A second disable starts a new proof sequence; position from the first
+    // request cannot combine with velocity after the second.
+    setMillis(8);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(12);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    setMillis(16);
+    injectRx(makeVelocity(7, 0));
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    setMillis(20);
+    injectRx(makePosition(7, 0));
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+    CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_requires_fresh_flags_at_release() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(10);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    setMillis(30);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(50);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+
+    // With sparse CAN feedback, fresh stillness alone cannot release a node
+    // based on a driver-disabled flag older than the 600 ms freshness window.
+    setMillis(700);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+    CHECK(rig.mc.operationBusy());
+
+    // Let the real shared scheduler request the stale 3A again. Reply only to
+    // reads it actually sends, at 100 ms intervals; the refreshed disabled
+    // flag arrives after the stationary pair but must not move proofMs.
+    size_t replyCursor = txLog.size();
+    uint32_t refreshedFlagQueries = 0;
+    for (uint32_t t = 800; t <= 1800 && rig.mc.snapshot(7).stopPending; t += 100) {
+        setMillis(t);
+        for (size_t i = replyCursor; i < txLog.size(); ++i) {
+            const TxRecord& sent = txLog[i];
+            if (sent.kind != TxKind::ReadSysParam || sent.addr != 7) continue;
+            switch (sent.param) {
+                case X42sSysParam::Flag:
+                    ++refreshedFlagQueries;
+                    injectRx(makeFlags(7, 0));
+                    break;
+                case X42sSysParam::Cpos: injectRx(makePosition(7, 0)); break;
+                case X42sSysParam::Vel: injectRx(makeVelocity(7, 0)); break;
+                default: break;
+            }
+        }
+        replyCursor = txLog.size();
+        rig.mc.poll();
+    }
+    CHECK(refreshedFlagQueries >= 1);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+    CHECK(!rig.mc.operationBusy());
+}
+
+static void test_broadcast_disable_proof_withdrawn_by_reenable_or_bus_off() {
+    Rig rig;
+    CHECK(rig.mc.begin(4, 5, 500000));
+    rig.mc.watch(7);
+    setMillis(10);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    setMillis(30);
+    CHECK(rig.mc.broadcastEnable(false).code == 202);
+    setMillis(50);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+
+    setMillis(60);
+    CHECK(rig.mc.broadcastEnable(true).code == 202);
+    setMillis(80);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+
+    setMillis(100);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    busState = CanControllerState::BusOff;
+    setMillis(110);
+    rig.mc.poll(false);
+    busState = CanControllerState::Running;
+    setMillis(120);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(rig.mc.snapshot(7).stopPending);
+
+    setMillis(130);
+    injectRx(makeFlags(7, 0));
+    rig.mc.poll(false);
+    setMillis(140);
+    injectRx(makePosition(7, 0));
+    injectRx(makeVelocity(7, 0));
+    rig.mc.poll(false);
+    CHECK(!rig.mc.snapshot(7).stopPending);
+    CHECK(!rig.mc.operationBusy());
+    CHECK(rig.mc.hasFault()); // Bus-off diagnosis needs explicit recovery.
+}
+
 static void test_failed_broadcast_disable_retains_fault_and_stop_waits() {
     Rig rig;
     CHECK(rig.mc.begin(4, 5, 500000));
@@ -2574,6 +2803,11 @@ struct TestCase {
 int main() {
     const TestCase tests[] = {
         {"broadcast disable keeps state until flags and stop proof", test_broadcast_disable_waits_for_driver_and_stop_proof},
+        {"repeated disabled flags do not starve five-axis stop proof", test_broadcast_disable_repeated_flags_do_not_starve_stop_proof},
+        {"five-axis broadcast disable recovers under the shared 10 qps budget", test_broadcast_disable_recovers_under_shared_10_qps_budget},
+        {"new broadcast disable resets proof across millis wrap", test_broadcast_disable_new_request_resets_proof_across_millis_wrap},
+        {"stale disabled flags refresh before stop proof releases", test_broadcast_disable_requires_fresh_flags_at_release},
+        {"re-enable and bus-off withdraw broadcast disable proof", test_broadcast_disable_proof_withdrawn_by_reenable_or_bus_off},
         {"failed broadcast disable retains fault, waits and OTA gate", test_failed_broadcast_disable_retains_fault_and_stop_waits},
         {"broadcast disable tracks an observed selected node", test_broadcast_disable_tracks_observed_selection_without_enable},
         {"broadcast disable aborts home before F3", test_broadcast_disable_aborts_home_before_f3},

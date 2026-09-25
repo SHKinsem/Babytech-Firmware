@@ -153,6 +153,9 @@ void MotorControl::poll(bool dispatchAutomaticQueries) {
             if (id == activeId || id == selectedId_ || node.stopRequested) {
                 node.stopRequested = true;
                 node.stopRequestedMs = now;
+                // Bus state is unknown after bus-off. A previous disabled
+                // flag cannot prove the motor stayed disabled through it.
+                node.broadcastDisableProofValid = false;
             }
         }
         return;
@@ -330,6 +333,15 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.flagsValid = true;
             node.flags = static_cast<uint8_t>(sample.value);
             node.flagsMs = now;
+            if (node.broadcastDisablePending) {
+                if (node.flags & 1) {
+                    node.broadcastDisableProofValid = false;
+                } else if (!node.broadcastDisableProofValid &&
+                           isStrictlyNewerThan(now, node.stopRequestedMs)) {
+                    node.broadcastDisableProofValid = true;
+                    node.broadcastDisableProofMs = now;
+                }
+            }
             // A real disabled flag invalidates an old software confirmation.
             if (!(node.flags & 1)) node.enableConfirmed = false;
             if (node.enablePending && node.enableAck &&
@@ -649,7 +661,8 @@ void MotorControl::serviceHome(uint32_t now) {
     }
 }
 
-void MotorControl::serviceStopConfirmations(uint32_t now) {    for (uint16_t id = 1; id < kNodeCount; ++id) {
+void MotorControl::serviceStopConfirmations(uint32_t now) {
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
         NodeState& node = nodes_[id];
         if (!node.stopRequested) continue;
         if (manual_.moveActive() && manual_.moveId() == id) continue;
@@ -657,14 +670,17 @@ void MotorControl::serviceStopConfirmations(uint32_t now) {    for (uint16_t id 
         // stop or disable on a fresh target still has to be seen on the wire.
         if (!stationaryFeedback(static_cast<uint8_t>(id), now, node.stopRequestedMs)) continue;
         if (node.broadcastDisablePending) {
-            // F3 broadcast has no per-node ACK. An old 3A sample cannot prove
-            // this disable. Nor can a stationary sample taken before the
-            // disabled flag prove the released shaft has finished coasting.
-            if (!node.flagsValid || (node.flags & 1) ||
-                !isStrictlyNewerThan(node.flagsMs, node.stopRequestedMs)) continue;
-            if (!isStrictlyNewerThan(node.positionMs, node.flagsMs) ||
-                !isStrictlyNewerThan(node.velocityMs, node.flagsMs)) continue;
+            // F3 broadcast has no per-node ACK. A 3A received before this
+            // request cannot count, and stillness before the candidate
+            // disabled flag cannot prove the released shaft stopped coasting.
+            // The wire has no transaction ID: a delayed older 3A delivered
+            // after this request remains indistinguishable from a new reply.
+            if (!node.broadcastDisableProofValid || !node.flagsValid || (node.flags & 1) ||
+                !ageWithin(now, node.flagsMs, kFeedbackFreshMs)) continue;
+            if (!isStrictlyNewerThan(node.positionMs, node.broadcastDisableProofMs) ||
+                !isStrictlyNewerThan(node.velocityMs, node.broadcastDisableProofMs)) continue;
             node.broadcastDisablePending = false;
+            node.broadcastDisableProofValid = false;
         }
         node.stopRequested = false;
     }
@@ -682,7 +698,18 @@ void MotorControl::serviceQueries(uint32_t now, bool rxDrained) {
         if (moving || node.stopRequested) {
             demand(id,0x36,200,2); demand(id,0x35,200,2);
         }
-        if (moving || node.enablePending || node.broadcastDisablePending)
+        // Once disabled has been observed, spend no more 3A bandwidth until
+        // fresh stationary feedback is ready but the last disabled flag has
+        // aged out. Keep the first proof timestamp fixed across that refresh.
+        const bool needsFreshDisableFlag = node.broadcastDisablePending &&
+            node.broadcastDisableProofValid &&
+            !ageWithin(now, node.flagsMs, kFeedbackFreshMs) &&
+            stationaryFeedback(static_cast<uint8_t>(id), now, node.stopRequestedMs) &&
+            isStrictlyNewerThan(node.positionMs, node.broadcastDisableProofMs) &&
+            isStrictlyNewerThan(node.velocityMs, node.broadcastDisableProofMs);
+        if (moving || node.enablePending ||
+            (node.broadcastDisablePending && !node.broadcastDisableProofValid) ||
+            needsFreshDisableFlag)
             demand(id,0x3A,500,1);
     }
     if (manual_.homeActive()) demand(manual_.homeId(),0x3B,300,2);
@@ -1469,6 +1496,14 @@ Result MotorControl::broadcastEnable(bool enabled) {
     if (enabled) {
         // Broadcast has no per-node acknowledgement; do not invent confirmations.
         const bool sent = queueSendLogical(frame, sizeof(frame));
+        if (sent) {
+            // Our own possible re-enable withdraws a previous disabled proof
+            // even before the next 3A reply arrives.
+            for (uint16_t id = 1; id < kNodeCount; ++id) {
+                if (nodes_[id].broadcastDisablePending)
+                    nodes_[id].broadcastDisableProofValid = false;
+            }
+        }
         return sent ? Result{202, "broadcast_sent"} : Result{503, "can_tx_failed"};
     }
 
@@ -1501,6 +1536,7 @@ Result MotorControl::broadcastEnable(bool enabled) {
         node.stopRequested = true;
         node.stopRequestedMs = now;
         node.broadcastDisablePending = true;
+        node.broadcastDisableProofValid = false;
         // A pending addressed enable must not be confirmed by a late F3 ACK.
         // An earlier confirmed enable remains true until real disabled flags
         // arrive: a failed broadcast might have left the driver enabled.

@@ -293,6 +293,11 @@ private:
         // A broadcast F3 disable has no per-node ACK. Keep the node blocked
         // until later 3A disabled flags and still-later stationary feedback arrive.
         bool broadcastDisablePending = false;
+        // First candidate disabled 3A received after this request. Later disabled
+        // replies must not move the proof boundary ahead of sparse 36/35
+        // feedback; a later enabled reply withdraws this proof.
+        bool broadcastDisableProofValid = false;
+        uint32_t broadcastDisableProofMs = 0;
 
         const char* lastAck = "none";
         uint8_t queueAckFunction = 0, queueAckStatus = 0;
