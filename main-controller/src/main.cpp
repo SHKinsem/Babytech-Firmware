@@ -11,7 +11,7 @@ extern const uint8_t indexStart[] asm("_binary_data_index_html_start");
 extern const uint8_t indexEnd[] asm("_binary_data_index_html_end");
 using namespace babytech::v2;
 namespace {
-HardwareSerial motion(1);
+HardwareSerial deviceLink(1);
 WebServer server(80);
 Parser parser;
 babytech::v2::Client client;
@@ -35,16 +35,16 @@ void sendJson(int code,const String& body) {
 }
 void sendFrame(const Frame& f) {
     uint8_t bytes[kMaxFrameSize]; const size_t n=encode(f,bytes,sizeof(bytes));
-    if (n) motion.write(bytes,n);
+    if (n) deviceLink.write(bytes,n);
 }
-void queryMotion(bool force=false) {
+void queryDevice(bool force=false) {
     Frame f; if (client.query(millis(),f,force)) sendFrame(f);
 }
-void pollMotion() {
+void pollDevice() {
     if (millis()-lastByteAt>kByteTimeoutMs) parser.reset();
-    for (size_t n=0;n<256 && motion.available()>0;++n) {
+    for (size_t n=0;n<256 && deviceLink.available()>0;++n) {
         lastByteAt=millis(); Frame f;
-        if (parser.push(uint8_t(motion.read()),f)) client.receive(f,millis());
+        if (parser.push(uint8_t(deviceLink.read()),f)) client.receive(f,millis());
     }
 }
 const char* outcomeText() {
@@ -145,7 +145,7 @@ void stopAll() {
 void setup() {
     Serial.begin(115200);
     client.begin((uint64_t(esp_random())<<32)|esp_random());
-    motion.begin(kLinkBaud,SERIAL_8N1,kLinkRxPin,kLinkTxPin);
+    deviceLink.begin(kLinkBaud,SERIAL_8N1,kLinkRxPin,kLinkTxPin);
     WiFi.mode(WIFI_AP);
     apStarted=WiFi.softAP("Babytech-Debug","babytech-demo");
     ota.begin();
@@ -153,13 +153,13 @@ void setup() {
         server.send_P(200,"text/html; charset=utf-8",reinterpret_cast<const char*>(indexStart),indexEnd-indexStart);
     });
     server.on("/api/status",HTTP_GET,sendStatus);
-    server.on("/api/query",HTTP_POST,[] { queryMotion(true); sendJson(202,"{\"queued\":true}"); });
+    server.on("/api/query",HTTP_POST,[] { queryDevice(true); sendJson(202,"{\"queued\":true}"); });
     server.on("/api/params",HTTP_POST,writeParameters);
     server.on("/api/exec",HTTP_POST,execute);
     server.on("/api/stop",HTTP_POST,stopAll);
     server.onNotFound([] { sendJson(404,"{\"error\":\"not_found\"}"); });
-    server.begin(); queryMotion(true);
+    server.begin(); queryDevice(true);
 }
 void loop() {
-    pollMotion(); queryMotion(); server.handleClient(); ota.poll(); delay(1);
+    pollDevice(); queryDevice(); server.handleClient(); ota.poll(); delay(1);
 }

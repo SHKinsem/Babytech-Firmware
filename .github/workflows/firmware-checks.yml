@@ -66,30 +66,20 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install platformio==6.1.19
 
-      - name: Build BRAIN and both MOTION UART peer variants
+      - name: Build main-controller and both device-controller UART peers
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -d main-controller ]]; then
-            brain_dir=main-controller
-          elif [[ -d brain ]]; then
-            brain_dir=brain
-          else
-            echo "Could not find main-controller or brain firmware directory" >&2
-            exit 1
-          fi
+          main_controller_dir=main-controller
+          device_controller_dir=device-controller
 
-          if [[ -d device-controller ]]; then
-            motion_dir=device-controller
-          elif [[ -d motion ]]; then
-            motion_dir=motion
-          else
-            echo "Could not find device-controller or motion firmware directory" >&2
-            exit 1
-          fi
+          pio run --project-dir "$main_controller_dir"
 
-          pio run --project-dir "$brain_dir"
-          pio run --project-dir "$motion_dir"
-          PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -fstack-usage -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DMOTION_UART_PEER=2' \
-            pio run --project-dir "$motion_dir"
+          echo "Building device-controller with MAIN UART peer (1)"
+          PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -fstack-usage -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DDEVICE_UART_PEER=1' \
+            pio run --project-dir "$device_controller_dir"
+
+          echo "Building device-controller with DISPLAY UART peer (2)"
+          PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -fstack-usage -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DDEVICE_UART_PEER=2' \
+            pio run --project-dir "$device_controller_dir"

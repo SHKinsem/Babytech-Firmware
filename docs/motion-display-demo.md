@@ -1,30 +1,30 @@
-# Motion / Display 演示操作说明
+# 设备板与显示板演示操作说明
 
-描述对象：工具 Motion 的 DISPLAY 编译分支、原产品 DisplayController v3 和网页“屏幕流程”。Milestone：V1 软件接入完成，机械脚本与双板实机验收待完成。本说明不代表机构或真实出料已验收。
+描述对象：设备板（`device-controller/`）的显示板 UART 协议配置、产品显示板（`Embeded_System/DisplayController`）和网页“屏幕流程”。产品显示板是独立设备，不是主控板（`main-controller/`）。Milestone：V1 软件接入完成，机械脚本与双板实机验收待完成。本说明不代表机构或真实出料已验收。
 
 ## 构建与接线
 
-默认 `pio run -d device-controller` 构建 DISPLAY/v3；`device-controller/platformio.ini` 的 `build_flags` 已包含 `-DMOTION_UART_PEER=2`。需要恢复 BRAIN/v2 时，显式改用 `-DMOTION_UART_PEER=1` 并重新编译烧录同一个 `motion` environment。
+默认 `pio run -d device-controller` 构建设备板的显示板协议 v3 配置；`device-controller/platformio.ini` 的 `build_flags` 包含 `-DDEVICE_UART_PEER=2`。与主控板联调 UART v2 时，将这项构建标志改为 `-DDEVICE_UART_PEER=1`，重新编译并烧录设备板。PlatformIO 环境名 `motion` 是保留的构建兼容标识，不是板名。旧 `MOTION_UART_PEER` 构建宏仍兼容，但同时指定新旧宏时取值必须一致。
 
-启动日志 `peer=display-v3` 表示显示分支；`peer=brain-v2` 表示原协议。非法宏值不能编译。DISPLAY 分支不消费 Brain 协议或向屏幕发送 Brain 帧。
+启动日志显示 `peer=display-controller protocol=3`（显示板协议）或 `peer=main-controller protocol=2`（主控板协议）；非法宏值不能编译。显示板配置不消费主控板协议帧，也不向显示板发送主控板协议帧。
 
-屏幕继续使用产品仓库 `Embeded_System/DisplayController` 的 `display` 固件；无需迁入 LCD、触摸或 LVGL。共享协议来源见 [SOURCE.md](../shared/BabytechDisplayCore/SOURCE.md)。两端都必须是 protocol/schema 3。
+显示板继续使用产品仓库 `Embeded_System/DisplayController` 的 `display` 固件；无需迁入 LCD、触摸或 LVGL。共享协议来源见 [SOURCE.md](../shared/BabytechDisplayCore/SOURCE.md)。设备板和显示板两端都必须是 protocol/schema 3。
 
-Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，共地。115200 / 8N1 / 3.3 V；分别 USB 供电时不互接 5 V。依实际 GPIO 接线，不凭排针 TX/RX 丝印判断方向。
+设备板 GPIO43 TX 接显示板 GPIO44 RX；设备板 GPIO44 RX 接显示板 GPIO43 TX，共地。115200 / 8N1 / 3.3 V；分别 USB 供电时不互接 5 V。依实际 GPIO 接线，不凭排针 TX/RX 丝印判断方向。
 
 ## 配置与操作
 
-1. 连接 Motion 热点，进入网页“屏幕流程”。BRAIN 构建会明确显示功能不可用。
+1. 连接设备板热点 `Babytech-Motion`，进入网页“屏幕流程”。设备板若选择主控板协议 v2，网页会明确显示此功能不可用。
 2. 内置 `device-controller/data/demo_flow.json` 保存台架配置；上电只校验并载入，不自动运动。网页 Load 与编辑只改变本机草稿。配置可解析不代表机构已验收或已经 Ready。
 3. Apply 校验后整份替换 RAM 配置，不运动；失败保留旧配置。配置替换撤销旧软件参考。Export 导出编辑器中的配置，可保存到上述工程路径后重新编译烧录。没有文件系统上传、永久保存按钮或自动恢复中断流程。
-4. 在 Apply 可接受配置后，由现场确认机构安全，点击网页“复位 / 初始化”，或配套新版显示板圆环右侧的 `Initialize`。两者共用 Motion 初始化入口；屏幕找零中仍显示 NotReady，不增加 initializing 状态。入口只要求配置有效、执行器空闲且 CAN 可用，不以五轴位置/速度轮询完整为前提；队列的 `await`、已知故障及脚本超时仍可使本次初始化失败。
+4. 在 Apply 可接受配置后，由现场确认机构安全，点击网页“复位 / 初始化”，或配套新版显示板圆环右侧的 `Initialize`。两者共用设备板初始化入口；显示板找零中仍显示 NotReady，不增加 initializing 状态。入口只要求配置有效、执行器空闲且 CAN 可用，不以五轴位置/速度轮询完整为前提；队列的 `await`、已知故障及脚本超时仍可使本次初始化失败。
 5. 先逐个调试业务阶段。单阶段结束停在 NotReady，不自动执行其他阶段；需回零时运行包含回程动作的混合阶段，再点复位重新检查。软件参考仍有效时复位不会重新碰撞找零。
 6. Ready 时用屏幕 Start 或网页“完整流程运行”：开盖 → 加水 → 加粉 → 关盖 → 混合（脚本内按相对位移回程）→ Complete 保持 3 秒 → Ready。流程层不再额外核验五轴实时位置/速度或混合后的零位；队列 `await` 与阶段超时仍生效。没有额外回起始位置阶段；展示计时不发送运动指令。下次 Start 前操作者自行换瓶。
 7. 任何阶段可用顶部“全部停止”。取消剩余脚本并发送广播回零中断/停止；新鲜静止反馈才证明停止，超过 3 秒仍未确认则 Error。Error 由显式复位解除，参考失效时重新初始化，不续跑旧动作。
 
 当前内置配置在关盖阶段使用 `sync begin trigger` 同步组；轴 1 的 68.2 mm 回程仅为位移账面平衡，两者均尚未完成这套演示流程的实机验收。
 
-屏幕只保留原 Start 和状态显示。Motion `startEnabled` 由 Ready 派生，Cloud offline 提示允许保留。宝宝、品牌、水量、温度为演示数据，`thermalSimulated=true`，两个条件字段均为 None；产物不用于喂养。
+显示板保留 Start 和状态显示，并通过新版 Initialize 入口请求设备板初始化。设备板提供的 `startEnabled` 由 Ready 派生，Cloud offline 提示允许保留。宝宝、品牌、水量、温度为演示数据，`thermalSimulated=true`，两个条件字段均为 None；产物不用于喂养。
 
 ## JSON 与脚本契约
 
@@ -57,7 +57,7 @@ zero ID RPM ACCEL DECEL CURRENT
 
 ## 参考、停止与故障
 
-初始化脚本的 `await` 完成后，Motion 只对 `zero_axes` 设置 X 固件手册 p77 的易失掉电标志（`50 01`），读回 `3A.bit7=1` 才进入 Ready。之后标志变回 0 视为找零轴驱动重启，撤销软件参考并停止。实际 X28S/X42S 必须验证支持该标志；不支持时初始化不能通过。
+初始化脚本的 `await` 完成后，设备板只对 `zero_axes` 设置 X 固件手册 p77 的易失掉电标志（`50 01`），读回 `3A.bit7=1` 才进入 Ready。之后标志变回 0 视为找零轴驱动重启，撤销软件参考并停止。实际 X28S/X42S 必须验证支持该标志；不支持时初始化不能通过。
 
 上电、配置替换、手动运动/原点相关操作与坐标换算修改撤销参考；已知故障、队列执行失败和已观察到的找零轴驱动重启仍会中止流程，其中已知故障和驱动重启会撤销参考。普通状态轮询偶发缺样不撤销 Ready；这也意味着 Ready 不证明机构仍在机械零位。屏幕重启和 Wi-Fi 断线不改变参考；停止确认仍要求新鲜静止反馈。实机仍需验收方向、滑移与机械干涉。
 
@@ -67,7 +67,7 @@ zero ID RPM ACCEL DECEL CURRENT
 
 ## HTTP API
 
-屏幕 UART 的 v3 Intent 新增单字节 `Initialize=2`，原 `StartFeeding=1` 和 State 格式不变。Initialize 仅在 NotReady / Error 转交初始化入口，Ready / 运行态拒绝。ACK 表示接受请求，不表示完成；相同序号重复请求不重复执行，同序号换意图拒绝。找零期间再次点击的新序号由 busy 检查拒绝。屏幕离线或待 ACK 时禁用按钮，不自动恢复初始化请求；旧 Motion 不识别新指令，会导致屏幕 ACK 超时，须配套更新显示板和 Motion。旧屏幕配新 Motion 仍可使用网页初始化。
+显示板 UART 的 v3 Intent 新增单字节 `Initialize=2`，原 `StartFeeding=1` 和 State 格式不变。Initialize 仅在 NotReady / Error 转交初始化入口，Ready / 运行态拒绝。ACK 表示接受请求，不表示完成；相同序号重复请求不重复执行，同序号换意图拒绝。找零期间再次点击的新序号由 busy 检查拒绝。显示板离线或待 ACK 时禁用按钮，不自动恢复初始化请求；旧设备板固件不识别新指令，会导致显示板 ACK 超时，须配套更新显示板和设备板。旧显示板固件配新版设备板固件时仍可使用网页初始化。
 
 POST 沿用 `application/x-www-form-urlencoded`。请求被接受不表示机械完成；客户端不自动重发 POST。
 
