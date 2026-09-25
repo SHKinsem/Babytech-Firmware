@@ -470,6 +470,94 @@ static void historyRecordsRawInvalidationAndMatchingAckOnly() {
           motion::DeviceOperationState::Invalidated);
 }
 
+static void driverReplyEvidenceStaysSeparateFromPhysicalCompletion() {
+    {
+        Supervisor supervisor;
+        CHECK(supervisor.startMove(moveAt(100)));
+        const uint64_t id = supervisor.activeOperationId();
+        supervisor.acceptedAck(2, 0xFD, false, 101);
+        supervisor.acceptedAck(1, 0xFB, true, 101);
+        auto result = supervisor.readOperation(id);
+        CHECK(!result.protocolAck);
+        CHECK(!result.receiveAckObserved);
+        CHECK(!result.driverReachedObserved);
+        supervisor.acceptedAck(1, 0xFD, false, 102); // 0x02
+        result = supervisor.readOperation(id);
+        CHECK(result.protocolAck);
+        CHECK(result.receiveAckObserved);
+        CHECK(!result.driverReachedObserved);
+        CHECK(!result.reached);
+        supervisor.acceptedAck(1, 0xFD, true, 110); // 0x9F in Both mode
+        result = supervisor.readOperation(id);
+        CHECK(result.state == motion::DeviceOperationState::Running);
+        CHECK(result.receiveAckObserved);
+        CHECK(result.driverReachedObserved);
+        CHECK(!result.reached);
+        checkPending(supervisor.poll(feedback(120)));
+        CHECK(supervisor.poll(feedback(130)).done);
+        result = supervisor.readOperation(id);
+        CHECK(result.state == motion::DeviceOperationState::Reached);
+        CHECK(result.receiveAckObserved);
+        CHECK(result.driverReachedObserved);
+        CHECK(result.reached);
+    }
+    {
+        Supervisor supervisor;
+        CHECK(supervisor.startMove(moveAt(100)));
+        const uint64_t id = supervisor.activeOperationId();
+        supervisor.acceptedAck(1, 0xFD, true, 110); // 0x9F only
+        auto result = supervisor.readOperation(id);
+        CHECK(result.protocolAck);
+        CHECK(!result.receiveAckObserved);
+        CHECK(result.driverReachedObserved);
+        CHECK(!result.reached);
+        supervisor.cancelMove(1);
+        supervisor.acceptedAck(1, 0xFD, false, 120); // late 0x02
+        result = supervisor.readOperation(id);
+        CHECK(result.state == motion::DeviceOperationState::Cancelled);
+        CHECK(!result.receiveAckObserved);
+        CHECK(result.driverReachedObserved);
+        CHECK(!result.reached);
+    }
+    {
+        Supervisor supervisor;
+        CHECK(supervisor.startHome(1, 0, 100, 3000));
+        const uint64_t id = supervisor.activeOperationId();
+        supervisor.acceptedAck(1, 0x9A, true, 110); // 0x9F only
+        auto result = supervisor.readOperation(id);
+        CHECK(result.protocolAck);
+        CHECK(!result.receiveAckObserved);
+        CHECK(result.driverReachedObserved);
+        CHECK(!result.reached);
+        auto old = feedback(111);
+        old.positionMs = old.velocityMs = 109;
+        checkPending(supervisor.poll(old));
+        CHECK(supervisor.poll(feedback(120)).done);
+        result = supervisor.readOperation(id);
+        CHECK(result.state == motion::DeviceOperationState::Reached);
+        CHECK(!result.receiveAckObserved);
+        CHECK(result.driverReachedObserved);
+        CHECK(result.reached);
+    }
+    {
+        Supervisor supervisor;
+        CHECK(supervisor.startHome(1, 0, 100, 3000));
+        const uint64_t id = supervisor.activeOperationId();
+        supervisor.acceptedAck(1, 0x9A, false, 110);
+        supervisor.noMotion(1); // 0x12 or 0x22
+        auto result = supervisor.readOperation(id);
+        CHECK(result.state == motion::DeviceOperationState::NoMotion);
+        CHECK(result.protocolAck);
+        CHECK(result.receiveAckObserved);
+        CHECK(!result.driverReachedObserved);
+        CHECK(!result.reached);
+        supervisor.acceptedAck(1, 0x9A, true, 120); // late 0x9F
+        result = supervisor.readOperation(id);
+        CHECK(!result.driverReachedObserved);
+        CHECK(result.state == motion::DeviceOperationState::NoMotion);
+    }
+}
+
 int main() {
     moveNeedsMatchingAckAndTwoIndependentPairs();
     directMovesNeedTheirOwnTargetReadback();
@@ -482,6 +570,7 @@ int main() {
     operationHistoryIsBoundedButNeverDisplacesTheActiveRun();
     sessionBoundaryAndCounterExhaustionDoNotReuseHandles();
     historyRecordsRawInvalidationAndMatchingAckOnly();
+    driverReplyEvidenceStaysSeparateFromPhysicalCompletion();
     if (failures) {
         std::printf("FAIL manual operation supervisor: %d/%d checks\n", failures, checks);
         return 1;

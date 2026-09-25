@@ -23,9 +23,14 @@ struct DeviceOperationResult {
     DeviceOperationKind kind = DeviceOperationKind::None;
     DeviceOperationState state = DeviceOperationState::Unknown;
     DeviceOperationFault fault = DeviceOperationFault::None;
-    // True for a matching Received/Completed (0x02/0x9F) reply. The documented
-    // 0x12/0x22 no-motion replies have their own NoMotion state instead.
+    // True for either matching 0x02 or 0x9F. The documented 0x12/0x22
+    // no-motion replies have their own NoMotion state instead.
     bool protocolAck = false;
+    // Separate driver reply evidence. 0x02 says the driver received the
+    // command; 0x9F says the driver reported completion. Neither alone proves
+    // the motor reached its goal under our fresh-feedback completion rule.
+    bool receiveAckObserved = false;
+    bool driverReachedObserved = false;
     // True only after the existing fresh-feedback completion rule succeeds.
     bool reached = false;
 };

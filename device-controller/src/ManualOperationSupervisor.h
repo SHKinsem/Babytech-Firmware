@@ -97,6 +97,10 @@ public:
             result.kind = activeOperationKind_;
             result.state = DeviceOperationState::Running;
             result.protocolAck = moveActive() ? move_.ackSeen : home_.ackSeen;
+            result.receiveAckObserved = moveActive()
+                ? move_.receiveAckObserved : home_.receiveAckObserved;
+            result.driverReachedObserved = moveActive()
+                ? move_.driverReachedObserved : home_.completedSeen;
             return result;
         }
         for (uint8_t i = 0; i < terminalCount_; ++i) {
@@ -181,13 +185,16 @@ public:
     }
     void acceptedAck(uint8_t id, uint8_t opcode, bool completed, uint32_t now) {
         if (!ownsAck(id, opcode)) return;
-        if (moveActive()) move_.ackSeen = true;
-        else {
+        if (moveActive()) {
+            move_.ackSeen = true;
+            if (completed) move_.driverReachedObserved = true;
+            else move_.receiveAckObserved = true;
+        } else {
             home_.ackSeen = true;
             if (completed) {
                 home_.completedSeen = true;
                 home_.completedMs = now;
-            }
+            } else home_.receiveAckObserved = true;
         }
     }
     void noMotion(uint8_t id) {
@@ -259,13 +266,14 @@ private:
         int64_t startTenths = 0, targetTenths = 0;
         int32_t toleranceTenths = 0;
         uint32_t expectedDurationMs = 0, startMs = 0, deadlineMs = 0;
-        bool ackSeen = false, targetProof = false;
+        bool ackSeen = false, receiveAckObserved = false;
+        bool driverReachedObserved = false, targetProof = false;
         uint8_t doneUpdates = 0;
         uint32_t lastDonePosMs = 0, lastDoneVelMs = 0;
     };
     struct Home {
         uint32_t startMs = 0, deadlineMs = 0;
-        bool ackSeen = false, runningSeen = false;
+        bool ackSeen = false, receiveAckObserved = false, runningSeen = false;
         bool stoppedSeen = false, completedSeen = false;
         uint32_t stoppedMs = 0, completedMs = 0;
         uint8_t doneUpdates = 0;
@@ -279,6 +287,7 @@ private:
     }
     static int64_t absolute(int64_t value) { return value < 0 ? -value : value; }
     void recordTerminal(DeviceOperationState state, Fault fault, bool protocolAck,
+                        bool receiveAckObserved, bool driverReachedObserved,
                         bool reached) {
         OperationResult result;
         result.operationId = activeOperationId_;
@@ -287,6 +296,8 @@ private:
         result.state = state;
         result.fault = fault;
         result.protocolAck = protocolAck;
+        result.receiveAckObserved = receiveAckObserved;
+        result.driverReachedObserved = driverReachedObserved;
         result.reached = reached;
         terminal_[terminalNext_] = result;
         terminalNext_ = static_cast<uint8_t>((terminalNext_ + 1) % kTerminalHistoryCapacity);
@@ -303,7 +314,8 @@ private:
                 default: return;
             }
         }
-        recordTerminal(state, fault, move_.ackSeen, outcome == MoveOutcome::Done);
+        recordTerminal(state, fault, move_.ackSeen, move_.receiveAckObserved,
+                       move_.driverReachedObserved, outcome == MoveOutcome::Done);
         kind_ = Kind::None;
         move_ = Move{};
         moveOutcome_ = outcome;
@@ -322,7 +334,8 @@ private:
                 default: return;
             }
         }
-        recordTerminal(state, fault, home_.ackSeen, outcome == HomeOutcome::Done);
+        recordTerminal(state, fault, home_.ackSeen, home_.receiveAckObserved,
+                       home_.completedSeen, outcome == HomeOutcome::Done);
         kind_ = Kind::None;
         home_ = Home{};
         homeOutcome_ = outcome;

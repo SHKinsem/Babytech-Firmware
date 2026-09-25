@@ -221,14 +221,25 @@ static void test_home_response_modes_need_fresh_evidence() {
     completed.begin();
     enableAndFeed(completed, 1);
     setMillis(40);
-    CHECK(completed.api.requestHome(1, 0).accepted());
+    const DeviceReceipt home = completed.api.requestHome(1, 0);
+    CHECK(home.accepted());
     injectRx(makeAck(1, 0x9A, 0x9F)); // Homing completion reply alone is not reach proof.
     completed.poll(60);
     CHECK(completed.state(1, 60).manualHome == DeviceHomeStage::Running);
+    DeviceOperationResult result = completed.api.readOperation(home.operationId);
+    CHECK(result.protocolAck);
+    CHECK(!result.receiveAckObserved);
+    CHECK(result.driverReachedObserved);
+    CHECK(!result.reached);
     injectRx(makePosition(1, 0));
     injectRx(makeVelocity(1, 0));
     completed.poll(80);
     CHECK(completed.state(1, 80).manualHome == DeviceHomeStage::Reached);
+    result = completed.api.readOperation(home.operationId);
+    CHECK(result.state == DeviceOperationState::Reached);
+    CHECK(!result.receiveAckObserved);
+    CHECK(result.driverReachedObserved);
+    CHECK(result.reached);
 }
 
 static void test_home_no_motion_is_distinct_from_reached() {
@@ -489,6 +500,8 @@ static void test_manual_operation_ids_and_results() {
     CHECK(result.kind == DeviceOperationKind::Move);
     CHECK(result.state == DeviceOperationState::Running);
     CHECK(!result.protocolAck);
+    CHECK(!result.receiveAckObserved);
+    CHECK(!result.driverReachedObserved);
     CHECK(!result.reached);
 
     injectRx(makeAck(1, kFrameMove, 0x02));
@@ -496,6 +509,16 @@ static void test_manual_operation_ids_and_results() {
     result = rig.api.readOperation(started.operationId);
     CHECK(result.state == DeviceOperationState::Running);
     CHECK(result.protocolAck);
+    CHECK(result.receiveAckObserved);
+    CHECK(!result.driverReachedObserved);
+    CHECK(!result.reached);
+    injectRx(makeAck(1, kFrameMove, 0x9F)); // Both mode's second reply.
+    rig.poll(70);
+    result = rig.api.readOperation(started.operationId);
+    CHECK(result.state == DeviceOperationState::Running);
+    CHECK(result.protocolAck);
+    CHECK(result.receiveAckObserved);
+    CHECK(result.driverReachedObserved);
     CHECK(!result.reached);
     injectRx(makePosition(1, 96));
     injectRx(makeVelocity(1, 0));
@@ -506,6 +529,8 @@ static void test_manual_operation_ids_and_results() {
     rig.poll(100);
     result = rig.api.readOperation(started.operationId);
     CHECK(result.state == DeviceOperationState::Reached);
+    CHECK(result.receiveAckObserved);
+    CHECK(result.driverReachedObserved);
     CHECK(result.reached);
 
     // Repeated history reads are memory-only; snapshot tests also check that
@@ -526,6 +551,9 @@ static void test_manual_operation_ids_and_results() {
     rig.poll(120);
     result = rig.api.readOperation(homing.operationId);
     CHECK(result.state == DeviceOperationState::NoMotion);
+    CHECK(!result.protocolAck);
+    CHECK(!result.receiveAckObserved);
+    CHECK(!result.driverReachedObserved);
     CHECK(!result.reached);
     CHECK(rig.api.readOperation(started.operationId).state == DeviceOperationState::Reached);
 
@@ -543,11 +571,13 @@ static void test_manual_operation_ids_and_results() {
     CHECK(stopped.operationId == 0);
     CHECK(rig.api.readOperation(directMove.operationId).state ==
           DeviceOperationState::Cancelled);
+    CHECK(!rig.api.readOperation(directMove.operationId).driverReachedObserved);
     CHECK(rig.state(1, 130).motor.stopPending); // software cancellation is not stop proof
     injectRx(makeAck(1, 0xFB, 0x9F)); // late answer cannot revive the handle
     rig.poll(140);
     CHECK(rig.api.readOperation(directMove.operationId).state ==
           DeviceOperationState::Cancelled);
+    CHECK(!rig.api.readOperation(directMove.operationId).driverReachedObserved);
     injectRx(makePosition(1, 100));
     injectRx(makeVelocity(1, 0));
     rig.poll(150);
