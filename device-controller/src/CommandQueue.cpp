@@ -777,7 +777,7 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
 
 Result CommandQueue::cancel(const char* reason) {
     motor_.queueObserveId_ = 0;
-    motor_.queries_.release(CanQueryScheduler::Await);
+    motor_.releaseQueries(CanQueryScheduler::Await);
     const bool wasRunning = state_ == QueueState::Running;
     if (wasRunning) {
         state_ = QueueState::Cancelled;
@@ -820,7 +820,7 @@ Result CommandQueue::clearControlState() {
 
 void CommandQueue::finish(QueueState state, const char* message) {
     motor_.queueObserveId_ = 0;
-    motor_.queries_.release(CanQueryScheduler::Await);
+    motor_.releaseQueries(CanQueryScheduler::Await);
     state_ = state;
     setMessage(message);
     phase_ = kPhaseIdle;
@@ -838,7 +838,7 @@ void CommandQueue::fail(uint32_t now, const char* reason, uint16_t line) {
 
 void CommandQueue::advance(uint32_t now) {
     motor_.queueObserveId_ = 0;
-    motor_.queries_.release(CanQueryScheduler::Await);
+    motor_.releaseQueries(CanQueryScheduler::Await);
     ++stepIndex_;
     phase_ = kPhaseIdle;
     phaseAt_ = now;
@@ -1075,8 +1075,8 @@ void CommandQueue::beginStep(uint32_t now) {
         const bool positionFresh = motor_.freshPosition(step.id, now, position);
         const bool velocityFresh = motor_.freshVelocity(step.id, now, velocity);
         if (!positionFresh || !velocityFresh || velocity < -5 || velocity > 5) {
-            motor_.queries_.demand(step.id, 0x36, CanQueryScheduler::Await, 150, 1000, 2, now);
-            motor_.queries_.demand(step.id, 0x35, CanQueryScheduler::Await, 150, 1000, 2, now);
+            motor_.demandQuery(step.id, 0x36, CanQueryScheduler::Await, 150, 1000, 2, now);
+            motor_.demandQuery(step.id, 0x35, CanQueryScheduler::Await, 150, 1000, 2, now);
             setMessage(positionFresh && velocityFresh ? "waiting_move_stationary" :
                        "waiting_move_start_feedback");
             return;
@@ -1131,7 +1131,7 @@ SyncFeedback CommandQueue::syncFeedback(uint8_t id) const {
     f.positionValid=n.positionValid;f.velocityValid=n.velocityValid;f.targetValid=n.targetValid;
     f.flagsValid=n.flagsValid;f.homeValid=n.homeFlagsValid;
     const auto match=[&](uint8_t field,uint32_t at,uint32_t& requested) {
-        const auto evidence=motor_.queries_.evidence(id,field);requested=evidence.sampleRequestAt;
+        const auto evidence=motor_.queryEvidence(id,field);requested=evidence.sampleRequestAt;
         return evidence.receivedAt==at && at-requested<=syncSettings_.responseBudgetMs;
     };
     f.positionValid=f.positionValid && match(0x36,f.positionAt,f.positionRequestedAt);
@@ -1273,13 +1273,13 @@ void CommandQueue::observeMotion(uint32_t now) {
         setMessage("waiting_move_target");
     }
     const auto demand=[this,step,now](uint8_t field,uint32_t period) {
-        motor_.queries_.demand(step->id,field,CanQueryScheduler::Await,period,1000,2,now);
+        motor_.demandQuery(step->id,field,CanQueryScheduler::Await,period,1000,2,now);
     };
     demand(0x36,200); demand(0x35,200);
     if (home && !homeComplete_) demand(0x3B,300);
-    else motor_.queries_.release(step->id,0x3B,CanQueryScheduler::Await);
+    else motor_.releaseQuery(step->id,0x3B,CanQueryScheduler::Await);
     if (!home && (!n.targetValid || !newer(n.targetMs,phaseAt_))) demand(0x33,500);
-    else motor_.queries_.release(step->id,0x33,CanQueryScheduler::Await);
+    else motor_.releaseQuery(step->id,0x33,CanQueryScheduler::Await);
 }
 
 namespace {

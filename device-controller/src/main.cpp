@@ -1274,11 +1274,11 @@ void loadQueryBudget() {
     motion::CanQueryScheduler::Config c;
     c.queriesPerSecond=record[1];c.gapMs=record[2];c.timeoutMs=record[3];
     c.cooldownMs=record[4];c.maxInflight=record[5];
-    motor.queries().configure(c);
+    motor.configureQueryBudget(c);
 }
 
 void handleQueryBudget() {
-    if (queue.active() || endpoint.busy() || motor.operationBusy() || motor.queries().inflight()) {
+    if (queue.active() || endpoint.busy() || motor.operationBusy() || motor.queryInflight()) {
         sendError(409,F("query_budget_busy"));return;
     }
     const char* fields[]={"queriesPerSecond","gapMs","timeoutMs","cooldownMs","maxInflight"};
@@ -1299,7 +1299,7 @@ void handleQueryBudget() {
     const bool saved=prefs.putBytes("v1",record,sizeof(record))==sizeof(record);
     prefs.end();
     if(!saved) {sendError(500,F("query_budget_save_failed"));return;}
-    motor.queries().configure(c);
+    motor.configureQueryBudget(c);
     sendJson(200,motor.queryStatusJson());
 }
 

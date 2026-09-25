@@ -247,6 +247,8 @@ void X42sProtocol::enableControl(uint8_t addr, bool state, bool sync) {
     rec.enableState = state;
     rec.sync = sync;
     fakecan::emit(addr, data, sizeof(data), rec);
+    // The real helper sends through sendCommand(), which traces its TX frame.
+    if (traceSink_) traceSink_(traceContext_, fakecan::capturedTX.back(), true);
 }
 
 void X42sProtocol::stopNow(uint8_t addr, bool sync) {
@@ -256,6 +258,7 @@ void X42sProtocol::stopNow(uint8_t addr, bool sync) {
     rec.addr = addr;
     rec.sync = sync;
     fakecan::emit(addr, data, sizeof(data), rec);
+    if (traceSink_) traceSink_(traceContext_, fakecan::capturedTX.back(), true);
 }
 
 void X42sProtocol::positionControlWithCurrentLimit(

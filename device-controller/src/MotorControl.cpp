@@ -184,12 +184,12 @@ void MotorControl::watch(uint8_t id) {
     if (!autoQueriesEnabled_) return;
     const uint8_t fields[]={0x36,0x35,0x3A};
     for (uint8_t field:fields)
-        queries_.demand(id,field,CanQueryScheduler::Page,600,2000,0,millis());
+        bus_.demandQuery(id,field,CanQueryScheduler::Page,600,2000,0,millis());
 }
 
 void MotorControl::setAutoQueriesEnabled(bool enabled) {
     autoQueriesEnabled_ = enabled;
-    if (!enabled) queries_.release(CanQueryScheduler::Page);
+    if (!enabled) bus_.releaseQueries(CanQueryScheduler::Page);
     else if (selectedId_) watch(selectedId_);
 }
 
@@ -276,7 +276,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
     // 0x3B homing status: its own bit table, kept out of the 0x3A motor flags.
     if (function == kFrameHomeStatus) {
         if (frame.length != 3 || frame.data[2] != kProtocolChecksum) return;
-        queries_.receive(id,function,now);
+        bus_.receiveQuery(id,function,now);
         node.seenEver = true;
         node.lastSeenMs = now;
         node.homeFlagsValid = true;
@@ -297,7 +297,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
 
     FeedbackSample sample;
     if (!decodeFeedback(frame.data, frame.length, sample)) return;
-    queries_.receive(id,function,now);
+    bus_.receiveQuery(id,function,now);
 
     node.seenEver = true;
     node.lastSeenMs = now;
@@ -489,7 +489,7 @@ void MotorControl::invalidateTarget(uint8_t id) {
 void MotorControl::armTargetPoll(uint8_t id, uint32_t now) {
     targetPollId_ = id;
     targetPollArmedMs_ = now;
-    queries_.demand(id,0x33,CanQueryScheduler::Controller,500,
+    bus_.demandQuery(id,0x33,CanQueryScheduler::Controller,500,
                     kTargetPollWindowMs,2,now);
 }
 
@@ -527,7 +527,7 @@ bool MotorControl::nodeOfInterest(uint8_t id) const {
     if (id == selectedId_ || id == experimentId_ || id == queueObserveId_ || syncObserve_[id]) return true;
     const uint8_t fields[]={0x36,0x35,0x3A,0x33,0x3B};
     for (uint8_t field : fields)
-        if (queries_.evidence(id,field).pending) return true;
+        if (bus_.queryEvidence(id,field).pending) return true;
     if (job_.active && job_.id == id) return true;
     if (home_.active && homeId_ == id) return true;
     const NodeState& node = nodes_[id];
@@ -771,9 +771,9 @@ void MotorControl::serviceStopConfirmations(uint32_t now) {    for (uint16_t id 
 }
 
 void MotorControl::serviceQueries(uint32_t now) {
-    queries_.release(CanQueryScheduler::Controller);
+    bus_.releaseQueries(CanQueryScheduler::Controller);
     const auto demand = [this,now](uint8_t id,uint8_t field,uint32_t period,uint8_t priority) {
-        queries_.demand(id,field,CanQueryScheduler::Controller,period,1000,priority,now);
+        bus_.demandQuery(id,field,CanQueryScheduler::Controller,period,1000,priority,now);
     };
     for (uint16_t id=1; id<kNodeCount; ++id) {
         const bool moving=(job_.active && job_.id==id) ||
@@ -796,41 +796,25 @@ void MotorControl::serviceQueries(uint32_t now) {
     if (config_.state==2 && !config_.readIssued) demand(config_.id,0x22,3000,3);
 }
 
-bool MotorControl::sendQuery(void* context,uint8_t id,uint8_t field) {
+void MotorControl::querySent(void* context,uint8_t id,uint8_t field,bool sent) {
     auto& self=*static_cast<MotorControl*>(context);
-    const uint8_t bytes[]={id,field,0x6B};
-    self.bus_.clearTransmissionError();
-    bool sent=false;
-    switch (field) {
-        case 0x36: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Cpos); break;
-        case 0x35: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Vel); break;
-        case 0x33: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Tpos); break;
-        case 0x3A: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Flag); break;
-        case 0x3B: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Org); break;
-        case 0x27: sent=self.bus_.probeReadSysParams(id,X42sSysParam::Cpha); break;
-        case 0x22: sent=self.bus_.sendRawLogical(bytes,sizeof(bytes)); break;
-        default: break;
-    }
-    self.bus_.clearTransmissionError();
     if (field==0x22 && self.config_.state==2) {
         self.config_.readIssued=true;self.config_.readAt=millis();
         if (!sent) self.config_.state=8;
-        self.queries_.release(id,field,CanQueryScheduler::Controller);
+        self.bus_.releaseQuery(id,field,CanQueryScheduler::Controller);
     }
-    return sent;
 }
 
 void MotorControl::dispatchQueries() {
-    queries_.poll(millis());
-    if (canReady()) queries_.dispatch(millis(),sendQuery,this);
+    bus_.dispatchQueries(millis(),canReady(),querySent,this);
 }
 
 String MotorControl::queryStatusJson() const {
-    const auto& c=queries_.config();const auto& s=queries_.statistics();
+    const auto& c=bus_.queryBudget();const auto& s=bus_.queryStatistics();
     String j("{\"queriesPerSecond\":");j+=c.queriesPerSecond;
     j+=",\"gapMs\":";j+=c.gapMs;j+=",\"timeoutMs\":";j+=c.timeoutMs;
     j+=",\"cooldownMs\":";j+=c.cooldownMs;j+=",\"maxInflight\":";j+=c.maxInflight;
-    j+=",\"inflight\":";j+=queries_.inflight();
+    j+=",\"inflight\":";j+=bus_.queryInflight();
     j+=",\"queries\":";j+=static_cast<unsigned long>(s.queries);
     j+=",\"responses\":";j+=static_cast<unsigned long>(s.responses);
     j+=",\"unanswered\":";j+=static_cast<unsigned long>(s.unanswered);
@@ -1419,7 +1403,7 @@ bool MotorControl::configFrame(const CanRawFrame& f, uint32_t now) {
     ++config_.packet;
     if (config_.received == 16) {
         if (config_.actual[15] != 0x6B) { config_.packet = config_.received = 0; return true; }
-        queries_.receive(config_.id,0x22,now);
+        bus_.receiveQuery(config_.id,0x22,now);
         config_.state = memcmp(config_.expected, config_.actual, 15) == 0 ? 3 : 7;
     }
     return true;
@@ -1675,8 +1659,8 @@ void MotorControl::takeQueueControl() {
     if (configPending()) config_.state = 9;
     targetPollId_ = 0;
     targetPollArmedMs_ = 0;
-    queries_.release(CanQueryScheduler::Controller);
-    queries_.release(CanQueryScheduler::Await);
+    bus_.releaseQueries(CanQueryScheduler::Controller);
+    bus_.releaseQueries(CanQueryScheduler::Await);
 }
 
 void MotorControl::clearControlState() {
@@ -1850,7 +1834,7 @@ void MotorControl::demoProbe(uint8_t id, uint8_t field) {
     // probes reset lastTraffic continually and starve the awaited 0x33 target
     // query whenever the configured gap exceeds 20 ms.
     const uint8_t fields[] = {0x36, 0x35, 0x3A, 0x3B};
-    queries_.demand(id, fields[field % 4], CanQueryScheduler::Demo,
+    bus_.demandQuery(id, fields[field % 4], CanQueryScheduler::Demo,
                     400, 1000, 0, millis());
 }
 
@@ -2022,7 +2006,7 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
 
 void MotorControl::traceSink(void* context, const CanRawFrame& frame, bool tx) {
     MotorControl* self = static_cast<MotorControl*>(context);
-    if (tx) { ++self->txFrameCount_; self->queries_.noteTraffic(millis()); }
+    if (tx) ++self->txFrameCount_;
     if(tx && !self->queueTransport_ && frame.length && (frame.identifier&0xFF)==0 &&
        !CanQueryScheduler::supported(frame.data[0])) {
         self->queueDiagnostics_.invalidate(uint8_t(frame.identifier>>8));

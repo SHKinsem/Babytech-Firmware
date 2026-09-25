@@ -10,7 +10,7 @@ public:
                       bool (*externalAvailable)() = nullptr)
         : motor_(motor), queue_(queue), api_(api), rotation_(rotation), externalAvailable_(externalAvailable) {}
     void configure(const DemoConfig& config) {
-        motor_.queries().release(CanQueryScheduler::Demo);
+        motor_.releaseQueries(CanQueryScheduler::Demo);
         for (unsigned id = 1; id < 256; ++id) motor_.demoWatch(static_cast<uint8_t>(id), false);
         for (const auto& axis : config.axes) motor_.demoWatch(axis.id, true);
         config_ = &config; postStop_ = false; probe_ = 0; armed_.fill(false);

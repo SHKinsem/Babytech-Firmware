@@ -37,7 +37,7 @@ const char* queueStateName(QueueState state);
 
 class CommandQueue : private SyncPort {
 public:
-    explicit CommandQueue(MotorControl& motor) : motor_(motor), sync_(*this,motor.queries()) {}
+    explicit CommandQueue(MotorControl& motor) : motor_(motor), sync_(*this,motor.syncQueryScheduler()) {}
     bool setSyncSettings(const SyncSettings& settings) {
         if(active() || sync_.active() || !settings.valid()) return false;
         syncSettings_=settings;return true;

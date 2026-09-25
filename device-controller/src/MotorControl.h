@@ -32,7 +32,29 @@ public:
     void poll(bool dispatchQueries = true);
     // Production loop calls this after queue/UART/HTTP operations for TX priority.
     void dispatchQueries();
-    CanQueryScheduler& queries() { return queries_; }
+    // Compatibility view for existing diagnostics/tests. The bus owns this
+    // scheduler; new clients use the narrow query methods below.
+    CanQueryScheduler& queries() { return bus_.syncScheduler(); }
+    // SyncRuntime currently requires a scheduler reference for its existing
+    // contract. It receives the bus-owned instance, never a second budget.
+    CanQueryScheduler& syncQueryScheduler() { return bus_.syncScheduler(); }
+    const CanQueryScheduler::Config& queryBudget() const { return bus_.queryBudget(); }
+    const CanQueryScheduler::Statistics& queryStatistics() const { return bus_.queryStatistics(); }
+    bool configureQueryBudget(const CanQueryScheduler::Config& value) {
+        return bus_.configureQueryBudget(value);
+    }
+    uint8_t queryInflight() const { return bus_.queryInflight(); }
+    bool demandQuery(uint8_t id, uint8_t field, CanQueryScheduler::Owner owner,
+                     uint32_t periodMs, uint32_t leaseMs, uint8_t priority, uint32_t now) {
+        return bus_.demandQuery(id, field, owner, periodMs, leaseMs, priority, now);
+    }
+    void releaseQueries(CanQueryScheduler::Owner owner) { bus_.releaseQueries(owner); }
+    void releaseQuery(uint8_t id, uint8_t field, CanQueryScheduler::Owner owner) {
+        bus_.releaseQuery(id, field, owner);
+    }
+    CanQueryScheduler::Evidence queryEvidence(uint8_t id, uint8_t field) const {
+        return bus_.queryEvidence(id, field);
+    }
     String queryStatusJson() const;
     // Compatibility name: this controls idle page refresh only. Queries needed
     // to supervise an active command always use the shared scheduler.
@@ -192,8 +214,7 @@ private:
     bool syncObserve_[256]={};
     bool queueTransport_=false;
     QueueDiagnostics queueDiagnostics_;
-    CanQueryScheduler queries_;
-    static bool sendQuery(void* context, uint8_t id, uint8_t field);
+    static void querySent(void* context, uint8_t id, uint8_t field, bool sent);
     uint32_t txFrameCount_=0;
     uint32_t rxMissedCount_=0, rxOverrunCount_=0, txFailedCount_=0;
     uint8_t queueObserveId_ = 0;
