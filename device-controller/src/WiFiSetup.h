@@ -30,7 +30,9 @@
 //   POST /api/wifi/scan     -> 202, asynchronous scan started from poll()
 //   GET  /api/wifi/scan     -> {state, networks:[{ssid, rssi, secure}]}
 //
-// Explicitly out of scope: mDNS, captive portal, OTA, editing the AP password.
+// mDNS is started by the parent after HTTP is listening; this class owns only
+// the AP and station lifecycle. Captive portal, OTA, and AP password editing
+// are outside this class.
 class WiFiSetup {
  public:
   // motionBusy() is supplied by the parent (motor/CAN layer). It must be a

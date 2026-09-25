@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ESPmDNS.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_system.h>
@@ -159,6 +160,20 @@ void setup() {
     server.on("/api/stop",HTTP_POST,stopAll);
     server.onNotFound([] { sendJson(404,"{\"error\":\"not_found\"}"); });
     server.begin(); queryMotion(true);
+    if (apStarted && WiFi.softAPIP() != IPAddress(0,0,0,0)) {
+        if (MDNS.begin("babytech-main")) {
+            MDNS.setInstanceName("Babytech Main");
+            if (MDNS.addService("http","tcp",80)) {
+                Serial.println("[mdns] ready: http://babytech-main.local/ (_http._tcp:80)");
+            } else {
+                Serial.println("[mdns] HTTP service registration failed");
+            }
+        } else {
+            Serial.println("[mdns] responder start failed");
+        }
+    } else {
+        Serial.println("[mdns] skipped: AP has no IP address");
+    }
 }
 void loop() {
     pollMotion(); queryMotion(); server.handleClient(); ota.poll(); delay(1);
