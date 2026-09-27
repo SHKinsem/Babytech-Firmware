@@ -1525,11 +1525,87 @@ static void test_demo_absolute_await_from_nonzero_position() {
     step.distanceTenths = 900; step.speedTenths = 300;
     step.accelRpmS = step.decelRpmS = 60; step.currentMa = 800;
     CHECK(rig.queue.startDemo(program, 20).code == 202);
+    CHECK(has(status(rig), "\"action\":\"move\""));
     tick(rig, 30);
     injectRx(makeAck(1, 0xCD, 0x02)); tick(rig, 40);
     injectRx(makeTarget(1, 900)); feedStationary(rig, 1, 50, 900); rig.queue.poll(50);
     feedStationary(rig, 1, 70, 900); rig.queue.poll(70); tick(rig, 90);
     CHECK(rig.queue.state() == QueueState::Done);
+}
+
+static void test_moveabs_parsing_and_wire_targets() {
+    QueueRig rig; rig.begin(); rig.rotation.set(1, 8);
+    QueueProgram parsed; QueueError error;
+    const char* commands = "moveabs 1 90 deg\nMOVEABS 1 -1 rev\nmoveabs 1 20 mm\nmoveabs 1 0 await";
+    CHECK(parseQueueProgram(commands, std::strlen(commands), rig.rotation, parsed, error));
+    CHECK(parsed.count == 4);
+    CHECK(parsed.steps[0].absolute && parsed.steps[0].distanceTenths == 900);
+    CHECK(parsed.steps[0].absoluteCommand);
+    CHECK(parsed.steps[1].absolute && parsed.steps[1].distanceTenths == -3600);
+    CHECK(parsed.steps[2].absolute && parsed.steps[2].distanceTenths == 9000);
+    CHECK(parsed.steps[3].absolute && parsed.steps[3].distanceTenths == 0 &&
+          parsed.steps[3].awaitCompletion);
+    CHECK(startQueue(rig, "move 1 0").code == 400);
+    CHECK(std::string(startQueue(rig, "moveabs 1 214748365 deg").message) ==
+          "move_angle_out_of_range");
+    CHECK(std::string(startQueue(rig, "moveabs 1 90 deg 3001").message) ==
+          "move_speed_out_of_range");
+    CHECK(std::string(startQueue(rig,
+          "sync begin\nmoveabs 1 90\nmove 2 90\nsync end").message) ==
+          "sync_only_relative_move");
+    CHECK(capturedTX.empty());
+
+    struct Target { const char* command; uint8_t direction; uint32_t magnitude; };
+    for (const Target target : {Target{"moveabs 1 90 deg", 0, 900},
+                                Target{"moveabs 1 -1 rev", 1, 3600},
+                                Target{"moveabs 1 20 mm", 0, 9000},
+                                Target{"moveabs 1 0", 0, 0}}) {
+        QueueRig wire; wire.begin(); wire.rotation.set(1, 8);
+        CHECK(startQueue(wire, target.command).code == 202);
+        tick(wire, 10);
+        TxRecord sent{};
+        CHECK(lastMoveRecord(sent));
+        CHECK(sent.motionMode == 1 && sent.dir == target.direction &&
+              sent.magnitude == target.magnitude);
+        CHECK(has(status(wire), "\"action\":\"moveabs\""));
+        CHECK(wire.queue.state() == QueueState::Running);
+        tick(wire, 20);
+        CHECK(wire.queue.state() == QueueState::Done);
+    }
+}
+
+static void test_moveabs_await_checks_absolute_target() {
+    QueueRig rig; rig.begin(); rig.motor.watch(1);
+    CHECK(startQueue(rig, "moveabs 1 90 deg await\nwait 0", 1, 20).code == 202);
+    tick(rig, 30);
+    CHECK(countTxOpcode(0xCD) == 0);
+    feedStationary(rig, 1, 40, 500);
+    tick(rig, 50);
+    TxRecord sent{};
+    CHECK(lastMoveRecord(sent));
+    CHECK(sent.motionMode == 1 && sent.magnitude == 900);
+    injectRx(makeAck(1, 0xCD, 0x02)); tick(rig, 60);
+    injectRx(makeTarget(1, 1400));
+    feedStationary(rig, 1, 70, 900); rig.queue.poll(70);
+    feedStationary(rig, 1, 90, 900); rig.queue.poll(90);
+    CHECK(rig.queue.active());
+    CHECK(has(status(rig), "waiting_move_target"));
+    injectRx(makeTarget(1, 900));
+    feedStationary(rig, 1, 110, 900); rig.queue.poll(110);
+    feedStationary(rig, 1, 130, 900); rig.queue.poll(130);
+    tick(rig, 150); tick(rig, 160); tick(rig, 170);
+    CHECK(rig.queue.state() == QueueState::Done);
+
+    QueueRig zero; zero.begin(); zero.motor.watch(1);
+    CHECK(startQueue(zero, "moveabs 1 0 await", 1, 20).code == 202);
+    feedStationary(zero, 1, 30, 500); tick(zero, 40);
+    CHECK(has(status(zero), "\"action\":\"moveabs\""));
+    injectRx(makeAck(1, 0xCD, 0x02)); tick(zero, 50);
+    injectRx(makeTarget(1, 0));
+    feedStationary(zero, 1, 60, 0); zero.queue.poll(60);
+    feedStationary(zero, 1, 80, 0); zero.queue.poll(80);
+    tick(zero, 100);
+    CHECK(zero.queue.state() == QueueState::Done);
 }
 
 struct TestCase {
@@ -1541,6 +1617,8 @@ int main() {
     const TestCase tests[] = {
         {"cross-entry enable and wait preserve observations", test_cross_entry_enable_and_wait_preserve_observations},
         {"absolute demo await from nonzero position", test_demo_absolute_await_from_nonzero_position},
+        {"moveabs parsing, units, zero and wire mode", test_moveabs_parsing_and_wire_targets},
+        {"moveabs await checks the absolute target", test_moveabs_await_checks_absolute_target},
         {"fast home idle after grace without running sample", test_fast_home_without_running_sample},
         {"broadcast enable and disable wire frames", test_broadcast_enable_frames},
         {"home RX ordering, same tick and rejection", test_home_rx_order_and_same_tick},

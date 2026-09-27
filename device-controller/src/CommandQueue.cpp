@@ -158,7 +158,7 @@ bool parseHexBytes(const char* text, size_t length, uint8_t* out, uint8_t capaci
 QueueAction actionFromToken(const char* text, size_t length) {
     if (tokenEquals(text, length, "enable")) return QueueAction::Enable;
     if (tokenEquals(text, length, "disable")) return QueueAction::Disable;
-    if (tokenEquals(text, length, "move")) return QueueAction::Move;
+    if (tokenEquals(text, length, "move") || tokenEquals(text, length, "moveabs")) return QueueAction::Move;
     if (tokenEquals(text, length, "home")) return QueueAction::Home;
     if (tokenEquals(text, length, "torque")) return QueueAction::Torque;
     if (tokenEquals(text, length, "velocity")) return QueueAction::Velocity;
@@ -237,9 +237,11 @@ bool parseId(const Tokens& tokens, uint8_t index, uint8_t& id, QueueError& error
 
 bool parseMoveStep(const Tokens& tokens,
                    const QueueRotationSource& rotation, QueueStep& step, QueueError& error) {
-    // move ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]] is eight tokens
+    // move/moveabs ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]] is eight tokens
     // in its longest form.
     if (tokens.count < 3 || tokens.count > 8) return failAt(error, step.line, "argument_count");
+    step.absoluteCommand = tokenEquals(tokens.text[0], tokens.length[0], "moveabs");
+    step.absolute = step.absoluteCommand;
     if (!parseId(tokens, 1, step.id, error, step.line)) return false;
 
     double distance = 0.0;
@@ -279,7 +281,7 @@ bool parseMoveStep(const Tokens& tokens,
         return failAt(error, step.line, "move_angle_out_of_range");
     }
     const int64_t rounded = static_cast<int64_t>(roundedValue);
-    if (rounded == 0) return failAt(error, step.line, "move_angle_rounds_to_zero");
+    if (rounded == 0 && !step.absolute) return failAt(error, step.line, "move_angle_rounds_to_zero");
     step.distanceTenths = static_cast<int32_t>(rounded);
 
     double rpm = kDefaultMoveRpm;
@@ -666,7 +668,7 @@ bool parseQueueProgram(const char* text, size_t length,
             if(members<2 || members>8) return invalidGroup(line,"sync_member_count");
             program.steps[groupStart].groupSize=members;groupStart=-1;
         } else if(groupStart>=0) {
-            if(step.action!=QueueAction::Move || step.awaitCompletion) return invalidGroup(line,"sync_only_relative_move");
+            if(step.action!=QueueAction::Move || step.absolute || step.awaitCompletion) return invalidGroup(line,"sync_only_relative_move");
             if(program.count-groupStart>8) return invalidGroup(line,"sync_member_count");
             for(uint8_t i=groupStart+1;i<program.count;++i)
                 if(program.steps[i].id==step.id) return invalidGroup(line,"sync_duplicate_id");
@@ -965,7 +967,7 @@ bool CommandQueue::encodeAndSend(const QueueStep& step,bool synchronized) {
         }
         case QueueAction::Move: {
             // [addr][CD][dir][accel u16][decel u16][speed u16][angle u32]
-            // [mode=2 relative to current][sync=0][current u16][6B]
+            // [mode=1 absolute or 2 relative to current][sync=0][current u16][6B]
             const int32_t distance = step.distanceTenths;
             const uint32_t magnitude = distance < 0
                 ? static_cast<uint32_t>(-static_cast<int64_t>(distance))
@@ -1078,7 +1080,7 @@ void CommandQueue::beginStep(uint32_t now) {
         return;  // keep raw frames apart
     }
     if (step.action == QueueAction::Move && step.awaitCompletion) {
-        // An awaited relative move needs a fresh starting position. Otherwise
+        // An awaited move needs fresh stationary feedback before dispatch. Otherwise
         // an unchanged old target and old position could masquerade as arrival.
         motor_.queueObserveId_ = step.id;
         int32_t position = 0, velocity = 0;
@@ -1334,7 +1336,9 @@ String CommandQueue::statusJson() const {
     json += static_cast<unsigned int>(errorLine_ != 0 ? errorLine_
         : (program_.count == 0 ? 0 : program_.steps[actionIndex].line));
     json += ",\"action\":\"";
-    json += queueActionName(program_.count == 0 ? QueueAction::None
+    json += program_.count != 0 && program_.steps[actionIndex].action == QueueAction::Move &&
+            program_.steps[actionIndex].absoluteCommand ? "moveabs" :
+            queueActionName(program_.count == 0 ? QueueAction::None
                                                 : program_.steps[actionIndex].action);
     json += "\",\"message\":\"";
     appendEscaped(json, message_);

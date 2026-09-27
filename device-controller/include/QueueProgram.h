@@ -84,8 +84,9 @@ struct QueueStep {
     QueueAction action = QueueAction::None;
     uint16_t line = 0;
     uint8_t id = 0;
-    bool awaitCompletion = false;  // explicit trailing await on move/home only
-    bool absolute = false; // resolved software-zero target, demo adapter only
+    bool awaitCompletion = false;  // explicit trailing await on move/moveabs/home only
+    bool absolute = false; // driver absolute coordinate (moveabs or resolved demo software-zero target)
+    bool absoluteCommand = false; // source command was moveabs; demo zero keeps its own identity
     uint8_t groupSize = 0;
     bool syncTriggerOnly = false;   // shared trigger and final feedback, no live 2% progress claim
     double syncToleranceProgress = 0; // helix axial tolerance / axial travel
