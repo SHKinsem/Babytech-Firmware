@@ -20,7 +20,7 @@ import {
 
 const DRAFT_KEY = 'motor-protocol-demo.queue.draft.v1';
 // Verbs that need a confirmed enable before the board will run them.
-const MOVE_VERBS = ['move', 'home', 'torque', 'velocity'];
+const MOVE_VERBS = ['move', 'moveabs', 'home', 'torque', 'velocity'];
 
 /** Draft persisted between visits. Never starts anything on its own. */
 function readDraft() {
@@ -148,7 +148,7 @@ export function QueuePanel({
   const result = useMemo(() => validateProgram(program, { distances }), [program, distances]);
   const repeatCheck = checkRepeat(repeat);
   const mmIds = useMemo(
-    () => [...new Set(result.actions.flatMap(a=>a.verb==='helix'?[a.linearId]:a.verb==='move'&&a.unit==='mm'?[a.id]:[]))],
+    () => [...new Set(result.actions.flatMap(a=>a.verb==='helix'?[a.linearId]:['move','moveabs'].includes(a.verb)&&a.unit==='mm'?[a.id]:[]))],
     [result.actions],
   );
   const mmIdKey = mmIds.join(',');
@@ -324,7 +324,7 @@ export function QueuePanel({
         onQueueBusy({ pending: false, unconfirmed: false });
         setNotice({
           tone: parsed.status.state === 'failed' ? 'error' : 'ok',
-          text: `板端已接受队列（HTTP 202）：${queueProgressText(parsed.status)}。默认发送后继续；move/home 末尾加 await 才等待完成；原始帧（hex / can）只报告已发送，不推断完成。`,
+          text: `板端已接受队列（HTTP 202）：${queueProgressText(parsed.status)}。默认发送后继续；move/moveabs/home 末尾加 await 才等待完成；原始帧（hex / can）只报告已发送，不推断完成。`,
         });
       } else {
         // 202 without a readable body still means the board took the program.
@@ -477,7 +477,7 @@ export function QueuePanel({
           <span className={`chip ${chipClass}`}>板端队列：{stateLabel}</span>
         </div>
         <details><summary>执行规则与注意事项</summary><p className="panel__desc">
-          按顺序发送，默认发送后继续；move/home 末尾加 await 才等待本次动作完成。速度／力矩按写出的持续时间执行；<code>wait MS</code> 用于额外延时。await 期间反馈中断时停留当前行并提示，恢复后继续；驱动拒绝时报告原因，不自动失能或追加停机。原始帧只负责发送。浏览器断开后板端仍继续，不会自动重发。
+          按顺序发送，默认发送后继续；move/moveabs/home 末尾加 await 才等待本次动作完成。moveabs 使用驱动器绝对坐标零点。速度／力矩按写出的持续时间执行；<code>wait MS</code> 用于额外延时。await 期间反馈中断时停留当前行并提示，恢复后继续；驱动拒绝时报告原因，不自动失能或追加停机。原始帧只负责发送。浏览器断开后板端仍继续，不会自动重发。
         </p></details>
 
         <label className="queue-editor__label" htmlFor="queue-program">
