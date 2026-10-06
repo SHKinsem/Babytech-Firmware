@@ -86,6 +86,7 @@ def main(argv=None):
         raise ValueError('Firmware does not contain the expected board and build identity')
     source_roots = [ROOT / PROJECT_DIRS[args.board] / folder for folder in ('src', 'include', 'data', 'lib')]
     source_roots += [ROOT / 'shared/WifiOta/src', ROOT / 'shared/BoardProtocol/src',
+                     ROOT / 'shared/ProductBoardLink/src',
                      ROOT / 'shared/BabytechCloudLink/src',
                      ROOT / 'shared/BabytechDisplayCore/src']
     newest_source = max(path.stat().st_mtime for folder in source_roots
