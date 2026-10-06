@@ -7,6 +7,7 @@
 #include "FakeCloudIo.h"
 #include "WiFi.h"
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -426,6 +427,444 @@ void readonlyMessages() {
     fake::runWorker();
 }
 
+std::string cloudCommand(const std::string& action, const std::string& session, uint32_t sampledAt,
+                         const std::string& sequence = "42", const std::string& id = "cloud-test") {
+    StaticJsonDocument<1536> doc;
+    doc["device_id"] = kId;
+    doc["command_id"] = id;
+    doc["command"] = action;
+    doc["command_seq"] = sequence;
+    doc["command_session"] = session;
+    doc["device_uptime_ms"] = sampledAt;
+    doc["ttl_ms"] = 5000;
+    if (action == "prepare") {
+        doc["baby_id"] = "baby-test";
+        doc["feeding_context_profile_version"] = 7;
+        doc["water_ml"] = 180;
+        doc["temp"] = 45;
+        doc["powder_g_per_100ml"] = 25.5;
+    } else if (action == "set_target_temp") doc["temp"] = 45;
+    check(!doc.overflowed(), "command fixture overflowed");
+    std::string value;
+    serializeJson(doc, value);
+    return value;
+}
+
+std::vector<size_t> ackPackets() {
+    std::vector<size_t> indexes;
+    for (size_t i = 0; i < fake::io.published.size(); ++i) {
+        if (fake::io.published[i].topic == kPrefix + "ack") indexes.push_back(i);
+        else packet(i); // Every status must remain read-only; no other output is allowed.
+    }
+    return indexes;
+}
+void commandAck(size_t index, const std::string& action, const std::string& session,
+                const char* reason = "integration_not_ready", const std::string& sequence = "42",
+                const std::string& id = "cloud-test") {
+    check(index < fake::io.published.size(), "missing command ACK");
+    const auto& value = fake::io.published[index];
+    check(value.topic == kPrefix + "ack" && !value.retained, "ACK route/retained flag incorrect");
+    DynamicJsonDocument doc(2048);
+    check(!deserializeJson(doc, value.payload) && doc.is<JsonObject>() && doc.size() == 7,
+          "ACK is not an exact seven-field JSON object");
+    check(doc["device_id"] == kId && doc["command_id"] == id && doc["command"] == action,
+          "ACK lost paired device/command identity");
+    check(doc["command_seq"].is<JsonString>() && doc["command_seq"] == sequence,
+          "ACK sequence is not the exact decimal string");
+    check(doc["command_session"] == session && doc["accepted"].is<bool>() &&
+          doc["accepted"] == false && doc["reason"] == reason, "ACK session/result/reason incorrect");
+}
+
+void commandAccepted(const std::string& action, bool maximum) {
+    BrainNetwork network;
+    begin(network);
+    const auto raw = fake::nvs.values;
+    const auto cloud = fake::io.preferences;
+    const Status motion = readyMotion();
+    const std::string sequence = maximum ? "9223372036854775807" : "42";
+    const std::string id = maximum ? std::string(125, 'x') + "\"\\\n" : "cloud-test";
+    std::string session;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network, &motion, true);
+        else if (tick == 2) {
+            session = token();
+            fake::io.incoming.push_back({kPrefix + "command", cloudCommand(action, session, millis(), sequence, id)});
+        } else if (tick == 3) {
+            check(fake::io.published.size() == 1, "MQTT callback published/dispatched before coordinator poll");
+            const auto sends = fake::io.queueSendCalls;
+            poll(network, &motion, true);
+            check(fake::io.queueSendCalls == sends + 1, "valid command did not enqueue exactly one ACK");
+        } else {
+            const auto acks = ackPackets();
+            check(acks.size() == 1 && fake::io.published.size() == 2, "valid command ACK missing/duplicated");
+            commandAck(acks.front(), action, session, "integration_not_ready", sequence, id);
+            check(fake::nvs.values == raw && fake::io.preferences == cloud, "command changed persistent state");
+            check(fake::io.clients.front()->callbackChanges() == 1, "command path installed another MQTT callback");
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void commandFreshness(const std::string& fixture) {
+    const bool isStop = fixture.compare(0, 5, "stop-") == 0;
+    const std::string mode = fixture.substr(isStop ? 5 : 6);
+    const std::string action = isStop ? "stop" : "clean";
+    if (mode.compare(0, 5, "wrap-") == 0 || mode == "uptime-zero") fake::io.now = UINT32_MAX - 1000u;
+    const uint32_t openedAt = millis();
+    BrainNetwork network;
+    begin(network);
+    std::string session;
+    bool expired = false;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            session = token();
+            uint32_t sampledAt = millis();
+            if (mode == "age-4999") fake::io.now = sampledAt + 4999u;
+            else if (mode == "age-5000" || mode == "wrap-current") fake::io.now = sampledAt + 5000u;
+            else if (mode == "age-5001" || mode == "wrap-expired") {
+                fake::io.now = sampledAt + 5001u; expired = true;
+            } else if (mode == "future") { ++sampledAt; expired = true; }
+            else if (mode == "pre-session") { sampledAt = openedAt - 1u; expired = true; }
+            else if (mode == "uptime-zero") { sampledAt = 0; fake::io.now = 0; }
+            else if (mode != "queued-expired") throw std::runtime_error("unknown freshness fixture");
+            receive("command", cloudCommand(action, session, sampledAt));
+            if (mode == "queued-expired") { fake::io.now = sampledAt + 5001u; expired = true; }
+            poll(network);
+        } else {
+            const auto acks = ackPackets();
+            check(acks.size() == 1, "freshness decision lost/duplicated its ACK");
+            commandAck(acks.front(), action, session, expired ? "request_expired" : "integration_not_ready");
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+std::vector<std::string> invalidCommands(const std::string& action, const std::string& session) {
+    const std::string valid = cloudCommand(action, session, millis());
+    std::vector<std::string> rejected = {"", "{bad", "[]", "null", valid + " trailing"};
+    const auto mutate = [&](const char* field, const auto& value) {
+        DynamicJsonDocument doc(4096);
+        check(!deserializeJson(doc, valid), "invalid base command fixture");
+        doc[field] = value;
+        std::string output; serializeJson(doc, output); rejected.push_back(output);
+    };
+    DynamicJsonDocument base(4096);
+    check(!deserializeJson(base, valid), "invalid base command fixture");
+    for (JsonPairConst field : base.as<JsonObjectConst>()) {
+        DynamicJsonDocument doc(4096);
+        check(!deserializeJson(doc, valid), "invalid base command fixture");
+        doc.remove(field.key().c_str());
+        std::string output; serializeJson(doc, output); rejected.push_back(output);
+        mutate(field.key().c_str(), nullptr);
+        mutate(field.key().c_str(), true);
+        // Duplicate even identical values: ArduinoJson alone would silently coalesce them.
+        std::string duplicate = valid;
+        duplicate.pop_back();
+        duplicate += ",\"" + std::string(field.key().c_str()) + "\":";
+        serializeJson(field.value(), duplicate);
+        duplicate += '}';
+        rejected.push_back(duplicate);
+    }
+    for (const char* field : {"device_id", "command_id", "command", "command_seq", "command_session"})
+        mutate(field, 42);
+    for (const char* field : {"device_uptime_ms", "ttl_ms"}) mutate(field, "5000");
+    mutate("extra", 1);
+    mutate("ratio", 1.5);
+    mutate("command", "initialize");
+    mutate("command", "unknown");
+    mutate("device_id", "unpaired-device");
+    mutate("command_id", "");
+    mutate("command_id", std::string(129, 'x'));
+    mutate("command_id", std::string("ok\0hidden", 9));
+    for (const char* seq : {"", "0", "01", "-1", "+1", "1.0", "1e3", "9223372036854775808", "18446744073709551615"})
+        mutate("command_seq", seq);
+    for (const std::string& bad : {std::string(), std::string(32, '0'), std::string(32, 'A'),
+                                  std::string(31, 'a'), std::string(33, 'a'), std::string(32, 'g')})
+        mutate("command_session", bad);
+    for (int ttl : {0, 4999, 5001, -1}) mutate("ttl_ms", ttl);
+    mutate("device_uptime_ms", -1);
+    mutate("device_uptime_ms", uint64_t(UINT32_MAX) + 1);
+    mutate("device_uptime_ms", 1.5);
+    // Legacy commands have no v4 envelope, including legacy emergency Stop.
+    rejected.push_back("{\"command\":\"" + action + "\",\"command_id\":\"legacy\",\"device_id\":\"" + kId + "\"}");
+    if (action == "prepare") {
+        mutate("baby_id", "");
+        mutate("feeding_context_profile_version", 0);
+        mutate("feeding_context_profile_version", uint64_t(INT32_MAX) + 1);
+        for (const char* field : {"feeding_context_profile_version", "water_ml", "temp", "powder_g_per_100ml"})
+            mutate(field, "45");
+        mutate("water_ml", 29); mutate("water_ml", 501); mutate("water_ml", 180.5);
+        mutate("powder_g_per_100ml", 0.5); mutate("powder_g_per_100ml", 50.1);
+    }
+    if (action == "prepare" || action == "set_target_temp") {
+        mutate("temp", 34); mutate("temp", 61); mutate("temp", 45.5);
+    } else {
+        mutate("temp", 45); // In particular, Stop accepts exactly its seven envelope keys.
+        mutate("baby_id", "baby-test");
+    }
+    return rejected;
+}
+
+void commandRejected(const std::string& action) {
+    BrainNetwork network;
+    begin(network);
+    std::string session;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            session = token();
+            auto rejected = invalidCommands(action, session);
+            // Valid syntax but a different session is silent even if its sample is expired.
+            rejected.push_back(cloudCommand(action, kChallenge, millis()));
+            rejected.push_back(cloudCommand(action, kChallenge, millis() - 5001u));
+            for (size_t i = 0; i < rejected.size(); ++i) {
+                receive("command", rejected[i]);
+                const auto sends = fake::io.queueSendCalls;
+                poll(network);
+                if (fake::io.queueSendCalls != sends)
+                    throw std::runtime_error("rejected " + action + " fixture " + std::to_string(i) + " enqueued output: " + rejected[i]);
+            }
+            // A positive control ensures rejection is not explained by a disabled receiver.
+            receive("command", cloudCommand(action, session, millis()));
+            poll(network);
+        } else {
+            const auto acks = ackPackets();
+            check(acks.size() == 1 && fake::io.published.size() == 2, "invalid commands leaked ACK/output");
+            commandAck(acks.front(), action, session);
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void commandTopics() {
+    BrainNetwork network;
+    begin(network);
+    std::string session;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            session = token();
+            for (const char* action : {"clean", "stop"}) {
+                const auto value = cloudCommand(action, session, millis());
+                for (const auto& topic : {"devices/unpaired-device/command", "devices/bt-brain-test-extra/command",
+                                          "devices/bt-brain-test/nested/command", "devices/bt-brain-test/command/extra",
+                                          "devices/bt-brain-test/commands", "devices/bt-brain-test/config"}) {
+                    fake::io.clients.front()->deliver(topic, value);
+                    const auto sends = fake::io.queueSendCalls;
+                    poll(network);
+                    check(fake::io.queueSendCalls == sends, "command accepted on an unrelated topic");
+                }
+            }
+            receive("command", cloudCommand("clean", session, millis()));
+            poll(network);
+        } else {
+            const auto acks = ackPackets();
+            check(acks.size() == 1 && fake::io.published.size() == 2, "wrong topic produced output");
+            commandAck(acks.front(), "clean", session);
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void commandGeneration(const std::string& fixture) {
+    const bool isStop = fixture.compare(0, 5, "stop-") == 0;
+    const std::string mode = fixture.substr(isStop ? 5 : 6);
+    const std::string action = isStop ? "stop" : "clean";
+    const bool outbound = mode == "ack-deferred";
+    BrainNetwork network;
+    begin(network);
+    std::string previous, current;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            previous = token();
+            if (mode == "inbound-deferred") fake::io.deferNextQueueSend = true;
+            receive("command", cloudCommand(action, previous, millis()));
+            if (outbound) {
+                fake::io.deferNextQueueSend = true;
+                poll(network);
+            }
+            fake::io.clients.front()->dropConnection();
+            fake::io.now += 5000u;
+        } else if (tick == 3) {
+            check(network.connected() && fake::io.connectCalls == 2, "command test did not reconnect");
+            if (outbound || mode == "inbound-deferred") fake::completeDeferredSends();
+            poll(network);
+        } else if (tick == 4) {
+            check(ackPackets().empty() && fake::io.published.size() == 2, "previous-generation command/ACK survived reconnect");
+            current = token(1);
+            check(current != previous, "reconnect reused command session");
+            receive("command", cloudCommand(action, previous, millis()));
+            const auto sends = fake::io.queueSendCalls;
+            poll(network);
+            check(fake::io.queueSendCalls == sends, "old session accepted with new inbound generation");
+            receive("command", cloudCommand(action, current, millis()));
+            poll(network);
+        } else {
+            const auto acks = ackPackets();
+            check(acks.size() == 1 && fake::io.published.size() == 3, "new session failed to recover command ACKs");
+            commandAck(acks.front(), action, current);
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void commandDisconnected(const std::string& action) {
+    BrainNetwork network;
+    begin(network);
+    std::string previous, current;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            previous = token();
+            receive("command", cloudCommand(action, previous, millis()));
+            WiFi.state = 0;
+        } else if (tick == 3) {
+            check(!network.connected(), "disconnected fixture still has an active session");
+            const auto sends = fake::io.queueSendCalls;
+            poll(network);
+            check(fake::io.queueSendCalls == sends && ackPackets().empty(), "disconnected command produced output");
+            connectedWifi();
+        } else if (tick == 4) poll(network);
+        else if (tick == 5) {
+            check(ackPackets().empty() && fake::io.published.size() == 2, "disconnected command replayed after recovery");
+            current = token(1);
+            check(current != previous, "disconnection did not replace session");
+            receive("command", cloudCommand(action, current, millis()));
+            poll(network);
+        } else {
+            const auto acks = ackPackets();
+            check(acks.size() == 1, "disconnected receiver did not recover");
+            commandAck(acks.front(), action, current);
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void commandBudget(bool priorityStop) {
+    BrainNetwork network;
+    begin(network);
+    std::string session;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            session = token();
+            for (unsigned i = 1; i <= 4; ++i)
+                receive("command", cloudCommand("clean", session, millis(), std::to_string(i), "queued-" + std::to_string(i)));
+            if (priorityStop) receive("command", cloudCommand("stop", session, millis(), "5", "priority-stop"));
+            const auto sends = fake::io.queueSendCalls;
+            poll(network);
+            check(fake::io.queueSendCalls == sends + 3, "command poll budget is not three");
+        } else if (tick == 3) {
+            const auto acks = ackPackets();
+            check(acks.size() == 2, "worker did not publish two command ACKs");
+            commandAck(acks[0], priorityStop ? "stop" : "clean", session, "integration_not_ready",
+                       priorityStop ? "5" : "1", priorityStop ? "priority-stop" : "queued-1");
+            const auto sends = fake::io.queueSendCalls;
+            poll(network);
+            check(fake::io.queueSendCalls == sends + (priorityStop ? 2u : 1u), "remaining commands not deferred to next poll");
+            const auto drained = fake::io.queueSendCalls;
+            poll(network);
+            check(fake::io.queueSendCalls == drained, "drained commands produced duplicate ACKs");
+        } else if (priorityStop && tick == 4) check(ackPackets().size() == 4, "worker publish budget changed");
+        else {
+            const auto acks = ackPackets();
+            check(acks.size() == (priorityStop ? 5u : 4u), "command budget lost/duplicated ACKs");
+            for (unsigned i = 1; i <= 4; ++i)
+                commandAck(acks[(priorityStop ? 1u : 0u) + i - 1], "clean", session,
+                           "integration_not_ready", std::to_string(i), "queued-" + std::to_string(i));
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void commandSizeBoundary(const std::string& action) {
+    BrainNetwork network;
+    begin(network);
+    std::string session;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            session = token();
+            for (size_t size : {size_t(1535), size_t(1536), size_t(2047), size_t(2048)}) {
+                const auto id = "size-" + std::to_string(size);
+                const auto base = cloudCommand(action, session, millis(), "42", id);
+                check(base.size() < size, "boundary fixture exceeds target size");
+                receive("command", std::string(size - base.size(), ' ') + base);
+                const auto sends = fake::io.queueSendCalls;
+                poll(network);
+                check(fake::io.queueSendCalls == sends + (size < 2048 ? 1u : 0u),
+                      "v4 ingress does not enforce its exact byte boundary");
+            }
+        } else if (tick == 3) check(ackPackets().size() == 2, "worker publish budget changed");
+        else {
+            const auto acks = ackPackets();
+            check(acks.size() == 3, "boundary commands lost/duplicated an ACK");
+            commandAck(acks[0], action, session, "integration_not_ready", "42", "size-1535");
+            commandAck(acks[1], action, session, "integration_not_ready", "42", "size-1536");
+            commandAck(acks[2], action, session, "integration_not_ready", "42", "size-2047");
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void cloudFixtures(const char* inputPath, const char* outputPath) {
+    check(std::string(inputPath) != outputPath, "fixture input and ACK output must be different files");
+    std::ifstream input(inputPath, std::ios::binary);
+    check(input.is_open(), "cannot open Cloud fixture JSONL");
+    std::vector<std::string> fixtures;
+    std::string line;
+    while (std::getline(input, line)) {
+        check(!line.empty(), "empty Cloud fixture line");
+        fixtures.push_back(line);
+    }
+    check(!input.bad() && input.eof(), "failed to read Cloud fixture JSONL");
+    check(!fixtures.empty() && fixtures.size() <= 997, "fixture count exceeds captured-worker schedule or is empty");
+    BrainNetwork network;
+    begin(network);
+    const auto raw = fake::nvs.values;
+    const auto cloud = fake::io.preferences;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick <= fixtures.size() + 1) {
+            // Preserve the real Cloud bytes, including identity/session/sample/TTL.
+            receive("command", fixtures[tick - 2]);
+            poll(network);
+        } else stop(); // The worker has now flushed the final fixture's ACK.
+    };
+    fake::runWorker();
+    const auto acks = ackPackets();
+    check(acks.size() == fixtures.size(), "real Brain ACK count does not match Cloud fixture count");
+    for (size_t i = 0; i < fixtures.size(); ++i) {
+        DynamicJsonDocument doc(4096);
+        check(!deserializeJson(doc, fixtures[i]) && doc.is<JsonObject>(), "Cloud fixture is not a JSON object");
+        check(doc["device_id"] == kId && doc["command"].is<JsonString>() &&
+              doc["command_id"].is<JsonString>() && doc["command_seq"].is<JsonString>() &&
+              doc["command_session"].is<JsonString>(), "Cloud fixture lacks string command identity");
+        commandAck(acks[i], doc["command"].as<std::string>(), doc["command_session"].as<std::string>(),
+                   "integration_not_ready", doc["command_seq"].as<std::string>(), doc["command_id"].as<std::string>());
+    }
+    check(fake::nvs.values == raw && fake::io.preferences == cloud, "Cloud fixtures mutated NVS");
+    check(fake::io.clients.front()->callbackChanges() == 1, "fixture path installed another MQTT callback");
+    noSideEffects(); workerOnly();
+    // Write only captured, verified production ACKs; never synthesize a reply.
+    std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+    check(output.is_open(), "cannot open ACK output JSONL");
+    for (const size_t index : acks) output << fake::io.published[index].payload << '\n';
+    output.close();
+    check(!output.fail(), "failed to write ACK output JSONL");
+    std::cout << "PASS " << acks.size() << " external Cloud fixtures (real Brain ACKs)\n";
+}
+
 void failureThrottle(bool rollover) {
     if (rollover) fake::io.now = UINT32_MAX - 100u;
     BrainNetwork network;
@@ -756,10 +1195,21 @@ void configureNetwork(const std::string& kind) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2) return 2;
-    const std::string name = argv[1];
+    const char* fixtures = nullptr;
+    const char* ackOutput = nullptr;
+    if (argc == 5) {
+        for (int i = 1; i < argc; i += 2) {
+            const std::string option = argv[i];
+            if (option == "--cloud-fixtures" && !fixtures) fixtures = argv[i + 1];
+            else if (option == "--ack-output" && !ackOutput) ackOutput = argv[i + 1];
+            else return 2;
+        }
+        if (!fixtures || !ackOutput) return 2;
+    } else if (argc != 2) return 2;
+    const std::string name = fixtures ? "cloud-fixtures" : argv[1];
     try {
-        if (name.compare(0, 10, "configure-") == 0) configureNetwork(name);
+        if (fixtures) cloudFixtures(fixtures, ackOutput);
+        else if (name.compare(0, 10, "configure-") == 0) configureNetwork(name);
         else if (name == "station-retry" || name == "station-rollover") stationRetry(name == "station-rollover");
         else if (name == "station-connected" || name == "station-wrong-ssid" || name == "station-no-ip")
             stationConnected(name.substr(8));
@@ -771,6 +1221,15 @@ int main(int argc, char** argv) {
         else if (name == "send-expiry") sendExpiry();
         else if (name == "probe" || name == "probe-reject" || name == "probe-budget") probes(name);
         else if (name == "readonly") readonlyMessages();
+        else if (name == "command-topics") commandTopics();
+        else if (name.compare(0, 13, "command-size-") == 0) commandSizeBoundary(name.substr(13));
+        else if (name == "command-budget" || name == "command-stop-priority") commandBudget(name == "command-stop-priority");
+        else if (name.compare(0, 14, "command-fresh-") == 0) commandFreshness(name.substr(14));
+        else if (name.compare(0, 19, "command-generation-") == 0) commandGeneration(name.substr(19));
+        else if (name.compare(0, 21, "command-disconnected-") == 0) commandDisconnected(name.substr(21));
+        else if (name.compare(0, 15, "command-reject-") == 0) commandRejected(name.substr(15));
+        else if (name.compare(0, 15, "command-maxseq-") == 0) commandAccepted(name.substr(15), true);
+        else if (name.compare(0, 8, "command-") == 0) commandAccepted(name.substr(8), false);
         else if (name == "queue-full") queueFull();
         else if (name == "failure-throttle" || name == "failure-throttle-rollover") failureThrottle(name == "failure-throttle-rollover");
         else if (name == "publish-failure") publishFailure();

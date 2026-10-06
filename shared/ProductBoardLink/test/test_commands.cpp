@@ -683,11 +683,92 @@ void fixtures(const char* path) {
     std::string line;
     while (std::getline(input, line)) {
         phase = std::string("Cloud fixture ") + path + ':' + std::to_string(count + 1);
-        cloudRoundtrip(line);
+        DynamicJsonDocument doc(4096);
+        CHECK(!deserializeJson(doc, line));
+        if (doc["command"] == "stop") {
+            boardlink::CloudStop stop;
+            const auto device = doc["device_id"].as<std::string>();
+            CHECK(boardlink::decodeCloudStop(reinterpret_cast<const uint8_t*>(line.data()),
+                                            line.size(), device.c_str(), stop));
+            CHECK(std::string(stop.commandId) == doc["command_id"].as<std::string>());
+            CHECK(std::to_string(stop.sequence) == doc["command_seq"].as<std::string>());
+            CHECK(std::string(stop.session) == doc["command_session"].as<std::string>());
+            CHECK(stop.sampledAtMs == doc["device_uptime_ms"].as<uint32_t>() && stop.ttlMs == 5000);
+        } else cloudRoundtrip(line);
         ++count;
     }
     CHECK(!input.bad() && count > 0);
-    std::cout << "Cloud fixtures: " << count << " decoded and UART-roundtripped\n";
+    std::cout << "Cloud fixtures: " << count << " decoded (ordinary commands UART-roundtripped)\n";
+}
+
+void cloudStops() {
+    phase = "Cloud Stop identity (no ordinary action or UART target)";
+    auto fixture = changed(fields(command(ProductCommand::Clean), true), "command", quote("stop"));
+    auto decode = [](const std::string& input, boardlink::CloudStop& output, const char* device = kDevice) {
+        return boardlink::decodeCloudStop(reinterpret_cast<const uint8_t*>(input.data()),
+                                         input.size(), device, output);
+    };
+    auto rejectStop = [&](const std::string& input, const char* device = kDevice) {
+        boardlink::CloudStop output;
+        output.sequence = 7;
+        set(output.commandId, "preserved");
+        const auto before = bytes(output);
+        CHECK(!decode(input, output, device));
+        CHECK(bytes(output) == before);
+        ++rejected;
+    };
+    for (uint64_t seq : {UINT64_C(1), UINT64_C(9007199254740993), v4::kMaxSequence}) {
+        auto valid = changed(fixture, "command_seq", quote(std::to_string(seq)));
+        for (uint32_t uptime : {uint32_t(0), UINT32_MAX}) {
+            valid = changed(valid, "device_uptime_ms", std::to_string(uptime));
+            boardlink::CloudStop output;
+            CHECK(decode(json(valid), output));
+            CHECK(output.sequence == seq && output.sampledAtMs == uptime && output.ttlMs == 5000);
+            CHECK(std::string(output.commandId) == "command-01" && std::string(output.session) == kSession);
+        }
+    }
+    for (const auto& field : fixture) {
+        rejectStop(json(removed(fixture, field.first)));
+        for (const char* token : {"null", "true", "false", "[]", "{}"})
+            rejectStop(json(changed(fixture, field.first, token)));
+        auto duplicate = fixture;
+        duplicate.emplace_back(field);
+        rejectStop(json(duplicate));
+        std::string escaped = quote(field.first);
+        char escape[7];
+        std::snprintf(escape, sizeof(escape), "\\u%04x", unsigned(static_cast<unsigned char>(field.first[0])));
+        escaped.replace(1, 1, escape);
+        rejectStop("{" + escaped + ':' + field.second + ',' + json(fixture).substr(1));
+    }
+    for (const char* key : {"source", "seq", "execution_id", "baby_id", "temp", "extra"})
+        rejectStop(json(changed(fixture, key, "1")));
+    for (const char* token : {"0", "1", "4999", "5001", "5000.0", "5000e0", "\"5000\""})
+        rejectStop(json(changed(fixture, "ttl_ms", token)));
+    for (const char* token : {"-1", "4294967296", "0.0", "1e0", "\"0\""})
+        rejectStop(json(changed(fixture, "device_uptime_ms", token)));
+    for (const char* value : {"", "0", "01", "-1", "1e0", "9223372036854775808"})
+        rejectStop(json(changed(fixture, "command_seq", quote(value))));
+    for (const char* value : {"", "00000000000000000000000000000000", "1234567890abcdef1234567890abcdeF"})
+        rejectStop(json(changed(fixture, "command_session", quote(value))));
+    rejectStop(json(changed(fixture, "command_id", quote(""))));
+    rejectStop(json(changed(fixture, "command_id", quote(std::string(129, 'x')))));
+    rejectStop(json(changed(fixture, "command_id", quote(std::string("a\0b", 3)))));
+    rejectStop(json(changed(fixture, "command_id", quote("\xff"))));
+    for (const char* value : {"prepare", "Stop", "initialize", ""})
+        rejectStop(json(changed(fixture, "command", quote(value))));
+    rejectStop(json(fixture), "different-device");
+    rejectStop(json(fixture), nullptr);
+    rejectStop(json(fixture), "");
+    auto maximum = changed(fixture, "command_id", quote(denseText(128)));
+    maximum = changed(maximum, "device_id", quote(std::string(64, 'd')));
+    boardlink::CloudStop output;
+    const std::string value = json(maximum);
+    CHECK(decode(value, output, std::string(64, 'd').c_str()));
+    CHECK(std::string(output.commandId) == denseText(128));
+    const std::string base = json(fixture);
+    for (size_t length = 0; length < base.size(); ++length) rejectStop(base.substr(0, length));
+    CHECK(decode(std::string(2047 - base.size(), ' ') + base, output));
+    rejectStop(std::string(2048 - base.size(), ' ') + base);
 }
 }  // namespace
 
@@ -701,6 +782,7 @@ int main(int argc, char** argv) {
         encoderValidation();
         stringsAndBudget();
         floatSweep();
+        cloudStops();
         if (argc == 3) fixtures(argv[2]);
         std::cout << "Board command codec: " << roundTrips << " round trips, " << floatSamples
                   << " exact float32 samples, " << rejected << " atomic rejections passed (ArduinoJson "

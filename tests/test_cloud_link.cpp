@@ -434,6 +434,10 @@ void legacy() {
             receive("config", config("command_session_probe"));
             expectInbound(link, config("feeding_context"));
             expectEmpty(link);
+            receive("command", std::string(1535, 'x'));
+            expectInbound(link, std::string(1535, 'x'));
+            receive("command", std::string(1536, 'x'));
+            expectEmpty(link);
             check(link.publish("status", "legacy-body", "legacy"), "legacy publish rejected");
         } else {
             check(fake::io.published.size() == 1, "legacy publish not sent");
@@ -536,11 +540,13 @@ void inbound() {
             receive("status", "{}");
             receive("config", "{invalid");
             receive("config", "{\"device_id\":\"other\",\"type\":\"feeding_context\"}");
-            receive("command", std::string(1536, 'x'));
+            receive("command", std::string(2048, 'x'));
             receive("command", std::string("a\0b", 3));
             expectEmpty(link);
-            receive("command", std::string(1535, 'x'));
-            expectInbound(link, std::string(1535, 'x'));
+            for (size_t size : {size_t(1535), size_t(1536), size_t(2047)}) {
+                receive("command", std::string(size, 'x'));
+                expectInbound(link, std::string(size, 'x'));
+            }
             stop();
         }
     };

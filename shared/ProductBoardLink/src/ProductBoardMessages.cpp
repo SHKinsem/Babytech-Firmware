@@ -444,4 +444,26 @@ bool decodeCloudCommand(const uint8_t* bytes, size_t length, const char* expecte
     return true;
 }
 
+bool decodeCloudStop(const uint8_t* bytes, size_t length, const char* expectedDeviceId,
+                     CloudStop& output) {
+    if (!expectedDeviceId || !expectedDeviceId[0]) return false;
+    Document doc;
+    size_t fields;
+    if (!parseBytes(bytes, length, doc, fields) || fields != 7) return false;
+    const auto root = doc.as<JsonObjectConst>();
+    CloudStop next;
+    char command[5]{};
+    if (!readText(root["command"], command, sizeof(command)) || std::strcmp(command, "stop") ||
+        !readText(root["device_id"], next.deviceId, sizeof(next.deviceId)) ||
+        std::strcmp(expectedDeviceId, next.deviceId) ||
+        !readText(root["command_id"], next.commandId, sizeof(next.commandId)) || !next.commandId[0] ||
+        !readSequence(root["command_seq"], next.sequence) ||
+        !readText(root["command_session"], next.session, sizeof(next.session)) ||
+        !sessionId(next.session) || !readInteger(root["device_uptime_ms"], next.sampledAtMs) ||
+        !readInteger(root["ttl_ms"], next.ttlMs) || next.ttlMs != 5000) return false;
+    if (!validProductIdentity(next.deviceId, next.commandId)) return false;
+    output = next;
+    return true;
+}
+
 } }  // namespace babytech::boardlink

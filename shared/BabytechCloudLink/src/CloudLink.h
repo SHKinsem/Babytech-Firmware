@@ -18,7 +18,7 @@ class CloudLink {
 public:
     struct Inbound {
         char topic[motion::kCloudTopicCapacity] = {};
-        char payload[1536] = {};
+        char payload[2048] = {};
         uint32_t generation = 0;
     };
     struct PublishResult {

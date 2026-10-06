@@ -1,9 +1,11 @@
-"""Exercise production BrainNetwork/BrainStation/status + CloudLink/session.
+"""Exercise production BrainNetwork/BrainStation/status + CloudLink/session/codecs.
 
 Only SDK I/O is faked. Reuses the CloudLink captured-worker scheduler and MQTT
 capture; each case has a fresh process for MCU-lifetime ownership. No private
 access, production copies, PIO, git, broker, hardware or network operations.
 This does not validate real FreeRTOS races, Wi-Fi SDK behavior, Flash or stacks.
+With --cloud-fixtures and --ack-output, run only external JSONL commands and
+export captured, verified production ACK JSONL without rewriting the inputs.
 """
 import argparse
 import os
@@ -28,6 +30,18 @@ CASES = [
     "publish-failure", "status-safety", "status-size", "status-control-characters",
     "encoder-boundary", "status-payload", "motion-expiry", "motion-expiry-wrap",
     "motion-expiry-probe", "motion-receipt-zero",
+    *(f"command-{action}" for action in (
+        "prepare", "clean", "set_target_temp", "reset_error", "check_firmware_update", "stop")),
+    "command-maxseq-prepare", "command-maxseq-stop",
+    *(f"command-fresh-{action}-{kind}" for action in ("clean", "stop") for kind in (
+        "age-4999", "age-5000", "age-5001", "future", "pre-session", "queued-expired",
+        "wrap-current", "wrap-expired", "uptime-zero")),
+    *(f"command-reject-{action}" for action in ("prepare", "clean", "set_target_temp", "stop")),
+    *(f"command-generation-{action}-{kind}" for action in ("clean", "stop") for kind in (
+        "inbound-queued", "inbound-deferred", "ack-deferred")),
+    "command-topics", "command-budget", "command-stop-priority",
+    "command-size-clean", "command-size-stop",
+    "command-disconnected-clean", "command-disconnected-stop",
 ]
 
 
@@ -37,7 +51,18 @@ def main():
     parser.add_argument("--arduino-json", type=Path,
                         help="Existing ArduinoJson 6 src directory; nothing is downloaded")
     parser.add_argument("--case", action="append", choices=CASES)
+    parser.add_argument("--cloud-fixtures", type=Path, help="External Cloud command payloads, one JSON object per line")
+    parser.add_argument("--ack-output", type=Path, help="Write only real, verified Brain ACK payloads as JSONL")
     args = parser.parse_args()
+    if (args.cloud_fixtures is None) != (args.ack_output is None):
+        parser.error("--cloud-fixtures and --ack-output must be specified together")
+    if args.cloud_fixtures is not None:
+        if args.case:
+            parser.error("--case cannot be combined with external fixture mode")
+        if args.cloud_fixtures.resolve() == args.ack_output.resolve():
+            parser.error("Cloud fixture input and ACK output must be different files")
+        if not args.cloud_fixtures.is_file():
+            parser.error("Cloud fixture input must be an existing JSONL file")
     root = Path(__file__).resolve().parents[1]
     headers = args.arduino_json or root / "device-controller/.pio/libdeps/motion/ArduinoJson/src"
     if not (headers / "ArduinoJson.h").is_file():
@@ -71,6 +96,10 @@ def main():
         environment = os.environ.copy()
         if args.sanitize:
             environment["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
+        if args.cloud_fixtures is not None:
+            subprocess.run([str(binary), "--cloud-fixtures", str(args.cloud_fixtures),
+                            "--ack-output", str(args.ack_output)], env=environment, timeout=15, check=True)
+            return
         failures = []
         for case in args.case or CASES:
             try:

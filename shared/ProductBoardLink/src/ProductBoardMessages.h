@@ -89,6 +89,17 @@ struct CloudCommand {
     uint16_t ttlMs = 0;
 };
 
+// MQTT Stop carries no execution target. The Brain dispatcher must bind it to
+// fresh Motion evidence before producing the separate binary UART Stop frame.
+struct CloudStop {
+    char deviceId[65]{};
+    char commandId[129]{};
+    uint64_t sequence = 0;
+    char session[33]{};
+    uint32_t sampledAtMs = 0;
+    uint16_t ttlMs = 0;
+};
+
 // Ordinary commands only; Stop remains the independent v4 binary control path.
 // COMMAND uses source/seq and ttl_ms (remaining 1..5000ms), plus frozen prepare
 // fields. Cloud uses command_seq/session/device_uptime_ms and fixed ttl=5000.
@@ -99,5 +110,7 @@ bool encodeCommand(const CommandMessage& command, v4::Message& output);
 bool decodeCommand(const v4::Message& message, CommandMessage& output);
 bool decodeCloudCommand(const uint8_t* bytes, size_t length, const char* expectedDeviceId,
                         CloudCommand& output);
+bool decodeCloudStop(const uint8_t* bytes, size_t length, const char* expectedDeviceId,
+                     CloudStop& output);
 
 } }  // namespace babytech::boardlink

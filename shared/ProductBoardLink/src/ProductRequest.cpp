@@ -28,11 +28,15 @@ bool deviceId(const char (&value)[65]) {
 }
 }
 
+bool validProductIdentity(const char (&device)[65], const char (&command)[129]) {
+    return deviceId(device) && text(command, true);
+}
+
 bool validProductRequest(const ProductRequest& request) {
     if ((request.source != v4::Source::CloudCommand && request.source != v4::Source::LocalTouch) ||
         request.command < ProductCommand::Initialize || request.command > ProductCommand::CheckFirmwareUpdate ||
-        !request.sequence || request.sequence > v4::kMaxSequence || !deviceId(request.deviceId) ||
-        !text(request.commandId, true)) return false;
+        !request.sequence || request.sequence > v4::kMaxSequence ||
+        !validProductIdentity(request.deviceId, request.commandId)) return false;
     if (request.command == ProductCommand::Initialize && request.source != v4::Source::LocalTouch)
         return false;
     if (request.command == ProductCommand::Prepare)

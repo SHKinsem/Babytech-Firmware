@@ -26,6 +26,7 @@ struct ProductRequest {
 
 constexpr size_t kRequestIdentityMaxSize = 316;
 constexpr size_t kProductDigestSize = 32;
+bool validProductIdentity(const char (&deviceId)[65], const char (&commandId)[129]);
 bool validProductRequest(const ProductRequest& request);
 size_t encodeRequestIdentity(const ProductRequest& request, uint8_t* output, size_t capacity);
 bool decodeRequestIdentity(const uint8_t* bytes, size_t length, ProductRequest& output);

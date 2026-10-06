@@ -16,7 +16,8 @@ namespace {
 constexpr char kNamespace[] = "cloudcfg";
 constexpr uint32_t kSettingsMagic = 0x42544331;
 constexpr uint32_t kRetryMs = 5000;
-constexpr size_t kMaxInboundPayload = 1535;
+constexpr size_t kMaxLegacyInboundPayload = 1535;
+constexpr size_t kMaxV4InboundPayload = sizeof(CloudLink::Inbound::payload) - 1;
 constexpr size_t kMaxOutboundPayload = 2047;
 constexpr uint32_t kMotionSampleLifetimeMs = 1500;
 
@@ -469,7 +470,7 @@ void CloudLink::mqttCallback(char* topic, uint8_t* payload, unsigned int length)
 
 void CloudLink::receive(char* topic, uint8_t* payload, unsigned int length) {
     if (!inbound_ || !stopInbound_ || !configInbound_ || !topic || !payload ||
-        length > kMaxInboundPayload ||
+        length > (v4SessionMode_ ? kMaxV4InboundPayload : kMaxLegacyInboundPayload) ||
         strlen(topic) >= sizeof(Inbound::topic) || memchr(payload, 0, length)) return;
     if (strncmp(topic, topicPrefix_, strlen(topicPrefix_)) != 0) return;
     const char* suffix = topic + strlen(topicPrefix_);

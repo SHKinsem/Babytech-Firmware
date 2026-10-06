@@ -30,6 +30,9 @@ private:
     bool publishStatus(const boardlink::Status* lastMotion, bool motionConnected,
                        const cloud::SessionSnapshot& session, uint32_t motionReceivedAtMs,
                        const char* challenge = nullptr);
+    void receiveCommand();
+    void rejectCommand(const char* commandId, const char* command, uint64_t sequence,
+                       const char* session, uint32_t sampledAtMs, uint16_t ttlMs);
     CloudLink cloud_;
     BrainStation station_;
     StaticJsonDocument<4096> status_;
