@@ -1,21 +1,34 @@
-// ESP32-S3 motion board MVP.
+// ESP32-S3 Motion controller.
 //
 // Responsibilities of this file:
-//   * brain link (BoardProtocol v2 READ/WRITE/EXEC/STOP frames) over UART1,
+//   * product display UART v3, with the legacy Brain/v2 path kept for debug,
 //   * CAN bring-up + motor command HTTP API (delegated to motion::MotorControl),
-//   * WiFi soft-AP + single embedded debug page (device-controller/data/index.html).
+//   * Wi-Fi AP, MQTT Cloud link, and the embedded motor debug page.
 //
 // It sends no enable or movement command on boot. Every motion command has to
 // come from an explicit HTTP or UART request; the driver may already be enabled.
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <cstring>
+#include <cmath>
+#include <limits>
 
 #include <BoardProtocolV2.h>
 #include <Hx711Scale.h>
 #include "QueueBoardMotion.h"
+#include "CloudLink.h"
+#include "CloudCommandHistory.h"
+#include "CloudCommandGate.h"
+#include "ProductCommandDispatcher.h"
+#include "ProductSession.h"
+#include "ProductEventOutbox.h"
+#include "ProductStatusCodec.h"
+#include "ProductAckCodec.h"
+#include "ProductContextCodec.h"
 #include "CommandQueue.h"
 #include "DebugLog.h"
 #include "ProtocolGate.h"
@@ -29,7 +42,11 @@
 #include "board_config.h"
 #include "ota_identity.h"
 #include "UartPeer.h"
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+#include <BoardLinkArduino.h>
+#include <MaintenanceUsbConsole.h>
+#endif
+#if MOTION_HAS_PRODUCT
 #include "DemoMotorExecutor.h"
 #include "DisplayLinkCore.h"
 #endif
@@ -44,7 +61,12 @@ extern const uint8_t demoJsonStart[] asm("_binary_data_demo_flow_json_start");
 
 namespace {
 
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+babytech::boardlink::ArduinoBoardLink productBoardLink;
+babytech::boardlink::MaintenanceUsbConsole commissioningSession;
+#else
 HardwareSerial brain(1);
+#endif
 babytech::v2::Parser parser;
 motion::MotorControl motor;
 motion::Hx711Scale powderScale;
@@ -60,11 +82,72 @@ babytech::WifiOta ota(server, BABYTECH_OTA_BOARD, BABYTECH_OTA_HARDWARE,
 // The queue is a board operation like any other: while it runs, Wi-Fi scanning
 // and the scale/config endpoints stay blocked.
 bool demoBusy();
+bool commissioningActive() {
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    return commissioningSession.active();
+#else
+    return false;
+#endif
+}
 bool controlBusy() { return demoBusy() || endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
-bool motionBusy() { return controlBusy() || ota.maintenanceActive(); }
-WiFiSetup wifiSetup(server, motionBusy);
+bool motionBusy() { return controlBusy() || ota.maintenanceActive() || commissioningActive(); }
+bool networkChangeBusy();
+WiFiSetup wifiSetup(server, networkChangeBusy);
+#if MOTION_UART_PEER != MOTION_UART_PEER_PRODUCT_BRAIN
+CloudLink cloud;
+ProductEventOutbox eventOutbox;
+uint32_t lastCloudStatusAt = 0;
+motion::CloudCommandHistory commandHistory;
+void processCloudMessage(const CloudLink::Inbound& message);
+#endif
+String cloudDeviceId;
+motion::ProductSession* productSession = nullptr;
+void loadProductContext();
+
+#ifndef BABYTECH_LOW_WATER_PIN
+#define BABYTECH_LOW_WATER_PIN -1
+#endif
+#ifndef BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW
+#define BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW 0
+#endif
+#ifndef BABYTECH_LOW_WATER_ACTIVE_LOW
+#define BABYTECH_LOW_WATER_ACTIVE_LOW 0
+#endif
+static_assert(BABYTECH_LOW_WATER_PIN == -1 ||
+              (BABYTECH_LOW_WATER_PIN >= 1 && BABYTECH_LOW_WATER_PIN <= 21 &&
+               BABYTECH_LOW_WATER_PIN != kCanTxPin &&
+               BABYTECH_LOW_WATER_PIN != kCanRxPin &&
+               BABYTECH_LOW_WATER_PIN != kScaleDoutPin &&
+               BABYTECH_LOW_WATER_PIN != kScaleSckPin),
+              "Low-water GPIO is unavailable or conflicts with CAN/HX711");
+bool lowWaterValid = false;
+bool lowWater = false;
+uint8_t lowWaterSamples = 0;
+uint32_t lastLowWaterSampleAt = 0;
+void pollProductResources() {
+    const uint32_t now = millis();
+    if (BABYTECH_LOW_WATER_PIN >= 0 &&
+        static_cast<uint32_t>(now - lastLowWaterSampleAt) >= 100) {
+        lastLowWaterSampleAt = now;
+        const bool observed = digitalRead(BABYTECH_LOW_WATER_PIN) ==
+            (BABYTECH_LOW_WATER_ACTIVE_LOW ? LOW : HIGH);
+        if (lowWaterSamples == 0 || observed != lowWater) lowWaterSamples = 1;
+        else if (lowWaterSamples < 5) ++lowWaterSamples;
+        lowWater = observed;
+        lowWaterValid = lowWaterSamples >= 5;
+    }
+    if (!productSession) return;
+    const auto& scale = powderScale.snapshot();
+    const bool scaleValid = powderScale.initialized() && scale.hasSample && scale.calibrated &&
+        scale.status != motion::LoadCellStatus::Stale &&
+        scale.status != motion::LoadCellStatus::Fault &&
+        static_cast<uint32_t>(now - scale.sampledAtMs) <= powderScale.sampleTimeoutMs();
+    productSession->resources(lowWaterValid, lowWater, scaleValid,
+                              scaleValid ? scale.filteredWeightG : 0.0f, now);
+}
 bool canStarted = false;
-bool safeForOta() { return !controlBusy() && !motor.operationBusy() && !wifiSetup.busy(); }
+bool safeForOta() { return !commissioningActive() && !controlBusy() &&
+    !motor.operationBusy() && !wifiSetup.busy(); }
 bool otaHealthy() { return canStarted && wifiSetup.apReady() &&
                            WiFi.softAPIP() != IPAddress(0,0,0,0); }
 uint32_t lastBrainByteAt = 0;
@@ -88,6 +171,96 @@ String bootIdHex(uint64_t value) {
     char buffer[17];
     snprintf(buffer, sizeof(buffer), "%016llX", static_cast<unsigned long long>(value));
     return String(buffer);
+}
+
+void initCloudIdentity() {
+    const uint64_t mac = ESP.getEfuseMac();
+    char id[24];
+    snprintf(id, sizeof(id), "bt-%04X%08X", static_cast<uint16_t>(mac >> 32),
+             static_cast<uint32_t>(mac));
+    cloudDeviceId = id;
+    Serial.printf("[cloud] Device ID: %s\n", id);
+    Serial.printf("[cloud] Development pairing code: %06llu\n",
+                  static_cast<unsigned long long>(mac % 1000000ULL));
+}
+
+#if MOTION_UART_PEER != MOTION_UART_PEER_PRODUCT_BRAIN
+String cloudStatusJson() {
+    motion::ProductStatusSnapshot snapshot;
+    const auto& scale = powderScale.snapshot();
+    const bool scaleValid = powderScale.initialized() && scale.hasSample &&
+        scale.calibrated && scale.status != motion::LoadCellStatus::Stale &&
+        scale.status != motion::LoadCellStatus::Fault &&
+        static_cast<uint32_t>(millis() - scale.sampledAtMs) <= powderScale.sampleTimeoutMs();
+    snapshot.deviceId = cloudDeviceId.c_str();
+    snapshot.firmwareVersion = BABYTECH_OTA_VERSION;
+    snapshot.progress = productSession ? productSession->progress() : "noready";
+    snapshot.isPreparing = productSession && productSession->active();
+    snapshot.errorCode = productSession ? productSession->errorCode() : "NONE";
+    snapshot.targetTemp = productSession ? productSession->targetTemp() : 45;
+    // Motion has no measured water temperature or heater controller yet.
+    snapshot.isWaterReady = false;
+    snapshot.lowWaterValid = lowWaterValid;
+    snapshot.lowWater = lowWater;
+    snapshot.powderValid = scaleValid;
+    snapshot.powderGrams = scaleValid ? max(0, static_cast<int>(scale.filteredWeightG)) : 0;
+    snapshot.actuatorOperational = productSession && productSession->flowConfigured() &&
+        productSession->referenceValid() && motor.ready();
+    snapshot.actuatorConfigValid = productSession && productSession->flowConfigured();
+    snapshot.actuatorBusHealthy = motor.ready();
+    snapshot.actuatorPositionReferenced = productSession && productSession->referenceValid();
+    snapshot.executionAuthorized = productSession && productSession->executionAuthorized();
+    snapshot.canStart = productSession && productSession->canStart();
+    snapshot.feedingContextConfigured = productSession && productSession->hasContext();
+    if (productSession) {
+        snapshot.babyId = productSession->context().babyId;
+        snapshot.babyName = productSession->context().babyName;
+        snapshot.profileVersion = productSession->context().profileVersion;
+    }
+    snapshot.ipAddress = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "";
+    snapshot.mqttHost = cloud.host().c_str();
+    snapshot.mqttPort = cloud.port();
+    snapshot.mqttAuthEnabled = cloud.configured();
+    snapshot.wifiRssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+    DynamicJsonDocument status(3072);
+    motion::writeProductStatus(status.to<JsonObject>(), snapshot);
+    String payload;
+    serializeJson(status, payload);
+    return payload;
+}
+#endif
+
+void serviceCloud() {
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    // Brain owns product MQTT in v4. Independent debug Wi-Fi remains active.
+    return;
+#else
+    static bool wifiWasConnected = true;
+    const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+    if (!wifiConnected && wifiWasConnected) cloud.requestReconnect();
+    wifiWasConnected = wifiConnected;
+#if MOTION_HAS_PRODUCT
+    if (productSession) productSession->networkState(wifiConnected, millis());
+#endif
+    CloudLink::Inbound message;
+    if (wifiConnected && cloud.connected()) {
+        for (uint8_t i = 0; i < 3 && cloud.take(message); ++i) {
+            processCloudMessage(message);
+        }
+    }
+#if MOTION_HAS_PRODUCT
+    motion::ProductTerminal terminal;
+    if (productSession && productSession->takeTerminal(terminal)) {
+        if (!eventOutbox.queue(terminal, millis()))
+            Serial.println("[cloud] terminal event is pending in RAM; NVS save failed");
+    }
+    if (productSession) eventOutbox.poll(cloud, *productSession, millis());
+#endif
+    const uint32_t now = millis();
+    if (cloud.connected() && static_cast<uint32_t>(now - lastCloudStatusAt) >= 2000) {
+        if (cloud.publish("status", cloudStatusJson())) lastCloudStatusAt = now;
+    }
+#endif
 }
 
 // POST routes worth an entry. Nothing else is logged, so an unknown path or a
@@ -317,15 +490,45 @@ public:
 };
 BoardRotationSource boardRotation;
 
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if MOTION_HAS_PRODUCT
 motion::DemoMotorExecutor demoExecutor(motor, queue, boardRotation, []() { return !wifiSetup.busy(); });
 motion::DemoFlowController demo(demoExecutor);
-motion::DisplayLinkCore displayLink(demo);
+motion::ProductSession product(demo);
+#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+uint32_t localCommandSequence = 0;
+bool startProductFromDisplay(uint32_t now) {
+    String id = cloudDeviceId + "-touch-" + String(now) + "-" + String(++localCommandSequence);
+    const char* rejection = nullptr;
+    return product.startLocal(std::string(id.c_str()), now, rejection);
+}
+bool initializeProductFromDisplay(uint32_t now) { return product.initialize(now); }
+babytech::display::DisplaySnapshot productDisplaySnapshot() {
+    auto snapshot = product.displaySnapshot();
+    snapshot.cloudConnected = cloud.connected();
+    return snapshot;
+}
+motion::DisplayLinkCore displayLink(demo, startProductFromDisplay,
+                                     initializeProductFromDisplay, productDisplaySnapshot);
+#endif
 String demoConfigJson;
-bool demoBusy() { return demo.busy(); }
+bool demoBusy() { return demo.busy() || product.ownsMotion() || product.eventPending(); }
 #else
 bool demoBusy() { return false; }
 #endif
+
+bool networkChangeBusy() {
+    if (commissioningActive()) return true;
+    bool stationaryPendingEvent = false;
+#if MOTION_HAS_PRODUCT
+    // A pending receipt needs connectivity; it is not physical motion.
+    if (demo.busy() || product.ownsMotion()) return true;
+    stationaryPendingEvent = product.pendingEventSettled();
+#endif
+    // hasActiveMotion also counts enabled-but-stationary drivers. Pending
+    // delivery may reconnect only with fresh stationary evidence for every axis.
+    return endpoint.busy() || (motor.hasActiveMotion() && !stationaryPendingEvent) ||
+        queue.active() || ota.maintenanceActive();
+}
 
 constexpr char kScaleIoNamespace[] = "scale-io";
 constexpr char kScaleIoPinsKey[] = "pins";
@@ -583,6 +786,44 @@ void serviceBrainLink() {
     }
     Frame event;
     for (uint8_t i=0;i<2 && endpoint.tick(millis(),event);++i) sendFrame(event);
+#elif MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    babytech::boardlink::Status status;
+    status.snapshot = product.displaySnapshot();
+    status.snapshot.cloudConnected = false;
+    status.snapshot.startEnabled = false;
+    status.sampleUptimeMs = millis();
+    status.contextVersion = product.context().profileVersion;
+    status.motionBusy = controlBusy();
+    status.stationary = !controlBusy() && !motor.operationBusy() && demo.stationary();
+    status.eventPending = product.eventPending();
+    strlcpy(status.productProgress, product.progress(), sizeof(status.productProgress));
+    strlcpy(status.productError, product.errorCode(), sizeof(status.productError));
+    status.isPreparing = product.active();
+    status.lowWaterValid = lowWaterValid;
+    status.lowWater = lowWater;
+    const auto& scale = powderScale.snapshot();
+    status.powderValid = powderScale.initialized() && scale.hasSample && scale.calibrated &&
+        scale.status != motion::LoadCellStatus::Stale && scale.status != motion::LoadCellStatus::Fault &&
+        std::isfinite(scale.filteredWeightG) &&
+        double(scale.filteredWeightG) <= double(std::numeric_limits<int32_t>::max()) &&
+        uint32_t(status.sampleUptimeMs - scale.sampledAtMs) <= powderScale.sampleTimeoutMs();
+    if (status.powderValid && scale.filteredWeightG > 0)
+        status.powderGrams = static_cast<int32_t>(scale.filteredWeightG);
+    status.actuatorOperational = product.flowConfigured() && product.referenceValid() && motor.ready();
+    status.actuatorConfigValid = product.flowConfigured();
+    status.actuatorBusHealthy = motor.ready();
+    status.actuatorPositionReferenced = product.referenceValid();
+    status.executionAuthorized = product.executionAuthorized();
+    status.feedingContextConfigured = product.hasContext();
+    const auto& babyId = product.context().babyId;
+    if (babyId.size() < sizeof(status.babyId)) {
+        memcpy(status.babyId, babyId.data(), babyId.size());
+        status.babyId[babyId.size()] = 0;
+    } else {
+        status.feedingContextConfigured = false;
+    }
+    // Legacy evidence is not yet imported into a v4 execution/event identity.
+    productBoardLink.poll(status.sampleUptimeMs, &status);
 #else
     if (ota.maintenanceActive()) { while (brain.available() > 0) brain.read(); return; }
     uint8_t bytes[babytech::display::kDisplayMaxFrameSize];
@@ -597,30 +838,42 @@ void serviceBrainLink() {
 
 bool demoManualMutation() {
     if (demoBusy()) { sendError(409, F("demo_busy")); return false; }
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if MOTION_HAS_PRODUCT
     demo.invalidate();
 #endif
     return true;
 }
 
 // Stop remains reachable in every phase, including gaps between scripts.
-bool stopDemoOwnership() {
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+enum class StopOwnershipResult { None, Requested, Unconfirmed };
+
+StopOwnershipResult stopDemoOwnership() {
+#if MOTION_HAS_PRODUCT
+    if (product.ownsMotion()) {
+        bool wasActive = false;
+        return product.stop(millis(), wasActive) ? StopOwnershipResult::Requested
+                                                : StopOwnershipResult::Unconfirmed;
+    }
     if (demo.busy() || demo.referenceValid()) {
         demo.stop(millis());
-        return true;
+        return demo.error() == babytech::display::DisplayError::CanFault
+            ? StopOwnershipResult::Unconfirmed : StopOwnershipResult::Requested;
     }
 #endif
-    return false;
+    return StopOwnershipResult::None;
 }
 
 bool stopDemoIfOwned() {
-    if (!stopDemoOwnership()) return false;
-    sendJson(202, F("{\"ok\":true,\"message\":\"stop_requested\"}"));
+    const auto result = stopDemoOwnership();
+    if (result == StopOwnershipResult::None) return false;
+    if (result == StopOwnershipResult::Unconfirmed)
+        sendError(503, F("stop_unconfirmed"));
+    else
+        sendJson(202, F("{\"ok\":true,\"message\":\"stop_requested\"}"));
     return true;
 }
 
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if MOTION_HAS_PRODUCT
 String demoStatusJson() {
     String s = "{\"available\":true,\"stage\":\"";
     s += babytech::display::displayStageKey(demo.stage());
@@ -643,7 +896,7 @@ bool applyDemoJson(const String& json, std::string& error) {
     return true;
 }
 void handleDemoConfig() {
-    if (demo.busy() || !demoExecutor.available() || wifiSetup.busy()) { sendError(409, F("demo_busy")); return; }
+    if (demoBusy() || !demoExecutor.available() || wifiSetup.busy()) { sendError(409, F("demo_busy")); return; }
     std::string error;
     if (!applyDemoJson(server.arg("json"), error)) {
         String body = "{\"error\":\""; body += error.c_str(); body += "\"}";
@@ -652,7 +905,7 @@ void handleDemoConfig() {
     sendJson(200, demoStatusJson());
 }
 void handleDemoAction() {
-    if (wifiSetup.busy() || !motion::demoRotationMatches(demo.config(), boardRotation)) {
+    if (demoBusy() || wifiSetup.busy() || !motion::demoRotationMatches(demo.config(), boardRotation)) {
         sendError(409, F("configuration_or_wifi_busy")); return;
     }
     const String action = server.arg("action");
@@ -669,6 +922,7 @@ void handleDemoAction() {
 void pollDemo() {
     demoExecutor.poll(millis());
     demo.tick(millis());
+    product.tick(millis());
     static babytech::display::DisplayStage previous = babytech::display::DisplayStage::Unknown;
     static const char* previousReason = nullptr;
     if (previous != demo.stage() || previousReason != demo.reason()) {
@@ -680,6 +934,155 @@ void pollDemo() {
 }
 #else
 void pollDemo() {}
+#endif
+
+void loadProductContext() {
+#if MOTION_HAS_PRODUCT
+    Preferences preferences;
+    if (!preferences.begin("productctx", true)) {
+        product.setContextStorageReady(false);
+        Serial.println("[cloud] feeding context NVS unavailable at boot; product start blocked");
+        return;
+    }
+    const String stored = preferences.getString("payload", "");
+    preferences.end();
+    if (stored.isEmpty()) return;
+    DynamicJsonDocument document(2048);
+    if (deserializeJson(document, stored) ||
+        String(document["device_id"] | "") != cloudDeviceId ||
+        String(document["type"] | "") != "feeding_context") {
+        product.setContextStorageReady(false);
+        Serial.println("[cloud] feeding context NVS invalid at boot; product start blocked");
+        return;
+    }
+    if (document["cleared"] == true) {
+        uint32_t profileVersion = 0;
+        if (!motion::decodeFeedingContextClear(document.as<JsonVariantConst>(), profileVersion)) {
+            product.setContextStorageReady(false);
+            Serial.println("[cloud] feeding context tombstone invalid at boot; product start blocked");
+            return;
+        }
+        product.clearContext(profileVersion);
+        return;
+    }
+    motion::FeedingContext context;
+    if (!motion::decodeFeedingContext(document.as<JsonVariantConst>(), context)) {
+        product.setContextStorageReady(false);
+        Serial.println("[cloud] feeding context profile invalid at boot; product start blocked");
+        return;
+    }
+    product.applyContext(context);
+#endif
+}
+
+#if MOTION_UART_PEER != MOTION_UART_PEER_PRODUCT_BRAIN
+void publishProductAck(const String& commandId, const String& command,
+                       bool accepted, const char* status, const char* reason) {
+    motion::ProductAckSnapshot snapshot;
+    snapshot.commandId = commandId.c_str();
+    snapshot.command = command.c_str();
+    snapshot.deviceId = cloudDeviceId.c_str();
+    snapshot.accepted = accepted;
+    snapshot.status = status;
+    snapshot.reason = reason ? reason : "";
+    snapshot.progress = productSession ? productSession->progress() : "noready";
+    if (snapshot.progress == "error") snapshot.errorCode = productSession->errorCode();
+    DynamicJsonDocument ack(768);
+    motion::writeProductAck(ack.to<JsonObject>(), snapshot);
+    String payload;
+    serializeJson(ack, payload);
+    commandHistory.remember(std::string(commandId.c_str()), std::string(payload.c_str()));
+    cloud.publish("ack", payload);
+}
+
+void processCloudMessage(const CloudLink::Inbound& message) {
+    if (!motion::cloudInboundEligible(WiFi.status() == WL_CONNECTED, cloud.connected(),
+                                      message.generation, cloud.sessionGeneration())) return;
+    DynamicJsonDocument document(2048);
+    if (deserializeJson(document, message.payload)) return;
+    const String topic = message.topic;
+    const String prefix = "devices/" + cloudDeviceId + "/";
+    if (topic == prefix + "config") {
+#if MOTION_HAS_PRODUCT
+        if (document["type"] == "feeding_event_receipt") {
+            eventOutbox.receiveReceipt(document.as<JsonVariantConst>(), product);
+            return;
+        }
+        if (String(document["type"] | "") != "feeding_context" ||
+            String(document["device_id"] | "") != cloudDeviceId) return;
+        Preferences preferences;
+        if (document["cleared"] == true) {
+            uint32_t profileVersion = 0;
+            if (!motion::decodeFeedingContextClear(document.as<JsonVariantConst>(), profileVersion) ||
+                !product.acceptsClear(profileVersion)) return;
+            String stored;
+            serializeJson(document, stored);
+            if (!preferences.begin("productctx", false)) {
+                product.setContextStorageReady(false);
+                Serial.println("[cloud] feeding context NVS unavailable; product start blocked");
+                return;
+            }
+            const bool saved = preferences.putString("payload", stored) == stored.length();
+            preferences.end();
+            if (saved) {
+                product.clearContext(profileVersion);
+                product.setContextStorageReady(true);
+            } else {
+                product.setContextStorageReady(false);
+                Serial.println("[cloud] feeding context clear NVS save failed; product start blocked");
+            }
+            return;
+        }
+        motion::FeedingContext context;
+        if (!motion::decodeFeedingContext(document.as<JsonVariantConst>(), context) ||
+            !product.acceptsContext(context)) return;
+        String stored;
+        serializeJson(document, stored);
+        if (!preferences.begin("productctx", false)) {
+            product.setContextStorageReady(false);
+            Serial.println("[cloud] feeding context NVS unavailable; product start blocked");
+            return;
+        }
+        const bool saved = preferences.putString("payload", stored) == stored.length();
+        preferences.end();
+        if (saved) {
+            product.applyContext(context);
+            product.setContextStorageReady(true);
+        } else {
+            product.setContextStorageReady(false);
+            Serial.println("[cloud] feeding context NVS save failed; product start blocked");
+        }
+#endif
+        return;
+    }
+    if (topic != prefix + "command") return;
+    const String command = document["command"] | "";
+    const String commandId = document["command_id"] | "";
+    if (commandId.isEmpty() || commandId.length() > 128 || command.length() > 40) return;
+    if (String(document["device_id"] | "") != cloudDeviceId) {
+        publishProductAck(commandId, command, false, "rejected", "device_id_mismatch");
+        return;
+    }
+    if (const std::string* previous = commandHistory.find(std::string(commandId.c_str()))) {
+        cloud.publish("ack", String(previous->c_str()));
+        return;
+    }
+    if (!motion::cloudInboundEligible(WiFi.status() == WL_CONNECTED, cloud.connected(),
+                                      message.generation, cloud.sessionGeneration())) return;
+    bool accepted = false;
+    const char* status = "rejected";
+    const char* reason = "not_ready";
+#if MOTION_HAS_PRODUCT
+    const auto outcome = motion::executeProductCommand(
+        document.as<JsonVariantConst>(), product, ota.maintenanceActive(), millis());
+    accepted = outcome.accepted;
+    status = outcome.status;
+    reason = outcome.reason;
+#else
+    reason = "brain_peer_not_product";
+#endif
+    publishProductAck(commandId, command, accepted, status, reason);
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -703,8 +1106,8 @@ void handleStatus() {
         return;
     }
     const uint8_t target = static_cast<uint8_t>(id);
-    // Reading a status must not steal the polling target from a running queue.
-    if (!endpoint.busy() && !queue.active()) motor.watch(target);
+    // Reading status must not steal the poll target from a product or debug run.
+    if (!endpoint.busy() && !queue.active() && !demoBusy()) motor.watch(target);
     // statusJson is already a complete JSON object; the body is forwarded
     // unmodified. It carries no uptime field.
     sendJson(200, motor.statusJson(target));
@@ -822,6 +1225,8 @@ void cancelUartForLocalDisable() {
     for (uint8_t i = 0; i < 2 && endpoint.cancelPending(event); ++i) sendFrame(event);
 }
 
+bool rejectDuringMaintenance();
+
 void handleEnable() {
     long id = 0;
     if (!argInteger("id", id) || id < 1 || id > 255) {
@@ -838,6 +1243,7 @@ void handleEnable() {
         return;
     }
     const bool enabling = enabledRaw == "1";
+    if (enabling && rejectDuringMaintenance()) return;
     if (enabling && !demoManualMutation()) return;
     if (!enabling) stopDemoOwnership();
     if (enabling) {
@@ -945,7 +1351,11 @@ void handleStop() {
 // it never claims the shaft physically stopped - clearing internal bookkeeping
 // is not evidence of that. GET cannot reach this handler.
 void handleControlReset() {
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if MOTION_HAS_PRODUCT
+    if (product.ownsMotion()) {
+        bool wasActive = false;
+        product.stop(millis(), wasActive);
+    }
     demo.invalidate();
     if (demo.busy()) demo.stop(millis());
 #endif
@@ -998,6 +1408,7 @@ void handleEnableAll() {
     if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
         sendError(400, F("enabled must be 0 or 1")); return;
     }
+    if (enabled && rejectDuringMaintenance()) return;
     if (enabled && !demoManualMutation()) return;
     if (!enabled) stopDemoOwnership();
     if (enabled) {
@@ -1043,6 +1454,7 @@ void handleCommand() {
     // running program.
     const bool stopLike = kind==motion::CommandKind::Stop || kind==motion::CommandKind::Interrupt ||
         (kind==motion::CommandKind::Enable && bytes[3]==0);
+    if (!stopLike && kind != motion::CommandKind::Read && rejectDuringMaintenance()) return;
     const bool disabling = kind == motion::CommandKind::Enable && bytes[3] == 0;
     if (disabling) stopDemoOwnership();
     else if (stopLike && stopDemoIfOwned()) return;
@@ -1269,7 +1681,7 @@ void loadQueryBudget() {
 }
 
 void handleQueryBudget() {
-    if (queue.active() || endpoint.busy() || motor.operationBusy() || motor.queries().inflight()) {
+    if (motionBusy() || motor.operationBusy() || motor.queries().inflight()) {
         sendError(409,F("query_budget_busy"));return;
     }
     const char* fields[]={"queriesPerSecond","gapMs","timeoutMs","cooldownMs","maxInflight"};
@@ -1307,7 +1719,7 @@ void loadSyncSettings() {
 }
 
 void handleSyncSettings() {
-    if(queue.active() || endpoint.busy() || motor.operationBusy()) {sendError(409,F("sync_busy"));return;}
+    if(motionBusy() || motor.operationBusy()) {sendError(409,F("sync_busy"));return;}
     double progress=0;long v[6]={};
     const char* fields[]={"timeToleranceMs","feedbackTimeoutMs","prepareTimeoutMs","stopTimeoutMs","responseBudgetMs","completionTenths"};
     if(!argDecimal("progressTolerance",progress) || progress<=0 || progress>0.25) {
@@ -1335,23 +1747,61 @@ bool rejectDuringOta() {
     return true;
 }
 
+bool rejectDuringMaintenance() {
+    if (commissioningActive()) {
+        sendError(409, F("commissioning_active"));
+        return true;
+    }
+    return rejectDuringOta();
+}
+
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+void pollCommissioningConsole() {
+    const bool localSafe = canStarted && !controlBusy() && !motor.operationBusy() &&
+        !wifiSetup.busy() && !ota.maintenanceActive() && !powderScale.tareInProgress() &&
+        demo.stationary();
+    commissioningSession.poll(Serial, millis(), localSafe,
+        [](const char* line, char* output, size_t capacity) { return ota.formatSerialLine(line, output, capacity); });
+}
+#endif
+
 }  // namespace
 
 void setup() {
     Serial.begin(115200);
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    Serial.setTxTimeoutMs(0);
+#endif
     Serial.println();
     Serial.println("[boot] Babytech Motion: AP + HTTP debug bridge. No motion on boot.");
 
-    uint64_t boot=(uint64_t(esp_random())<<32)|esp_random();
+    uint64_t boot = 0;
+    while (!boot) boot = (uint64_t(esp_random()) << 32) | esp_random();
     // The diagnostic log starts with this boot's identity and the reset reason,
     // once. It stores no credentials and nothing about the previous session.
     debugLog.begin(bootIdHex(boot).c_str());
     debugLog.addf(millis(), "info", "boot", "boot=%s reset=%d",
                   debugLog.bootId(), static_cast<int>(esp_reset_reason()));
     endpoint.begin(boot);
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    commissioningSession.begin(babytech::v4::Role::Motion, boot);
+    if (!productBoardLink.begin(babytech::v4::Role::Motion, kLinkRxPin, kLinkTxPin, kLinkBaud))
+        Serial.printf("[uart] v4 unavailable, pairing state=%u\n",
+                      unsigned(productBoardLink.pairingState()));
+#else
     brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
+#endif
+#if MOTION_HAS_PRODUCT
+    productSession = &product;
+    product.setExecutionAuthorized(MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY &&
+                                   BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1);
+#endif
+    if (BABYTECH_LOW_WATER_PIN >= 0)
+        pinMode(BABYTECH_LOW_WATER_PIN,
+                BABYTECH_LOW_WATER_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
     Serial.printf("[uart] peer=%s TX43/RX44 @115200\n",
-        MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY ? "display-v3" : "brain-v2");
+        MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY ? "display-v3" :
+        MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN ? "brain-v4-readonly" : "brain-v2");
 
     loadScalePins();
     if (!powderScale.begin(makeScaleConfig(), millis())) {
@@ -1376,24 +1826,46 @@ void setup() {
     loadQueryBudget();
     loadSyncSettings();
     loadRotationDistances();
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#if MOTION_HAS_PRODUCT
     std::string configError;
     if (!applyDemoJson(reinterpret_cast<const char*>(demoJsonStart), configError))
         Serial.printf("[demo] configuration rejected: %s\n", configError.c_str());
 #endif
     wifiSetup.begin();
+    initCloudIdentity();
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    if (productBoardLink.deviceId()[0]) cloudDeviceId = productBoardLink.deviceId();
+#endif
+    loadProductContext();
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    const auto legacyState = ProductEventOutbox::inspectLegacyState();
+    if (legacyState != ProductEventOutbox::LegacyState::Empty) {
+        product.setEventPending(true);
+        product.recoverAfterRestart(millis());
+        Serial.println("[product] legacy event requires controlled migration; record unchanged");
+    }
+#else
+    if (productSession) eventOutbox.begin(cloudDeviceId, *productSession);
+#endif
+#if MOTION_UART_PEER != MOTION_UART_PEER_PRODUCT_BRAIN
+    cloud.begin(cloudDeviceId);
+    cloud.registerRoutes(server, networkChangeBusy);
+#endif
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    ota.useExternalSerialReader();
+#endif
     ota.begin();
 
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/api/limits", HTTP_GET, []() { sendJson(200, limitsJson()); });
-    server.on("/api/limits", HTTP_POST, []() { if (!rejectDuringOta()) handleLimits(); });
+    server.on("/api/limits", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleLimits(); });
     server.on("/api/can-debug", HTTP_GET, []() { sendJson(200, motor.canDebugJson()); });
     server.on("/api/config-result", HTTP_GET, []() { sendJson(200, motor.configJson()); });
     // Legacy API name: toggles optional idle Page refresh only. Required
     // Controller/Await/Sync feedback remains scheduled during active work.
     server.on("/api/polling", HTTP_POST, []() {
-        if (rejectDuringOta()) return;
+        if (rejectDuringMaintenance()) return;
         if (demoBusy()) { sendError(409, F("demo_busy")); return; }
         long enabled = 0;
         if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
@@ -1416,34 +1888,36 @@ void setup() {
         sendJson(200, String(logJson, length));
     });
     server.on("/api/scale", HTTP_GET, []() { sendJson(200, scaleStatusJson()); });
-    server.on("/api/scale/config", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleConfig(); });
-    server.on("/api/scale/tare", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleTare(); });
-    server.on("/api/scale/calibrate", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleCalibrate(); });
+    server.on("/api/scale/config", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleScaleConfig(); });
+    server.on("/api/scale/tare", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleScaleTare(); });
+    server.on("/api/scale/calibrate", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleScaleCalibrate(); });
+    // Mixed routes validate first, then allow read/stop/disable in commissioning.
+    // Preserve the existing OTA reservation policy independently.
     server.on("/api/command", HTTP_POST, []() { if (!rejectDuringOta()) handleCommand(); });
     server.on("/api/enable", HTTP_POST, []() { if (!rejectDuringOta()) handleEnable(); });
     server.on("/api/enable-all", HTTP_POST, []() { if (!rejectDuringOta()) handleEnableAll(); });
-    server.on("/api/move", HTTP_POST, []() { if (!rejectDuringOta()) handleMove(); });
+    server.on("/api/move", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleMove(); });
     server.on("/api/stop", HTTP_POST, handleStop);
     server.on("/api/stop-all", HTTP_POST, handleStopAll);
     // Operator reset of volatile control ownership: POST only, available while
     // the queue, UART or a supervised action is busy, and never a re-enable.
-    server.on("/api/control/reset", HTTP_POST, []() { if (!rejectDuringOta()) handleControlReset(); });
+    server.on("/api/control/reset", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleControlReset(); });
     // Board queue: GET never executes anything, start validates the whole
     // program before the first CAN frame, cancel also stops everything.
     server.on("/api/queue", HTTP_GET, []() { sendJson(200, queue.statusJson()); });
     server.on("/api/query-budget", HTTP_GET, []() { sendJson(200, motor.queryStatusJson()); });
-    server.on("/api/query-budget", HTTP_POST, []() { if (!rejectDuringOta()) handleQueryBudget(); });
+    server.on("/api/query-budget", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleQueryBudget(); });
     server.on("/api/sync-settings", HTTP_GET, [](){sendJson(200,queue.syncSettingsJson());});
-    server.on("/api/sync-settings", HTTP_POST, []() { if (!rejectDuringOta()) handleSyncSettings(); });
-    server.on("/api/queue/start", HTTP_POST, []() { if (!rejectDuringOta()) handleQueueStart(); });
+    server.on("/api/sync-settings", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleSyncSettings(); });
+    server.on("/api/queue/start", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleQueueStart(); });
     server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
     server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);
-    server.on("/api/motor-distance", HTTP_POST, []() { if (!rejectDuringOta()) handleMotorDistance(); });
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    server.on("/api/motor-distance", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleMotorDistance(); });
+#if MOTION_HAS_PRODUCT
     server.on("/api/demo", HTTP_GET, []() { sendJson(200, demoStatusJson()); });
     server.on("/api/demo/config", HTTP_GET, []() { sendJson(200, demoConfigJson); });
-    server.on("/api/demo/config", HTTP_POST, []() { if (!rejectDuringOta()) handleDemoConfig(); });
-    server.on("/api/demo/action", HTTP_POST, []() { if (!rejectDuringOta()) handleDemoAction(); });
+    server.on("/api/demo/config", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleDemoConfig(); });
+    server.on("/api/demo/action", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleDemoAction(); });
 #else
     server.on("/api/demo", HTTP_GET, []() { sendJson(200, F("{\"available\":false}")); });
 #endif
@@ -1461,8 +1935,13 @@ void loop() {
     // entry is written only when something actually changed.
     debugLogPoll(millis());
     powderScale.poll(millis());
+    pollProductResources();
     motor.poll(false);
     serviceBrainLink();
+    serviceCloud();
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    pollCommissioningConsole();
+#endif
     server.handleClient();
     ota.poll();
     // Process explicit stop/cancel inputs before demo or queue advancement.

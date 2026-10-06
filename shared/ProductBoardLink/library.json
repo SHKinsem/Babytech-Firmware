@@ -1,0 +1,9 @@
+{
+  "name": "ProductBoardLink",
+  "version": "0.1.0",
+  "description": "Read-only product board HELLO and STATUS JSON codecs for UART v4.",
+  "dependencies": {
+    "bblanchon/ArduinoJson": "^6.21.5"
+  },
+  "build": { "includeDir": "src" }
+}

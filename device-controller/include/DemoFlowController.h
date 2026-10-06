@@ -62,6 +62,7 @@ public:
     const DemoConfig& config() const { return config_; }
     bool busy() const { return running_ || stopping_ || resetPending_ || stage_ == DisplayStage::Complete; }
     bool referenceValid() const { return reference_; }
+    bool stationary() const { return settled(false); }
     bool initializing() const { return running_ && index_ == -1; }
     DisplayStage stage() const { return stage_; }
     DisplayError error() const { return stage_ == DisplayStage::Error ? error_ : DisplayError::None; }

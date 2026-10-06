@@ -40,14 +40,24 @@ layout = {
 (release / 'flash-layout.json').write_text(json.dumps(layout,ensure_ascii=False,indent=2),encoding='utf-8')
 
 sources = set()
-for folder in ['main-controller','device-controller','shared','tests']:
+for folder in ['main-controller','device-controller','shared','boards','tests','test']:
     for file in (root / folder).rglob('*'):
         if not file.is_file() or any(p in {'.pio','.git','__pycache__','node_modules'} for p in file.parts):
             continue
         if file.suffix.lower() in {'.cpp','.h','.c','.ini','.json','.md','.html','.py','.cjs','.txt'}:
             sources.add(file)
 sources.update((root / 'docs').glob('*.md'))
-for name in ['build-wsl.ps1','build-wsl.sh','test_protocol.py','test_motion.py','package-device.py']:
+for name in ['build-wsl.ps1','build-wsl.sh','test_protocol.py','test_motion.py','package-device.py',
+             'test_raw_can.py','test_demo.py','test_cloud_contract.py',
+             'export_boot_app0.py','test_display_view.py','test_board_messages.py','test_board_link.py',
+             'test_pairing_record.py','test_board_arduino.py','test_cloud_session.py','test_cloud_link.py',
+             'test_brain_network.py','test_brain_station.py','test_brain_network_console.py',
+             'configure_brain_network.py','test_brain_controller.py',
+             'prepare_board_pairing.py','test_pairing_store.py',
+             'test_product_context.py','test_legacy_context_store.py',
+             'test_product_state.py','test_brain_state_store.py',
+             'test_motion_state_record.py','test_motion_state_store.py','test_motion_result_queue.py','test_board_commissioning.py',
+             'test_maintenance_console.py','test_maintenance_export.py','capture_board_export.py']:
     sources.add(root / 'tools' / name)
 sources.add(root / 'README.md')
 front = root / 'tools/motor-protocol-demo'

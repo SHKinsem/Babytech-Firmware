@@ -36,9 +36,9 @@ Linux 缓存位置：
 
 ## 首次环境
 
-WSL 需要 `pio`、`rsync`、`flock`、`python3`、`g++`。脚本会搜索 `~/.local/bin`、
+WSL 需要 `pio`、`rsync`、`flock`、`python3`、`g++` 和 `libssl-dev`。后者仅用于主机持久记录测试的真实 SHA-256 后端，设备仍使用各自 SDK 的 mbedTLS。脚本会搜索 `~/.local/bin`、
 `~/.platformio/penv/bin` 和 `~/.venvs/platformio/bin` 中的 PlatformIO。
-工具链仍由两个 `platformio.ini` 固定为 Espressif32 6.4.0 / Arduino-ESP32 2.0.11。
+工具链以各自 `platformio.ini` 为准：Motion 为 Espressif32 6.4.0 / Arduino-ESP32 2.0.11；迁入屏幕的 Brain 为 pioarduino 55.03.30-2 / Arduino-ESP32 3.3.0。不要为了统一工具链而互相升降版本。
 正常联网环境下，首次编译由 PlatformIO 下载缺失依赖。
 
 当前电脑的 WSL 无法直接连接软件源，因此初次配置通过 Windows 下载官方 Linux 工具包并校验 SHA256；
@@ -51,6 +51,8 @@ USB 继续留在 Windows。当前仍可使用 README 中的 Windows PlatformIO �
 但该流程会执行 Windows 构建；直接烧录 WSL 导出产物的工具留待真实烧录阶段接入。
 
 ## 本机验证（2026-09-21）
+
+以下为当时旧工程的历史基线，不代表当前屏幕 Brain、v4 网络或持久迁移已在 WSL 验证。
 
 协议主机测试、motion 和 brain 的 Linux 编译均通过。首次完整编译的 PlatformIO 耗时分别为 5.38 秒、6.43 秒；紧接着无源码变化的增量检查分别为 1.33 秒、1.40 秒。这些数字不含 WSL 启动、源码同步和产物导出，不能视作端到端耗时。当前机器 WSL 启动仍可能有额外等待。
 

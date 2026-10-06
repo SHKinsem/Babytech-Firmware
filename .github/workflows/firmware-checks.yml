@@ -39,12 +39,19 @@ jobs:
       - name: Run protocol, motion, raw CAN, and demo tests
         run: |
           python tools/test_protocol.py
+          python tools/test_pairing_record.py --sanitize
+          python tools/test_pairing_store.py --sanitize
+          python tests/test_prepare_board_pairing.py
+          python tools/test_cloud_session.py --sanitize
           python tools/test_motion.py
           python tools/test_raw_can.py
           python tools/test_demo.py
 
       - name: Run flash utility unit tests
         run: python -m unittest discover -s tests -p 'test_flash_device.py'
+
+      - name: Check source archive build dependencies
+        run: python -m unittest discover -s tests -p 'test_package_device.py'
 
       - name: Test OTA page when available
         run: |
@@ -66,7 +73,10 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install platformio==6.1.19
 
-      - name: Build BRAIN and both MOTION UART peer variants
+      - name: Install host SHA-256 test dependency
+        run: sudo apt-get update && sudo apt-get install --yes libssl-dev
+
+      - name: Build BRAIN and MOTION migration variants
         shell: bash
         run: |
           set -euo pipefail
@@ -90,6 +100,32 @@ jobs:
           fi
 
           pio run --project-dir "$brain_dir"
+          python tools/test_display_view.py
+          PLATFORMIO_BUILD_SRC_FLAGS=-DBABYTECH_BOARD_LINK_V4=1 pio run --project-dir "$brain_dir"
+          pio run --project-dir "$brain_dir"
           pio run --project-dir "$motion_dir"
-          PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -fstack-usage -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DMOTION_UART_PEER=2' \
-            pio run --project-dir "$motion_dir"
+          python tools/test_cloud_link.py --sanitize
+          python tools/test_cloud_contract.py
+          python tools/test_board_messages.py --sanitize
+          python tools/test_product_context.py --sanitize
+          python tools/test_legacy_context_store.py --sanitize
+          python tools/test_product_state.py --sanitize
+          python tools/test_brain_state_store.py --sanitize
+          python tools/test_motion_state_record.py --sanitize
+          python tools/test_motion_state_store.py --sanitize
+          python tools/test_motion_result_queue.py --sanitize
+          python tools/test_board_commissioning.py --sanitize
+          python tools/test_maintenance_console.py --sanitize
+          python tools/test_maintenance_export.py --sanitize
+          python -m unittest discover -s tests -p test_capture_board_export.py
+          python -m unittest discover -s tests -p test_maintenance_wiring.py
+          python tools/test_board_link.py --sanitize
+          python tools/test_board_arduino.py --sanitize
+          python tools/test_brain_controller.py --sanitize
+          python tools/test_brain_network.py --sanitize
+          python tools/test_brain_station.py --sanitize
+          python tools/test_brain_network_console.py --sanitize
+          python -m unittest discover -s tests -p test_configure_brain_network.py
+          PLATFORMIO_BUILD_SRC_FLAGS=-DMOTION_UART_PEER=4 pio run --project-dir "$motion_dir"
+          PLATFORMIO_BUILD_SRC_FLAGS=-DMOTION_UART_PEER=1 pio run --project-dir "$motion_dir"
+          pio run --project-dir "$motion_dir"

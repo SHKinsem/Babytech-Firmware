@@ -186,5 +186,5 @@ POST 返回 HTTP 202 只表示已提交 UART 路径，界面必须继续等下�
 - tools/test_protocol.py：v1 回归和 v2 编解码、批量写原子性、重复/冲突/过期请求、丢回复结果补查、停止、失联、重启和客户端恢复。
 - tools/test_motion.py：现有运动核心/控制器测试，以及 UART Endpoint → BoardMotion → 真实 MotorControl → 模拟 CAN 联调，包含完成判据、网页停止打断、失联、缺 ACK 和故障。
 - tools/build-wsl.ps1 -Target all：上下板固件编译；产物在 out/wsl/brain 和 out/wsl/motion。
-- node tests/brain-web.cjs：实际嵌入页面的模拟 API 测试，验证无自动动作、参数版本、未应用编辑、异步结果、停止、离线及重启。
+- 旧 Brain 网页及 `tests/brain-web.cjs` 已于 2026-10-06 随屏幕入口迁移退役；历史网页验证不作为当前 Brain 屏幕证据。当前屏幕测试使用 `python tools/test_display_view.py`，v2 协议库测试仍保留。
 - 无硬件烧录、无实际 UART/CAN/机构验收；模拟测试不能代替物理停止与机构参数验收。
