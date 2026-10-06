@@ -25,6 +25,8 @@ bool ArduinoBoardLink::begin(v4::Role role, int rxPin, int txPin, uint32_t baud)
     v4::Pairing pairing;
     pairingState_ = loadBoardPairing(role, pairing);
     if (pairingState_ != PairingLoad::Ready) return false;
+    pairing_ = pairing;
+    pairingVerified_ = true;
     std::memcpy(deviceId_, pairing.deviceId, sizeof(deviceId_));
     if (rxPin < 0 || txPin < 0 || rxPin == txPin || baud != 115200) {
         pairingState_ = PairingLoad::UartError;

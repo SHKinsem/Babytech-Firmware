@@ -9,19 +9,28 @@ public:
     DemoMotorExecutor(MotorControl& motor, CommandQueue& queue, const QueueRotationSource& rotation,
                       bool (*externalAvailable)() = nullptr)
         : motor_(motor), queue_(queue), rotation_(rotation), externalAvailable_(externalAvailable) {}
+    // Axis monitoring is also needed when boot rejects executable parameters.
+    void configureStopAxes(const DemoConfig& config) {
+        for (unsigned id = 1; id < 256; ++id) motor_.demoWatch(static_cast<uint8_t>(id), false);
+        stopAxisCount_ = 0;
+        if (config.axes.size() <= stopAxes_.size()) for (const auto& axis : config.axes) {
+            stopAxes_[stopAxisCount_++] = axis.id;
+            motor_.demoWatch(axis.id, true);
+        }
+        postStop_ = false; probe_ = 0;
+    }
     void configure(const DemoConfig& config) {
         motor_.queries().release(CanQueryScheduler::Demo);
-        for (unsigned id = 1; id < 256; ++id) motor_.demoWatch(static_cast<uint8_t>(id), false);
-        for (const auto& axis : config.axes) motor_.demoWatch(axis.id, true);
-        config_ = &config; postStop_ = false; probe_ = 0; armed_.fill(false);
+        configureStopAxes(config);
+        config_ = &config; armed_.fill(false);
     }
     void poll(uint32_t now) {
-        if (!config_ || config_->axes.empty() || uint32_t(now - probeAt_) < 20) return;
+        if (!stopAxisCount_ || uint32_t(now - probeAt_) < 20) return;
         probeAt_ = now;
-        const auto count = config_->axes.size();
-        motor_.demoProbe(config_->axes[probe_ % count].id, (probe_ / count) % 4);
+        const auto count = stopAxisCount_;
+        motor_.demoProbe(stopAxes_[probe_ % count], (probe_ / count) % 4);
         probe_ = (probe_ + 1) % (count * 4);
-        if (marking_ && queue_.state() == QueueState::Done) {
+        if (config_ && marking_ && queue_.state() == QueueState::Done) {
             while (markIndex_ < count && !config_->axes[markIndex_].zero) ++markIndex_;
             if (markIndex_ >= count) { marking_ = false; return; }
             const auto id = config_->axes[markIndex_].id;
@@ -52,16 +61,28 @@ public:
         return !config_ || demoRotationMatches(*config_, rotation_);
     }
     DemoEvidence evidence(uint8_t id) const override {
+        const uint32_t elapsedAfterStop = uint32_t(millis() - stopAt_);
         const auto s = motor_.snapshot(id);
         DemoEvidence e;
         e.fresh = s.positionValid && s.velocityValid;
         uint8_t flags; uint32_t age;
         e.fresh = e.fresh && motor_.demoFlags(id, flags, age);
-        if (postStop_) e.fresh = e.fresh && s.positionAge < uint32_t(millis() - stopAt_) &&
-            s.velocityAge < uint32_t(millis() - stopAt_);
+        if (postStop_) e.fresh = e.fresh && s.positionAge < elapsedAfterStop &&
+            s.velocityAge < elapsedAfterStop;
         e.stationary = s.velocity >= -5 && s.velocity <= 5;
         e.position = s.position; e.fault = motor_.demoDriverFault(id);
         return e;
+    }
+    // Stop confirmation is not Ready: enabled holding drivers, invalid zeros,
+    // script/rotation mismatch and latched faults do not erase fresh stop proof.
+    bool stopConfirmed() const {
+        if (!postStop_ || !motor_.ready() || !stopAxisCount_ ||
+            queue_.active() || motor_.operationBusy()) return false;
+        for (size_t i = 0; i < stopAxisCount_; ++i) {
+            const auto e = evidence(stopAxes_[i]);
+            if (!e.fresh || !e.stationary) return false;
+        }
+        return true;
     }
     bool start(const DemoScript& script, bool initializing,
                const std::array<int32_t, 256>& zeros, uint32_t now) override {
@@ -109,6 +130,8 @@ private:
     const QueueRotationSource& rotation_;
     bool (*externalAvailable_)() = nullptr;
     const DemoConfig* config_ = nullptr;
+    std::array<uint8_t, kDemoMaxAxes> stopAxes_{};
+    size_t stopAxisCount_ = 0;
     size_t probe_ = 0;
     uint32_t probeAt_ = 0, stopAt_ = 0;
     bool postStop_ = false;

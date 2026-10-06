@@ -114,6 +114,7 @@ jobs:
           python tools/test_brain_state_store.py --sanitize
           python tools/test_motion_state_record.py --sanitize
           python tools/test_motion_state_store.py --sanitize
+          python tools/test_motion_state_recovery.py --sanitize
           python tools/test_motion_result_queue.py --sanitize
           python tools/test_board_commissioning.py --sanitize
           python tools/test_maintenance_console.py --sanitize

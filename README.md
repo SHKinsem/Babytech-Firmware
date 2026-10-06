@@ -26,7 +26,7 @@ Brain v4 已接本地USB Wi-Fi/MQTT配置，见下方“Brain USB网络配置”
 
 当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1 只读入口：Brain 使用 `BABYTECH_BOARD_LINK_V4=1`，Motion 使用 `MOTION_UART_PEER=4`。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC，缺失或损坏即不可用，不自动认领陌生对端。受控配对写入和旧配置导入尚未完成，不能靠烧录这两个镜像直接完成迁移。
 
-只读 v4 不启动 Motion 产品 MQTT，也不开放屏幕 Initialize/Start；Motion 独立 Wi-Fi、HTTP 调试网页及本地 OTA 保留。旧 `formulaevt/payload` 仅用只读方式检查，有记录或读取异常时保留原数据、标记待处理并监督停机，不调用会改写旧 journal 的 Outbox 初始化。新执行/事件身份和持久序号尚未接入，不将只读状态中的空身份/零水位当作可执行授权。默认 v3 行为不变。
+只读 v4 不启动 Motion 产品 MQTT，也不开放屏幕 Initialize/Start；Motion 独立 Wi-Fi、HTTP 调试网页及本地 OTA 保留。旧 `formulaevt/payload` 仅用只读方式检查，有记录或读取异常时保留原数据、标记待处理并监督停机，不调用会改写旧 journal 的 Outbox 初始化。新记录的开机读取/恢复已接入，接受新动作和两板补传仍未接入；只读状态不授予运动权限。默认 v3 行为不变。
 
 在本子仓库根目录编译验证（不含烧录）：
 
@@ -46,7 +46,7 @@ pio run -d device-controller -e motion
 
 `CloudSession` 是网络新鲜度门禁，不是持久去重或动作授权。Brain v4 在有效配对后调用 `beginV4()`；网络 worker 只读既有 `wifi-cfg` 和 `cloudcfg`，进行有界等待/退避的 Wi-Fi 重连及 MQTT 服务，UI loop 不调用网络 I/O。坏凭据不自动擦除，没有配对记录则不启动。受控凭据配置入口仍属 B1.3，不应手工猜写 Flash。
 
-`brain_network` 每次 MQTT 新会话立即、其后每 2 秒尝试发布状态；只回复 config topic 中匹配本机和当前 session 的只读 probe，其余命令/配置不派发或写 NVS。UI 仅由原任务更新。Motion STATUS 增加产品阶段、故障、资源有效性与完整宝宝 ID；Brain 固定禁止启动，过期机械状态显示 unknown，保留已知故障。Cloud 配套处理 `motion_status_stale=true` 时不解除已有设备错误，只有新鲜恢复状态才解除。Cloud 探测/发行闭环与 SQLite14 尚未实施。
+`brain_network` 每次 MQTT 新会话立即、其后每 2 秒尝试发布状态；回复 config topic 中匹配本机和当前 session 的只读 probe。命令入口已解码并明确拒绝未完成的集成请求，不派发动作或写业务 NVS。UI 仅由原任务更新。Motion STATUS 增加产品阶段、故障、资源有效性与完整宝宝 ID；Brain 固定禁止启动，过期机械状态显示 unknown，保留已知故障。Cloud 配套处理 `motion_status_stale=true` 时不解除已有设备错误，只有新鲜恢复状态才解除。父仓库已实现 Cloud 探测、SQLite14 持久发行/回执账本；完整安装、动作和结果转发尚未接通，源码实现不代表生产部署已验证。
 
 网络依赖现已随实际 v4 入口加入 Brain ini；即使默认不运行网络，SDK 依赖也会增加镜像和静态 RAM。最终队列、显示 DMA、任务栈和内部堆需实板测量。正常状态只保留最新值，探测保持独立队列；实际发送前核对会话及原始机械采样有效期。JSON 完整转义后超过 2047 bytes 则整条拒绝，绝不截断身份；极端转义字段组合可能超限。只读代码不能用于替换现场产品固件。
 
@@ -85,7 +85,13 @@ Brain 持久状态组件已增加 `BrainStateRecord`/`BrainStateStore`：完整�
 
 Motion新增 `MotionStateRecord`/`MotionStateStore`，在单个 `productstate/record` 中保存配置屏障、cloud/local各自消费水位及最近结果、一个执行意图或待确认喂养终态。新拒绝同样消费序号；重复结果不授权再次运动，新配置与新拒绝不改旧执行快照。喂养终态须验证Cloud stored回执和新鲜静止证据才清除，水位保留。initialize/clean记录独立执行结果，不生成喂养事件；重启加载不是继续动作的许可。Cloud Stop先走立即安全停机，静止后再保存序号屏障；存储失败不能阻止Stop。
 
-记录上界1728 bytes，目标粉量继续采用原0.1g舍入。普通加载只读，写入不确定会锁存失败；只提供受控安装原语，不自动创建记录或覆盖旧NVS。该组件尚未接产品运行/两板导入，不改变默认v3行为，也没有开放v4动作。测试：`python3 tools/test_motion_state_record.py --sanitize`、`python3 tools/test_motion_state_store.py --sanitize`。主机故障注入不等于实板Flash/NVS容量或MCU栈验收；虽然Store持有成员缓冲，codec仍有栈临时对象，运行集成必须测栈高水位。
+当前BMS2记录上界4073 bytes（旧BMS1为1728），目标粉量继续采用原0.1g舍入。加载只读，写入不确定会锁存失败；不自动创建记录或覆盖旧NVS。接受新动作/两板导入尚未接入，不改变默认v3行为，也没有开放v4动作。测试：`python3 tools/test_motion_state_record.py --sanitize`、`python3 tools/test_motion_state_store.py --sanitize`。主机故障注入不等于实板Flash/NVS容量或MCU栈验收；Store使用静态成员缓冲，实板仍须测完整调用链的栈高水位。
+
+Motion v4开机通过UART适配器核对过本机MAC/角色的配对读取`productstate/record`，`MotionStateRecovery`已接到实际setup和`pollDemo`。空执行槽及已归档历史队列不触发Stop或写Flash；未完成意图/未归档终态、已配对但记录缺失/损坏/读取失败，走既有`ProductSession::recoverAfterRestart`广播Stop、撤销参考并监督新鲜反馈，不续跑。确认静止后，prepare意图冻结为`reboot_during_feed / E_REBOOT_DURING_FEED`并入队；initialize/clean记Interrupted、清意图，不生成喂养事件。已有终态保留原成功/失败快照，历史队列不会套用旧单槽`eventPending`全局门禁。
+
+恢复期间只对尚未确认停稳的冲突运动保留busy；确认静止后，即使持久写入故障，独立调试不因此永久禁用，产品仍保持关闭、旧证据不清除。停机证据要求CAN可用和停止请求之后的新鲜静止测量，不要求产品Ready、清除故障或关闭静止保持使能。开机从已解析内置JSON独立取得轴列表；即使旋转参数不匹配、脚本不能运行，仍可查询并确认停机，不妨碍之后修复配置。所有采样与同一保守时间界限比较，时钟推进不能让停止前样本变新。
+
+STATUS读取真实持久水位、执行/event ID及配置屏障/墓碑；存储异常报告`E_STORAGE_FAULT`，保留已有更具体的机械错误，不能将故障状态里的零占位水位当作同步成功。测试：`python3 tools/test_motion_state_recovery.py --sanitize`，包含NVS故障和生产ProductSession/Flow的主机替身；`tools/test_demo.py`验证真实MotorControl/Executor与假CAN的停机检测，`tests/test_maintenance_wiring.py`仅检查实际入口源码连线。它们不代表真实CAN、Flash或断电验收。完整任务派发、配置同步、Cloud结果补传和安装仍待完成。
 
 `BoardCommissioning` 已把本机身份核对、Motion旧事件/配置预检、业务状态导入和最后的配对写入串在一起。中断后只允许同内容且未使用的初始记录续装；已有配对但业务记录丢失时拒绝重新从零开始。Guard必须在各持久阶段提供排他维护、人工授权、新鲜静止及MQTT交接证据，Brain还须验证对应Motion导出的完整配置。此处尚未实现真实Guard、USB安装操作入口或双板完成确认，不能通过随手传入true跳过前置条件。组件测试：`python3 tools/test_board_commissioning.py --sanitize`，不写真实Flash、不代表迁移已启用。
 

@@ -115,6 +115,40 @@ class MaintenanceWiringTest(unittest.TestCase):
                 self.assertNotIn(forbidden, body)
         self.assertIn("network.poll(", function_body(self.brain, "void loop()"))
 
+    def test_v4_recovery_is_wired_to_boot_and_existing_stop_supervision(self):
+        setup = function_body(self.motion, "void setup()")
+        self.assertLess(setup.index("applyDemoJson("), setup.index("productRecovery.begin("))
+        self.assertLess(setup.index("motor.begin("), setup.index("productRecovery.begin("))
+        self.assertIn("productBoardLink.verifiedPairing()", setup)
+        self.assertIn("product.recoverAfterRestart(nowMs)", self.motion)
+        polling = function_body(self.motion, "void pollDemo()")
+        self.assertLess(polling.index("demo.tick("), polling.index("productRecovery.poll()"))
+        telemetry = function_body(self.motion, "void serviceBrainLink()")
+        self.assertIn("productRecovery.project(status)", telemetry)
+        # All debug motion paths share demoBusy, not only the OTA/network gates.
+        busy = function_body(self.motion, "bool demoBusy() {")
+        self.assertIn("recoveryMotionPending()", busy)
+        self.assertNotIn("productState", busy)
+
+    def test_recovery_stationary_uses_hardware_without_its_own_busy_gate(self):
+        body = function_body(self.motion, "bool stationary() const override")
+        for required in ("canStarted", "!endpoint.busy()",
+                         "!motor.operationBusy()", "!queue.active()", "!demo.busy()",
+                         "!product.ownsMotion()", "demoExecutor.stopConfirmed()"):
+            self.assertIn(required, body)
+        for recursive in ("controlBusy()", "demoBusy()", "motionPending()",
+                          "hasActiveMotion()", "demo.stationary()"):
+            self.assertNotIn(recursive, body)
+
+    def test_boot_inventory_precedes_executable_parameter_validation(self):
+        body = function_body(self.motion, "bool applyDemoJson(")
+        self.assertLess(body.index("parseDemoConfig("), body.index("configureStopAxes("))
+        self.assertLess(body.index("configureStopAxes("), body.index("demoRotationMatches("))
+        self.assertIn("if (boot) demoExecutor.configureStopAxes(candidate)", body)
+        setup = function_body(self.motion, "void setup()")
+        self.assertIn("demoJsonStart), configError,\n"
+                      "                       MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN)", setup)
+
 
 if __name__ == "__main__":
     unittest.main()

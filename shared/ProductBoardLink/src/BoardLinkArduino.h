@@ -16,6 +16,8 @@ public:
     const ReadOnlyLink& link() const { return link_; }
     PairingLoad pairingState() const { return pairingState_; }
     const char* deviceId() const { return deviceId_; }
+    // Local recovery must still run if the separately initialized UART fails.
+    const v4::Pairing* verifiedPairing() const { return pairingVerified_ ? &pairing_ : nullptr; }
 private:
     class Sink : public v4::ByteSink {
     public:
@@ -30,7 +32,9 @@ private:
     Sink sink_{serial_};
     ReadOnlyLink link_{};
     PairingLoad pairingState_ = PairingLoad::Missing;
+    v4::Pairing pairing_{};
     char deviceId_[65]{};
+    bool pairingVerified_ = false;
     bool started_ = false;
 };
 

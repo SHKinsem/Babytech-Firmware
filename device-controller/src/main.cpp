@@ -45,6 +45,7 @@
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
 #include <BoardLinkArduino.h>
 #include <MaintenanceUsbConsole.h>
+#include "MotionStateRecovery.h"
 #endif
 #if MOTION_HAS_PRODUCT
 #include "DemoMotorExecutor.h"
@@ -82,6 +83,7 @@ babytech::WifiOta ota(server, BABYTECH_OTA_BOARD, BABYTECH_OTA_HARDWARE,
 // The queue is a board operation like any other: while it runs, Wi-Fi scanning
 // and the scale/config endpoints stay blocked.
 bool demoBusy();
+bool recoveryMotionPending();
 bool commissioningActive() {
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
     return commissioningSession.active();
@@ -494,6 +496,20 @@ BoardRotationSource boardRotation;
 motion::DemoMotorExecutor demoExecutor(motor, queue, boardRotation, []() { return !wifiSetup.busy(); });
 motion::DemoFlowController demo(demoExecutor);
 motion::ProductSession product(demo);
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+class RecoveryHardware : public motion::MotionRecoveryHardware {
+public:
+    void supervisedStop(uint32_t nowMs) override { product.recoverAfterRestart(nowMs); }
+    bool stationary() const override {
+        return canStarted && !endpoint.busy() &&
+            !motor.operationBusy() && !queue.active() && !demo.busy() &&
+            !product.ownsMotion() && demoExecutor.stopConfirmed();
+    }
+};
+RecoveryHardware recoveryHardware;
+babytech::boardlink::MotionStateStore productState;
+motion::MotionStateRecovery productRecovery(productState, recoveryHardware);
+#endif
 #if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
 uint32_t localCommandSequence = 0;
 bool startProductFromDisplay(uint32_t now) {
@@ -511,10 +527,18 @@ motion::DisplayLinkCore displayLink(demo, startProductFromDisplay,
                                      initializeProductFromDisplay, productDisplaySnapshot);
 #endif
 String demoConfigJson;
-bool demoBusy() { return demo.busy() || product.ownsMotion() || product.eventPending(); }
+bool demoBusy() { return recoveryMotionPending() || demo.busy() || product.ownsMotion() || product.eventPending(); }
 #else
 bool demoBusy() { return false; }
 #endif
+
+bool recoveryMotionPending() {
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    return productRecovery.motionPending();
+#else
+    return false;
+#endif
+}
 
 bool networkChangeBusy() {
     if (commissioningActive()) return true;
@@ -822,7 +846,7 @@ void serviceBrainLink() {
     } else {
         status.feedingContextConfigured = false;
     }
-    // Legacy evidence is not yet imported into a v4 execution/event identity.
+    productRecovery.project(status);
     productBoardLink.poll(status.sampleUptimeMs, &status);
 #else
     if (ota.maintenanceActive()) { while (brain.available() > 0) brain.read(); return; }
@@ -886,9 +910,10 @@ String demoStatusJson() {
     s += ",\"configured\":"; s += demo.config().configured ? "true" : "false";
     s += '}'; return s;
 }
-bool applyDemoJson(const String& json, std::string& error) {
+bool applyDemoJson(const String& json, std::string& error, bool boot = false) {
     motion::DemoConfig candidate;
     if (!motion::parseDemoConfig(json.c_str(), json.length(), candidate, error)) return false;
+    if (boot) demoExecutor.configureStopAxes(candidate);
     if (!motion::demoRotationMatches(candidate, boardRotation)) { error = "rotation_distance_mismatch"; return false; }
     if (!demo.apply(std::move(candidate))) { error = "demo_busy"; return false; }
     demoConfigJson = json;
@@ -923,6 +948,9 @@ void pollDemo() {
     demoExecutor.poll(millis());
     demo.tick(millis());
     product.tick(millis());
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    productRecovery.poll();
+#endif
     static babytech::display::DisplayStage previous = babytech::display::DisplayStage::Unknown;
     static const char* previousReason = nullptr;
     if (previous != demo.stage() || previousReason != demo.reason()) {
@@ -1828,7 +1856,8 @@ void setup() {
     loadRotationDistances();
 #if MOTION_HAS_PRODUCT
     std::string configError;
-    if (!applyDemoJson(reinterpret_cast<const char*>(demoJsonStart), configError))
+    if (!applyDemoJson(reinterpret_cast<const char*>(demoJsonStart), configError,
+                       MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN))
         Serial.printf("[demo] configuration rejected: %s\n", configError.c_str());
 #endif
     wifiSetup.begin();
@@ -1838,10 +1867,15 @@ void setup() {
 #endif
     loadProductContext();
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    if (const auto* pairing = productBoardLink.verifiedPairing()) {
+        const auto loaded = productRecovery.begin(*pairing, millis());
+        Serial.printf("[product] v4 state load=%u; recovered actions are never resumed\n",
+                      unsigned(loaded));
+    }
     const auto legacyState = ProductEventOutbox::inspectLegacyState();
     if (legacyState != ProductEventOutbox::LegacyState::Empty) {
         product.setEventPending(true);
-        product.recoverAfterRestart(millis());
+        if (!productRecovery.motionPending()) product.recoverAfterRestart(millis());
         Serial.println("[product] legacy event requires controlled migration; record unchanged");
     }
 #else

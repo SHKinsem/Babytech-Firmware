@@ -61,8 +61,76 @@ static void test_demo_polling_does_not_starve_queue_await() {
     std::cout << "PASS demo polling shares budget: move await reaches home, sync excludes demo queries\n";
 }
 
+static void test_stop_proof_is_not_product_readiness() {
+    fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
+    assert(motor.begin(4, 5, 500000));
+    DemoConfig config; config.axes.push_back({1, 10, 0, true});
+    DemoMotorExecutor executor(motor, queue, rotation); executor.configure(config);
+    assert(!executor.stopConfirmed());
+    setMillis(1); assert(motor.enable(1, true).code == 202);
+    injectRx(makeAck(1, 0xF3, 2)); motor.poll();
+    feedback(motor, 10, 0);
+    assert(motor.hasActiveMotion()); // Includes enabled, stationary holding.
+    setMillis(20); assert(executor.stop());
+    assert(!executor.stopConfirmed()); // Pre-stop samples cannot confirm Stop.
+    feedback(motor, 21, 0);
+    assert(motor.hasActiveMotion() && !motor.operationBusy());
+    assert(executor.stopConfirmed());
+    config.axes[0].rotationMm = 10;
+    assert(!executor.configurationValid() && executor.stopConfirmed());
+    // Keep the driver fault visible, but it does not invalidate fresh low-speed
+    // measurements or require a blanket debug lock once the axis stopped.
+    injectRx(makeAck(1, 0xF3, 0xE2)); setMillis(22); motor.poll();
+    feedback(motor, 23, 0);
+    assert(!executor.healthy() && executor.stopConfirmed());
+    setMillis(24); injectRx(makeVelocity(1, 6)); motor.poll();
+    assert(!executor.stopConfirmed());
+    feedback(motor, 25, 0); assert(executor.stopConfirmed());
+    setMillis(2025); assert(!executor.stopConfirmed());
+    setMillis(2030); assert(executor.stop());
+    feedback(motor, 2030, 0);
+    setMillis(2031); setMillisReadStep(1);
+    assert(!executor.evidence(1).fresh); // Clock ticks cannot renew a Stop-time sample.
+    setMillisReadStep(0);
+    feedback(motor, 2032, 0);
+    setMillis(2040); setMillisReadStep(1);
+    assert(executor.evidence(1).fresh);
+    setMillisReadStep(0);
+    // Every configured axis needs evidence; a valid axis is not whole-machine proof.
+    config.axes.push_back({2, 10, 0, false});
+    executor.configure(config); setMillis(2030); assert(executor.stop());
+    feedback(motor, 2031, 0); assert(!executor.stopConfirmed());
+    injectRx(makePosition(2, 100)); injectRx(makeVelocity(2, 0));
+    const uint8_t flags[] = {0x3A, 0x83, 0x6B}; injectRx(makeFrame(2, flags, 3)); motor.poll();
+    assert(executor.stopConfirmed());
+    config.axes.clear(); executor.configure(config); assert(!executor.stopConfirmed());
+    std::cout << "PASS stop proof: post-stop/all-axis/fresh/velocity, enabled hold and non-Ready faults\n";
+}
+
+static void test_boot_stop_inventory_without_executable_config() {
+    fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
+    assert(motor.begin(4, 5, 500000)); motor.setAutoQueriesEnabled(false);
+    DemoMotorExecutor executor(motor, queue, rotation);
+    {
+        DemoConfig rejected; rejected.axes.push_back({1, 10, 10, true});
+        assert(!demoRotationMatches(rejected, rotation));
+        executor.configureStopAxes(rejected); // Parsed boot inventory, not an accepted script.
+    } // No pointer to the rejected temporary may remain.
+    setMillis(20); assert(executor.stop());
+    setMillis(120); executor.poll(120); motor.dispatchQueries();
+    assert(!capturedTX.empty() && capturedTX.back().data[0] == 0x36);
+    assert(!executor.stopConfirmed());
+    feedback(motor, 121, 0);
+    assert(executor.stopConfirmed());
+    DemoScript script; std::array<int32_t, 256> zeros{};
+    assert(!executor.start(script, true, zeros, 122)); // Monitoring does not authorize motion.
+    std::cout << "PASS boot stop inventory survives rejected parameters without enabling scripts\n";
+}
+
 int main() {
     test_demo_polling_does_not_starve_queue_await();
+    test_stop_proof_is_not_product_readiness();
+    test_boot_stop_inventory_without_executable_config();
     fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
     assert(motor.begin(4,5,500000));
     QueueProgram unconfiguredSync;

@@ -94,6 +94,7 @@ void loadCase(const char* name, const std::function<void()>& configure,
         io = initial;
         ArduinoBoardLink adapter;
         assert(!adapter.begin(role, 44, 43));
+        assert(adapter.verifiedPairing() == nullptr);
         assert(adapter.pairingState() == expected);
         assert(!adapter.link().configured() && !adapter.link().freshStatus(0));
         assert(io.begins == 0 && io.rxConfigs == 0 && io.txConfigs == 0);
@@ -158,6 +159,7 @@ void uartStartup() {
     setup();
     {
         ArduinoBoardLink adapter;
+        assert(adapter.verifiedPairing() == nullptr);
         noPollIo(adapter);
         assert(adapter.pairingState() == PairingLoad::Missing);
     }
@@ -167,6 +169,8 @@ void uartStartup() {
         assert(adapter.begin(role, 44, 43));
         assertUartConfigured();
         assert(adapter.pairingState() == PairingLoad::Ready);
+        assert(adapter.verifiedPairing());
+        equalFields(*adapter.verifiedPairing(), pairing(role));
         assert(std::strcmp(adapter.deviceId(), pairing(role).deviceId) == 0);
         assert(adapter.link().configured() && !adapter.link().freshStatus(0));
         assert(io.tx.empty());
@@ -174,6 +178,7 @@ void uartStartup() {
         assert(!adapter.begin(role, 12, 13, 9600));
         assert(io.opens == opens && io.begins == 1 && io.randomReads == 2);
         assert(adapter.pairingState() == PairingLoad::Ready);
+        equalFields(*adapter.verifiedPairing(), pairing(role));
         adapter.poll(0);
         assert(!io.tx.empty());
     }
@@ -183,6 +188,8 @@ void uartStartup() {
         ArduinoBoardLink adapter;
         assert(!adapter.begin(Role::Brain, pins[0], pins[1]));
         assert(adapter.pairingState() == PairingLoad::UartError);
+        assert(adapter.verifiedPairing());
+        equalFields(*adapter.verifiedPairing(), pairing());
         assert(io.randomReads == 0 && io.begins == 0 && io.rxConfigs == 0);
         noPollIo(adapter);
     }
@@ -191,6 +198,8 @@ void uartStartup() {
         ArduinoBoardLink adapter;
         assert(!adapter.begin(Role::Brain, 44, 43, baud));
         assert(adapter.pairingState() == PairingLoad::UartError);
+        assert(adapter.verifiedPairing());
+        equalFields(*adapter.verifiedPairing(), pairing());
         assert(io.randomReads == 0 && io.begins == 0);
         noPollIo(adapter);
     }
@@ -200,6 +209,8 @@ void uartStartup() {
         ArduinoBoardLink adapter;
         assert(!adapter.begin(Role::Brain, 44, 43));
         assert(adapter.pairingState() == PairingLoad::UartError);
+        assert(adapter.verifiedPairing());
+        equalFields(*adapter.verifiedPairing(), pairing());
         assert(io.rxConfigs == 1 && io.txConfigs == 0 && io.begins == 0);
         noPollIo(adapter);
     }
@@ -210,6 +221,8 @@ void uartStartup() {
         assert(!adapter.begin(Role::Brain, 44, 43));
         assertUartConfigured();
         assert(adapter.pairingState() == PairingLoad::UartError);
+        assert(adapter.verifiedPairing());
+        equalFields(*adapter.verifiedPairing(), pairing());
         noPollIo(adapter);
     }
     setup();
@@ -218,6 +231,8 @@ void uartStartup() {
         ArduinoBoardLink adapter;
         assert(!adapter.begin(Role::Brain, 44, 43));
         assert(adapter.pairingState() == PairingLoad::IoError);
+        assert(adapter.verifiedPairing());
+        equalFields(*adapter.verifiedPairing(), pairing());
         assert(io.rxConfigs == 0 && io.begins == 0);
         noPollIo(adapter);
     }
