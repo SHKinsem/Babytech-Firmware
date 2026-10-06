@@ -3,6 +3,8 @@
 
 #include <ArduinoJson.h>
 #include <cassert>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -109,17 +111,87 @@ bool validStatus(const Status& status) {
            status.powderGrams >= 0 && boundedText(status.babyId, sizeof(status.babyId), length);
 }
 
-bool parse(const v4::Message& message, Document& doc, size_t expectedFields) {
-    if (!message.length || message.length > v4::kMaxMessage ||
-        !v4::validUtf8(message.payload, message.length)) return false;
-    size_t fields;
-    if (!detail::FlatJsonGuard(message.payload, message.length, kStatusFields).object(fields) ||
-        fields != expectedFields)
-        return false;
-    if (deserializeJson(doc, static_cast<const uint8_t*>(message.payload), message.length,
+bool parseBytes(const uint8_t* bytes, size_t length, Document& doc, size_t& fields,
+                bool allowFraction = false) {
+    if (!bytes || !length || length > v4::kMaxMessage ||
+        !v4::validUtf8(bytes, length)) return false;
+    if (!detail::FlatJsonGuard(bytes, length, kStatusFields, allowFraction).object(fields)) return false;
+    if (deserializeJson(doc, bytes, length,
                         DeserializationOption::NestingLimit(1)) || doc.overflowed() ||
         !doc.is<JsonObject>()) return false;
     return doc.size() == fields;
+}
+
+bool parse(const v4::Message& message, Document& doc, size_t expectedFields) {
+    size_t fields;
+    return parseBytes(message.payload, message.length, doc, fields) && fields == expectedFields;
+}
+
+const char* commandName(ProductCommand command) {
+    switch (command) {
+        case ProductCommand::Initialize: return "initialize";
+        case ProductCommand::Prepare: return "prepare";
+        case ProductCommand::Clean: return "clean";
+        case ProductCommand::SetTargetTemp: return "set_target_temp";
+        case ProductCommand::ResetError: return "reset_error";
+        case ProductCommand::CheckFirmwareUpdate: return "check_firmware_update";
+        default: return nullptr;
+    }
+}
+
+bool readSequence(JsonVariantConst value, uint64_t& output) {
+    char text[20]{};
+    if (!readText(value, text, sizeof(text)) || !watermark(text) || text[0] == '0') return false;
+    uint64_t number = 0;
+    for (const char* at = text; *at; ++at) number = number * 10 + uint64_t(*at - '0');
+    output = number;
+    return true;
+}
+
+bool readRequest(JsonObjectConst root, bool fromCloud, size_t fields, ProductRequest& next) {
+    char name[24]{};
+    if (!readText(root["command"], name, sizeof(name)) ||
+        !readText(root["device_id"], next.deviceId, sizeof(next.deviceId)) ||
+        !readText(root["command_id"], next.commandId, sizeof(next.commandId)) ||
+        !readSequence(root[fromCloud ? "command_seq" : "seq"], next.sequence)) return false;
+    for (unsigned value = unsigned(ProductCommand::Initialize);
+         value <= unsigned(ProductCommand::CheckFirmwareUpdate); ++value)
+        if (!std::strcmp(name, commandName(ProductCommand(value)))) next.command = ProductCommand(value);
+    if (fromCloud) next.source = v4::Source::CloudCommand;
+    else {
+        char source[14]{};
+        if (!readText(root["source"], source, sizeof(source))) return false;
+        if (!std::strcmp(source, "cloud_command")) next.source = v4::Source::CloudCommand;
+        else if (!std::strcmp(source, "local_touch")) next.source = v4::Source::LocalTouch;
+        else return false;
+    }
+    size_t expected = fromCloud ? 7 : 6;
+    if (next.command == ProductCommand::Prepare) {
+        expected += 5;
+        if (!readText(root["baby_id"], next.babyId, sizeof(next.babyId)) ||
+            !readInteger(root["feeding_context_profile_version"], next.profileVersion) ||
+            !readInteger(root["water_ml"], next.waterMl) ||
+            !readInteger(root["temp"], next.temperatureC) ||
+            !root["powder_g_per_100ml"].is<double>()) return false;
+        const double powder = root["powder_g_per_100ml"].as<double>();
+        if (!std::isfinite(powder) || powder < 1 || powder > 50) return false;
+        next.powderGPer100Ml = float(powder);
+    } else if (next.command == ProductCommand::SetTargetTemp) {
+        ++expected;
+        if (!readInteger(root["temp"], next.temperatureC)) return false;
+    }
+    // Required keys plus exact count exclude extra fields, including old ratio.
+    return fields == expected && validProductRequest(next);
+}
+
+bool sessionId(const char (&id)[33]) {
+    if (id[32]) return false;
+    bool nonzero = false;
+    for (size_t i = 0; i < 32; ++i) {
+        if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f'))) return false;
+        nonzero |= id[i] != '0';
+    }
+    return nonzero;
 }
 
 // ArduinoJson 6 emits uncommon ASCII controls (e.g. U+0001) literally inside
@@ -307,6 +379,67 @@ bool decodeStatus(const v4::Message& message, Status& output) {
     s.footerCondition = display::DisplayCondition(footer);
     s.error = display::DisplayError(error);
     if (!validStatus(next)) return false;
+    output = next;
+    return true;
+}
+
+bool encodeCommand(const CommandMessage& command, v4::Message& output) {
+    if (!validProductRequest(command.request) || !command.remainingTtlMs ||
+        command.remainingTtlMs > 5000) return false;
+    const auto& request = command.request;
+    StaticJsonDocument<JSON_OBJECT_SIZE(11)> doc;
+    char sequence[20]{};
+    const int sequenceLength = std::snprintf(sequence, sizeof(sequence), "%llu",
+        static_cast<unsigned long long>(request.sequence));
+    if (sequenceLength <= 0 || size_t(sequenceLength) >= sizeof(sequence)) return false;
+    doc["device_id"] = request.deviceId;
+    doc["source"] = request.source == v4::Source::CloudCommand ? "cloud_command" : "local_touch";
+    doc["command_id"] = request.commandId;
+    doc["seq"] = static_cast<const char*>(sequence);
+    doc["command"] = commandName(request.command);
+    doc["ttl_ms"] = command.remainingTtlMs;
+    char powder[32]{};
+    if (request.command == ProductCommand::Prepare) {
+        doc["baby_id"] = request.babyId;
+        doc["feeding_context_profile_version"] = request.profileVersion;
+        doc["water_ml"] = request.waterMl;
+        doc["temp"] = request.temperatureC;
+        // Nine significant digits preserve every IEEE-754 binary32 value.
+        // ArduinoJson's default numeric serializer can lose digest identity.
+        const int length = std::snprintf(powder, sizeof(powder), "%.9g", double(request.powderGPer100Ml));
+        if (length <= 0 || size_t(length) >= sizeof(powder)) return false;
+        doc["powder_g_per_100ml"] = serialized(static_cast<const char*>(powder));
+    } else if (request.command == ProductCommand::SetTargetTemp) doc["temp"] = request.temperatureC;
+    return serialize(doc, v4::Kind::Command, output);
+}
+
+bool decodeCommand(const v4::Message& message, CommandMessage& output) {
+    if (message.kind != v4::Kind::Command) return false;
+    Document doc;
+    size_t fields;
+    if (!parseBytes(message.payload, message.length, doc, fields, true)) return false;
+    const auto root = doc.as<JsonObjectConst>();
+    CommandMessage next;
+    if (!readRequest(root, false, fields, next.request) ||
+        !readInteger(root["ttl_ms"], next.remainingTtlMs) || !next.remainingTtlMs ||
+        next.remainingTtlMs > 5000) return false;
+    output = next;
+    return true;
+}
+
+bool decodeCloudCommand(const uint8_t* bytes, size_t length, const char* expectedDeviceId,
+                        CloudCommand& output) {
+    if (!expectedDeviceId || !expectedDeviceId[0]) return false;
+    Document doc;
+    size_t fields;
+    if (!parseBytes(bytes, length, doc, fields, true)) return false;
+    const auto root = doc.as<JsonObjectConst>();
+    CloudCommand next;
+    if (!readRequest(root, true, fields, next.request) ||
+        std::strcmp(expectedDeviceId, next.request.deviceId) ||
+        !readText(root["command_session"], next.session, sizeof(next.session)) ||
+        !sessionId(next.session) || !readInteger(root["device_uptime_ms"], next.sampledAtMs) ||
+        !readInteger(root["ttl_ms"], next.ttlMs) || next.ttlMs != 5000) return false;
     output = next;
     return true;
 }

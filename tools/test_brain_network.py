@@ -62,6 +62,7 @@ def main():
                    "shared/BabytechCloudLink/src/CloudSession.cpp", "tests/fakes/cloud_link/FakeCloudIo.cpp",
                    "shared/BoardProtocol/src/BoardProtocol.cpp", "shared/BoardProtocol/src/BoardProtocolV4.cpp",
                    "shared/BoardProtocol/src/BoardSessionV4.cpp", "shared/ProductBoardLink/src/ProductBoardMessages.cpp",
+                   "shared/ProductBoardLink/src/ProductRequest.cpp",
                    "tests/fakes/brain_network/FakeBrainNvs.cpp", "tests/test_brain_network.cpp"):
         command.append(str(root / source))
     with tempfile.TemporaryDirectory(prefix="babytech-brain-network-") as directory:

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BoardSessionV4.h"
+#include "ProductRequest.h"
 #include "display_model.h"
 
 namespace babytech { namespace boardlink {
@@ -62,7 +63,7 @@ struct Status {
     Status() { snapshot.stage = display::DisplayStage::NotReady; }
 };
 
-// Fixed-capacity ArduinoJson 6 documents; no dynamic allocation in the codec.
+// Fixed-capacity ArduinoJson 6 documents; no dynamic JSON document allocation.
 // False leaves the entire output unchanged. Successful encoding produces only
 // kind/length/payload with zero boot IDs/message ID. The caller MUST set those
 // IDs before v4::fragment(); JSON is decoded only after complete reassembly.
@@ -75,5 +76,28 @@ bool encodeHello(const v4::Hello& hello, v4::Message& output,
 bool decodeHello(const v4::Message& message, v4::Hello& output);
 bool encodeStatus(const Status& status, v4::Message& output);
 bool decodeStatus(const v4::Message& message, Status& output);
+
+struct CommandMessage {
+    ProductRequest request;
+    uint16_t remainingTtlMs = 0;
+};
+
+struct CloudCommand {
+    ProductRequest request;
+    char session[33]{};
+    uint32_t sampledAtMs = 0;
+    uint16_t ttlMs = 0;
+};
+
+// Ordinary commands only; Stop remains the independent v4 binary control path.
+// COMMAND uses source/seq and ttl_ms (remaining 1..5000ms), plus frozen prepare
+// fields. Cloud uses command_seq/session/device_uptime_ms and fixed ttl=5000.
+// Failed codecs leave output unchanged. They do not authorize or dispatch:
+// owners still check MQTT generation/session, UART boots, elapsed transmission
+// time, ownership and durable decisions before any mechanical action.
+bool encodeCommand(const CommandMessage& command, v4::Message& output);
+bool decodeCommand(const v4::Message& message, CommandMessage& output);
+bool decodeCloudCommand(const uint8_t* bytes, size_t length, const char* expectedDeviceId,
+                        CloudCommand& output);
 
 } }  // namespace babytech::boardlink

@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix="babytech-board-link-") as temporary:
     sources = [root / "shared/BoardProtocol/src" / name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources.extend(root / "shared/ProductBoardLink/src" / name for name in
-                   ("ProductBoardMessages.cpp", "ReadOnlyBoardLink.cpp"))
+                   ("ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp"))
     sources.append(root / "shared/ProductBoardLink/test/test_readonly_link.cpp")
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror"]
     if args.sanitize:

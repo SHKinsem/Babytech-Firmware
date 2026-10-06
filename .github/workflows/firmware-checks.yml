@@ -107,6 +107,7 @@ jobs:
           python tools/test_cloud_link.py --sanitize
           python tools/test_cloud_contract.py
           python tools/test_board_messages.py --sanitize
+          python tools/test_board_commands.py --sanitize
           python tools/test_product_context.py --sanitize
           python tools/test_legacy_context_store.py --sanitize
           python tools/test_product_state.py --sanitize

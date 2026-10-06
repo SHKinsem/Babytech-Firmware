@@ -20,6 +20,8 @@ Brain v4 已接本地USB Wi-Fi/MQTT配置，见下方“Brain USB网络配置”
 
 `BoardSessionV4` 核对配对身份及本次 HELLO 的关联应答，分别管理心跳与机械状态的新鲜度；`BoardTransmitV4` 提供固定容量队列和逐帧高优先级调度，支持短写/背压。`shared/ProductBoardLink` 提供严格的 HELLO/STATUS JSON 编解码及共用只读链路，假串口覆盖两板握手、单/双向断线、重启和旧包重放。只读层始终关闭 Start，不派发任何动作；传输 ACK 不是业务接受。
 
+同一模块另有普通 COMMAND 编解码与 Cloud v4 命令解码，复用 `ProductRequest`，保留序号、宝宝/版本和 float32 配方身份。`tools/test_board_commands.py --sanitize` 检查消息边界和精确往返；Stop 使用独立二进制通道，不加入普通动作枚举。这些 codec 尚未接入执行协调器，不验证当前网络会话或授予运动权限，不能因为解码成功就启用 Start。
+
 `ReadOnlyLink` 为单 owner、非重入对象，约 8 KiB，不能放在 MCU loop 局部栈中；共享完整消息 scratch，短回执用紧凑帧。35 字段 STATUS 的 GCC8.4/14.2 静态接收调用链（receive/handle/decodeStatus）约 4 KiB，尚未包含外层适配器和 JSON 库调用余量；接入设备后仍须检查实际任务栈高水位，不能让网络回调并发操作链路。
 
 当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1 只读入口：Brain 使用 `BABYTECH_BOARD_LINK_V4=1`，Motion 使用 `MOTION_UART_PEER=4`。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC，缺失或损坏即不可用，不自动认领陌生对端。受控配对写入和旧配置导入尚未完成，不能靠烧录这两个镜像直接完成迁移。
