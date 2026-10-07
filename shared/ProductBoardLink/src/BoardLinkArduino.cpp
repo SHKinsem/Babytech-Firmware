@@ -28,6 +28,11 @@ bool ArduinoBoardLink::begin(v4::Role role, int rxPin, int txPin, uint32_t baud,
     parser_.reset();
     records_.reset();
     maintenance_ = BoardMaintenance{};
+    install_.reset();
+    if (!install_.bindReceiveBuffers(link_.installAssembler(), link_.installScratch())) {
+        pairingState_ = PairingLoad::IoError;
+        return false;
+    }
     pairingVerified_ = false;
     deviceId_[0] = 0;
     discoveryEnabled_ = false;
@@ -84,6 +89,10 @@ bool ArduinoBoardLink::begin(v4::Role role, int rxPin, int txPin, uint32_t baud,
             pairingState_ = PairingLoad::IoError;
             return false;
         }
+        if (!install_.begin(role, physical, boot)) {
+            pairingState_ = PairingLoad::IoError;
+            return false;
+        }
         discoveryEnabled_ = true;
     }
     // Both pinned SDKs construct HardwareSerial with TX ring size zero. Keep
@@ -112,12 +121,20 @@ void ArduinoBoardLink::poll(uint32_t nowMs, const Status* localStatus) {
             if (discoveryEnabled_) records_.receive(frame, nowMs);
         } else if (frame.kind == v4::Kind::MigrationMaintenance) {
             if (discoveryEnabled_) maintenance_.receive(frame, nowMs);
+        } else if (frame.kind == v4::Kind::MigrationInstall) {
+            if (discoveryEnabled_) {
+                maintenance_.poll(nowMs);
+                install_.receive(frame, nowMs);
+            }
         } else link_.receiveFrame(frame, nowMs);
     }
     if (discoveryEnabled_) {
         maintenance_.poll(nowMs);
         const auto* support = maintenance_.outgoing();
         if (support && link_.queueSupportFrame(*support)) maintenance_.queued();
+        install_.poll(nowMs);
+        const auto* installing = install_.outgoing();
+        if (installing && link_.queueInstallMessage(*installing)) install_.queued();
         discovery_.poll(nowMs);
         const auto* outgoing = discovery_.outgoing();
         if (outgoing && link_.queueSupportFrame(*outgoing)) discovery_.queued();

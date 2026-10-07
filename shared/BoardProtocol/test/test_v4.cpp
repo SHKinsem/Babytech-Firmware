@@ -220,7 +220,9 @@ void goldenAndKinds() {
     assert(!isControl(Kind::MigrationRead));
     static_assert(uint8_t(Kind::MigrationMaintenance) == 19, "MigrationMaintenance wire kind");
     assert(!isControl(Kind::MigrationMaintenance));
-    for (unsigned kind = 1; kind <= 17; ++kind) {
+    static_assert(uint8_t(Kind::MigrationInstall) == 20, "MigrationInstall wire kind");
+    assert(!isControl(Kind::MigrationInstall));
+    for (unsigned kind = 1; kind <= 20; ++kind) {
         Frame value = frame(static_cast<Kind>(kind));
         value.payload[0] = '{'; value.payload[1] = '}';
         if (value.kind == Kind::Heartbeat || value.kind == Kind::StatusQuery)
@@ -261,7 +263,7 @@ void goldenAndKinds() {
 
 void invalidHeadersAndCapacity() {
     Frame bad = frame(); bad.kind = static_cast<Kind>(0); rejectedFrame(bad);
-    bad = frame(); bad.kind = static_cast<Kind>(20); rejectedFrame(bad);
+    bad = frame(); bad.kind = static_cast<Kind>(21); rejectedFrame(bad);
     bad = frame(); bad.kind = static_cast<Kind>(255); rejectedFrame(bad);
     bad = frame(); bad.senderBoot = 0; rejectedFrame(bad);
     bad = frame(); bad.receiverBoot = 0; rejectedFrame(bad);
@@ -493,6 +495,30 @@ void assemblyRejectionsAndControls() {
     accept(assembler, first, 8, output, AssemblyResult::Incomplete);
     assembler.reset();
     assert(!assembler.active() && !assembler.expire(5000));
+
+    // Cancellation belongs to one exact message, not the shared receive slot.
+    accept(assembler, first, 9, output, AssemblyResult::Incomplete);
+    assert(!assembler.cancelMessage(Kind::MigrationInstall, input.senderBoot, input.receiverBoot, input.messageId));
+    assert(!assembler.cancelMessage(input.kind, input.senderBoot + 1, input.receiverBoot, input.messageId));
+    assert(!assembler.cancelMessage(input.kind, input.senderBoot, input.receiverBoot + 1, input.messageId));
+    assert(!assembler.cancelMessage(input.kind, input.senderBoot, input.receiverBoot, input.messageId + 1));
+    assert(assembler.active());
+    assert(assembler.cancelMessage(input.kind, input.senderBoot, input.receiverBoot, input.messageId));
+    assert(!assembler.active());
+
+    for (bool installationFirst : {false, true}) {
+        Message installation = input;
+        installation.kind = Kind::MigrationInstall;
+        const Message& owned = installationFirst ? installation : input;
+        const Message& competing = installationFirst ? input : installation;
+        accept(assembler, part(owned, 0), 9, output, AssemblyResult::Incomplete);
+        accept(assembler, part(competing, 0), 9, output, AssemblyResult::Busy);
+        assert(assembler.active());
+        accept(assembler, part(owned, 160), 9, output, AssemblyResult::Incomplete);
+        accept(assembler, part(owned, 320), 9, output, AssemblyResult::Incomplete);
+        accept(assembler, part(owned, 480), 9, output, AssemblyResult::Complete);
+        sameMessage(output, owned);
+    }
 
     accept(assembler, first, 10, output, AssemblyResult::Incomplete);
     const Kind controls[] = {Kind::Stop, Kind::Heartbeat, Kind::LinkAck, Kind::LinkReject};

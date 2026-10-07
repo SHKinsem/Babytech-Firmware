@@ -124,6 +124,12 @@ void BoardMaintenance::reply(const v4::Frame& request, uint8_t result, const cha
     pendingOutput_ = true;
 }
 
+bool BoardMaintenance::owns(const char* device, const char* nonce, uint64_t requesterBoot,
+                            const char* requesterPhysicalId) const {
+    return requesterPhysicalId && !std::strcmp(requesterPhysicalId, requester_) &&
+           owns(device, nonce, requesterBoot);
+}
+
 void BoardMaintenance::receive(const v4::Frame& frame, uint32_t nowMs) {
     if (!initialized_ || !frameValid(frame) || frame.receiverBoot != boot_ || frame.senderBoot == boot_) return;
     poll(nowMs);

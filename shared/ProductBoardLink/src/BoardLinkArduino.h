@@ -8,6 +8,7 @@
 #include "BoardDiscovery.h"
 #include "BoardExportTransfer.h"
 #include "BoardMaintenance.h"
+#include "BoardInstall.h"
 
 namespace babytech { namespace boardlink {
 
@@ -35,6 +36,8 @@ public:
     bool setMaintenanceTarget(BoardMaintenanceTarget* target) { return maintenance_.setTarget(target); }
     BoardMaintenanceState maintenanceState() const { return maintenance_.state(); }
     bool maintenanceActive() const { return maintenance_.active(); }
+    BoardMaintenance& maintenance() { return maintenance_; }
+    BoardInstall& install() { return install_; }
 private:
     class Sink : public v4::ByteSink {
     public:
@@ -52,6 +55,7 @@ private:
     BoardDiscovery discovery_{};
     BoardExportTransfer records_{};
     BoardMaintenance maintenance_{};
+    BoardInstall install_{};
     PairingLoad pairingState_ = PairingLoad::Missing;
     v4::Pairing pairing_{};
     char deviceId_[65]{};

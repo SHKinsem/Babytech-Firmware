@@ -14,6 +14,11 @@ public:
     void receive(uint8_t byte, uint32_t nowMs);
     void receiveFrame(const v4::Frame& frame, uint32_t nowMs);
     bool queueSupportFrame(const v4::Frame& frame);
+    bool queueInstallMessage(const v4::Message& message);
+    // Explicit installer borrows the sole receive assembler/scratch. The same
+    // loop owns both paths; interleaved ordinary fragments remain backpressure.
+    v4::Assembler& installAssembler() { return assembler_; }
+    v4::Message& installScratch() { return scratch_; }
     void poll(uint32_t nowMs, v4::ByteSink& sink, const Status* localStatus = nullptr);
     bool connected(uint32_t nowMs) const { return session_.connected(nowMs); }
     bool freshStatus(uint32_t nowMs) const { return session_.freshStatus(nowMs); }

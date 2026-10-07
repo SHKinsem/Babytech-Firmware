@@ -1133,6 +1133,79 @@ public:
     mutable unsigned checks = 0;
 };
 
+class InstallFixture : public BoardInstallTarget {
+public:
+    CommissioningResult install(const CommissioningImport& request, const char* nonce,
+                                uint64_t requesterBoot) override {
+        ++calls;
+        assert(request.pairing.role == Role::Motion && request.hasContext);
+        assert(request.context.profileVersion == 91 && request.context.waterMl == 180);
+        assert(std::strlen(request.context.babyName) == 320);
+        assert(std::strlen(nonce) == 32 && requesterBoot == kLocalBoot);
+        return CommissioningResult::Installed;
+    }
+    unsigned calls = 0;
+};
+
+void installOverActualAdapters(bool paired = false) {
+    const auto drain = [](ArduinoBoardLink& adapter, uint32_t now) {
+        for (unsigned i = 0; i < 400; ++i) adapter.poll(now);
+    };
+    setup();
+    if (!paired) storageState(PairingLoad::Missing);
+    ArduinoBoardLink brain;
+    assert(brain.begin(Role::Brain, 44, 43, 115200, true));
+    CommissioningImport request{};
+    request.pairing = pairing(Role::Motion);
+    request.hasContext = true;
+    auto& context = request.context;
+    std::strcpy(context.deviceId, request.pairing.deviceId);
+    std::strcpy(context.babyId, "baby-1");
+    std::memset(context.babyName, 'n', 320);
+    std::strcpy(context.formulaBrand, "Friso");
+    context.waterMl = 180; context.temperatureC = 45;
+    context.powderGPer100Ml = 25; context.profileVersion = 91;
+    assert(validProductContext(context));
+    const char* nonce = "0123456789abcdef0123456789abcdef";
+    assert(brain.install().request(request, nonce, kPeerBoot, 10));
+    io.maxWrite = 3;
+    drain(brain, 10);
+    const Bytes query = io.tx;
+    const auto sent = frames(query);
+    assert(std::count_if(sent.begin(), sent.end(), [](const Frame& frame) {
+        return frame.kind == Kind::MigrationInstall;
+    }) > 1);
+    fake::State brainIo = io;
+    setup(Role::Motion);
+    if (!paired) storageState(PairingLoad::Missing);
+    io.randomWords = {0, uint32_t(kPeerBoot)};
+    ArduinoBoardLink motion;
+    InstallFixture target;
+    assert(motion.begin(Role::Motion, 44, 43, 115200, true));
+    assert(motion.install().setTarget(&target));
+    io.maxWrite = 5;
+    io.rx.insert(io.rx.end(), query.begin(), query.end());
+    drain(motion, 20);
+    const Bytes reply = io.tx;
+    const auto responses = frames(reply);
+    assert(target.calls == 1 && std::count_if(responses.begin(), responses.end(), [](const Frame& frame) {
+        return frame.kind == Kind::MigrationInstall;
+    }) == 1);
+    io.rx.insert(io.rx.end(), query.begin(), query.end());
+    drain(motion, 30);
+    assert(target.calls == 1);
+    fake::assertReadOnly();
+    onBoard(brainIo, [&] {
+        io.rx.insert(io.rx.end(), reply.begin(), reply.end()); drain(brain, 40);
+        assert(brain.install().state() == BoardInstallState::Complete);
+        assert(brain.install().result() == CommissioningResult::Installed);
+        assert(bool(brain.verifiedPairing()) == paired && brain.link().configured() == paired);
+        fake::assertReadOnly();
+    });
+    assert(bool(motion.verifiedPairing()) == paired && motion.link().configured() == paired);
+    std::puts("PASS actual adapters route fragmented install/response through sole short-write UART; target once, no live identity activation");
+}
+
 void maintenanceOverActualAdapters() {
     const auto drain = [](ArduinoBoardLink& adapter, uint32_t now) {
         for (unsigned i = 0; i < 100; ++i) adapter.poll(now);
@@ -1237,6 +1310,8 @@ int main() {
     failedInitRetry();
     recordsOverActualAdapters();
     maintenanceOverActualAdapters();
+    installOverActualAdapters();
+    installOverActualAdapters(true);
     fake::assertReadOnly();
     std::puts("PASS Arduino adapter host suite (real core + pair codec; I/O fakes only)");
 }

@@ -19,7 +19,7 @@ constexpr uint64_t kMaxSequence = UINT64_C(9223372036854775807);
 enum class Kind : uint8_t {
     Hello = 1, HelloAck, Heartbeat, StatusQuery, Status, Context, ContextResult,
     Command, CommandResult, ResultQuery, Result, Terminal, CloudReceipt,
-    LinkAck, LinkReject, Stop, Discovery, MigrationRead, MigrationMaintenance
+    LinkAck, LinkReject, Stop, Discovery, MigrationRead, MigrationMaintenance, MigrationInstall
 };
 
 struct Frame {
@@ -65,6 +65,7 @@ class Assembler {
 public:
     AssemblyResult accept(const Frame& frame, uint32_t nowMs, Message& result);
     bool expire(uint32_t nowMs);
+    bool cancelMessage(Kind kind, uint64_t senderBoot, uint64_t receiverBoot, uint32_t messageId);
     void reset();
     bool active() const { return active_; }
 private:

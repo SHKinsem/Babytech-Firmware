@@ -8,8 +8,9 @@ class BoardMaintenanceTarget {
 public:
     virtual ~BoardMaintenanceTarget() = default;
     virtual bool safeToAcquire() const = 0;
-    // A future importer must refuse release while a write is uncertain. This
-    // pre-write session never assumes that dropping UART rolls Flash back.
+    // The loop owner cannot release midway through a synchronous import.
+    // Dropping the reservation never rolls back Flash; an uncertain write
+    // faults its importer, not necessarily independent local debugging.
     virtual bool safeToRelease() const = 0;
 };
 
@@ -36,6 +37,10 @@ public:
     BoardMaintenanceState state() const { return state_; }
     bool active() const { return role_ == v4::Role::Motion && held_; }
     bool owns(const char* device, const char* nonce, uint64_t requesterBoot) const;
+    bool owns(const char* device, const char* nonce, uint64_t requesterBoot,
+              const char* requesterPhysicalId) const;
+    const char* nonce() const { return nonce_; }
+    uint64_t peerBoot() const { return peerBoot_; }
 private:
     bool send(uint8_t operation, uint32_t nowMs);
     void reply(const v4::Frame& request, uint8_t result, const char* nonce);

@@ -133,6 +133,16 @@ class MaintenanceWiringTest(unittest.TestCase):
                 self.assertNotIn(forbidden, body)
         self.assertIn("network.poll(", function_body(self.brain, "void loop()"))
 
+    def test_motion_install_uses_runtime_store_without_boot_or_console_writes(self):
+        self.assertEqual(self.motion.count("MotionStateStore productState;"), 1)
+        self.assertIn("productState, productBoardLink.maintenance(), safeForRemoteInstall, installNowMs", self.motion)
+        setup = function_body(self.motion, "void setup()")
+        self.assertIn("productBoardLink.install().setTarget(&migrationInstall)", setup)
+        self.assertNotIn(".install().request(", setup)
+        self.assertNotIn("importMotion(", setup)
+        guard = function_body(self.motion, "bool safeForRemoteInstall() {")
+        self.assertIn("!commissioningSession.active() && safeForCommissioning()", guard)
+
     def test_v4_recovery_is_wired_to_boot_and_existing_stop_supervision(self):
         setup = function_body(self.motion, "void setup()")
         self.assertLess(setup.index("applyDemoJson("), setup.index("productRecovery.begin("))

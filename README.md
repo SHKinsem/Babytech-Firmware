@@ -93,7 +93,7 @@ Motion v4开机通过UART适配器核对过本机MAC/角色的配对读取`produ
 
 STATUS读取真实持久水位、执行/event ID及配置屏障/墓碑；存储异常报告`E_STORAGE_FAULT`，保留已有更具体的机械错误，不能将故障状态里的零占位水位当作同步成功。测试：`python3 tools/test_motion_state_recovery.py --sanitize`，包含NVS故障和生产ProductSession/Flow的主机替身；`tools/test_demo.py`验证真实MotorControl/Executor与假CAN的停机检测，`tests/test_maintenance_wiring.py`仅检查实际入口源码连线。它们不代表真实CAN、Flash或断电验收。完整任务派发、配置同步、Cloud结果补传和安装仍待完成。
 
-`BoardCommissioning` 已把本机身份核对、Motion旧事件/配置预检、业务状态导入和最后的配对写入串在一起。中断后只允许同内容且未使用的初始记录续装；已有配对但业务记录丢失时拒绝重新从零开始。Guard必须在各持久阶段提供排他维护、人工授权、新鲜静止及MQTT交接证据，Brain还须验证对应Motion导出的完整配置。此处尚未实现真实Guard、USB安装操作入口或双板完成确认，不能通过随手传入true跳过前置条件。组件测试：`python3 tools/test_board_commissioning.py --sanitize`，不写真实Flash、不代表迁移已启用。
+`BoardCommissioning` 已把本机身份核对、Motion旧事件/配置预检、业务状态导入和最后的配对写入串在一起。中断后只允许同内容且未使用的初始记录续装；已有配对但业务记录丢失时拒绝重新从零开始。Guard必须在各持久阶段提供排他维护、人工授权、新鲜静止及MQTT交接证据，Brain还须验证对应Motion导出的完整配置。Motion实际预约/静止Guard已接专用UART目标；Brain自动安装入口、一次性交接确认和双板完成切换仍待实现，不能随手传入true跳过前置条件。组件测试：`python3 tools/test_board_commissioning.py --sanitize`，不写真实Flash、不代表迁移已启用。
 
 ### v4 本地维护入口
 
@@ -113,7 +113,13 @@ Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`�
 
 Discovery成功后，可选支持命令`PAIR HOLD <device_id>`在Brain本地维护内明确请求Motion预约；`PAIR HOLD`只读查看，`PAIR RELEASE`或Brain `MAINT END`经同一UART结束，不需要Motion USB。kind19绑定双方boot、Brain MAC、设备、nonce和递增ID。Motion复用当前静止/无工作条件，并与USB维护/OTA互斥；网页冲突写入/运动、网络改配和OTA启动暂拒绝，HTTP Stop/Stop all/queue cancel、合法原始Stop/Interrupt/disable和读取继续可用，CAN监督照常。UART产品动作和Stop仍未开放。
 
-Brain仅为显式预约每500ms续期，响应截止1秒，Motion预写入预约3秒到期自动释放；普通启动、配网、读取和冲奶不自动预约。release无需Ready/传感器/Cloud恢复，迟到或同nonce请求不重新打开已结束会话，失败不自动acquire。当前不写NVS或安装身份；后续安装写入必须先接部分写入恢复Guard，不能拿到期当回滚。核心`tools/test_board_maintenance.py --sanitize`和实际adapter/controller主机测试不替代UART/HTTP/Flash实机验收；自动安装仍待接入。这些命令只是支持入口，最终安装流程内部调用。
+Brain仅为显式预约每500ms续期，响应截止1秒，Motion预约3秒到期自动释放；普通启动、配网、读取和冲奶不自动预约。release无需Ready/传感器/Cloud恢复，迟到或同nonce请求不重新打开已结束会话，失败不自动acquire。到期只释放RAM预约，不回滚Flash。核心`tools/test_board_maintenance.py --sanitize`和实际adapter/controller主机测试不替代UART/HTTP/Flash实机验收；自动安装仍待接入。这些命令只是支持入口，最终安装流程内部调用。
+
+### Motion UART持久安装入口
+
+可选v4的kind20安装通道已接同一UART收发owner及Motion实际导入目标，不新增USB诊断写命令。完整配对记录、旧档案/墓碑经有界分片传入；目标复用现有`productState`，每个持久阶段重新核对预约设备/nonce/双方身份与当前静止条件，调用原导入协调器，业务记录先写并读回、配对最后写。旧事件未结清、已使用水位/结果、内容冲突或存储错误不被覆盖，缺失上下文按全零编码。不确定写入错误只锁存导入组件，不借此永久禁用独立调试；超时保留部分写入证据，不自动重试或擦除。
+
+本板Installed不激活运行UART身份、网络或运动；Brain完整自动协调、MQTT旧凭据交接确认和写后双板切换仍待实现，现有支持菜单不能完成安装。一次性交接位是受控入口的操作声明，固件不能据此证明broker账号已经撤销。测试`tools/test_board_install.py --sanitize`、`tools/test_motion_install.py --sanitize`及实际adapter测试使用生产codec/导入器，边界I/O为替身，不是实板Flash或迁移验收。
 
 ### Brain USB网络配置
 

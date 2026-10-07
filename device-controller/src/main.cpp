@@ -46,6 +46,7 @@
 #include <BoardLinkArduino.h>
 #include <MaintenanceUsbConsole.h>
 #include "MotionStateRecovery.h"
+#include <MotionInstallTarget.h>
 #endif
 #if MOTION_HAS_PRODUCT
 #include "DemoMotorExecutor.h"
@@ -73,8 +74,8 @@ public:
     bool safeToAcquire() const override {
         return !commissioningSession.active() && safeForCommissioning();
     }
-    // No importer writes in this stage. Releasing a RAM reservation is not a
-    // motion command and must not wait for sensors/Ready/network to recover.
+    // Imports finish synchronously before the loop can release this lease.
+    // A storage fault inhibits another import, not independent local debugging.
     bool safeToRelease() const override { return true; }
 } migrationMaintenance;
 #else
@@ -520,6 +521,12 @@ public:
 };
 RecoveryHardware recoveryHardware;
 babytech::boardlink::MotionStateStore productState;
+bool safeForRemoteInstall() {
+    return !commissioningSession.active() && safeForCommissioning();
+}
+uint32_t installNowMs() { return uint32_t(millis()); }
+babytech::boardlink::MotionInstallTarget migrationInstall(
+    productState, productBoardLink.maintenance(), safeForRemoteInstall, installNowMs);
 motion::MotionStateRecovery productRecovery(productState, recoveryHardware);
 #endif
 #if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
@@ -1833,6 +1840,7 @@ void setup() {
                       unsigned(productBoardLink.pairingState()));
     productBoardLink.setExportSource(&migrationExport);
     productBoardLink.setMaintenanceTarget(&migrationMaintenance);
+    productBoardLink.install().setTarget(&migrationInstall);
 #else
     brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
 #endif

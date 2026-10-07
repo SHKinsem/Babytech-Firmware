@@ -55,7 +55,7 @@ bool isControl(Kind kind) {
 
 bool validFrame(const Frame& frame) {
     if (uint8_t(frame.kind) < uint8_t(Kind::Hello) ||
-        uint8_t(frame.kind) > uint8_t(Kind::MigrationMaintenance) || !frame.senderBoot ||
+        uint8_t(frame.kind) > uint8_t(Kind::MigrationInstall) || !frame.senderBoot ||
         (!frame.receiverBoot && frame.kind != Kind::Hello && frame.kind != Kind::Discovery) || !frame.messageId ||
         frame.total > kMaxMessage || frame.length > kMaxFragment ||
         frame.offset > frame.total || frame.length > frame.total - frame.offset) return false;
@@ -150,6 +150,14 @@ bool Assembler::expire(uint32_t nowMs) {
     return true;
 }
 
+bool Assembler::cancelMessage(Kind kind, uint64_t senderBoot, uint64_t receiverBoot,
+                              uint32_t messageId) {
+    if (!active_ || pending_.kind != kind || pending_.senderBoot != senderBoot ||
+        pending_.receiverBoot != receiverBoot || pending_.messageId != messageId) return false;
+    reset();
+    return true;
+}
+
 AssemblyResult Assembler::accept(const Frame& frame, uint32_t nowMs, Message& result) {
     expire(nowMs);
     if (!validFrame(frame)) return AssemblyResult::Invalid;
@@ -160,6 +168,10 @@ AssemblyResult Assembler::accept(const Frame& frame, uint32_t nowMs, Message& re
     }
     if (active_) {
         if (!sameKey(frame, pending_)) return AssemblyResult::Busy;
+        // Installation IDs belong to a separate domain, despite sharing RX.
+        if (frame.kind != pending_.kind &&
+            (frame.kind == Kind::MigrationInstall || pending_.kind == Kind::MigrationInstall))
+            return AssemblyResult::Busy;
         if (frame.kind != pending_.kind || frame.total != pending_.length) {
             reset();
             return AssemblyResult::Invalid;

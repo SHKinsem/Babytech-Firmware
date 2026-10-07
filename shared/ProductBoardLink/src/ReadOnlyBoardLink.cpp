@@ -114,7 +114,8 @@ void ReadOnlyLink::receive(uint8_t byte, uint32_t nowMs) {
 
 void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
     if (!healthy() || !validFrame(frame) || frame.kind == Kind::Discovery ||
-        frame.kind == Kind::MigrationRead || frame.kind == Kind::MigrationMaintenance) return;
+        frame.kind == Kind::MigrationRead || frame.kind == Kind::MigrationMaintenance ||
+        frame.kind == Kind::MigrationInstall) return;
     session_.poll(nowMs);
     if (frame.kind == Kind::Heartbeat) {
         session_.heartbeat(frame, nowMs);
@@ -126,6 +127,11 @@ void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
         !(frame.kind == Kind::Hello && frame.receiverBoot == 0)) return;
     const auto result = assembler_.accept(frame, nowMs, scratch_);
     if (result == AssemblyResult::Complete) handle(scratch_, nowMs);
+}
+
+bool ReadOnlyLink::queueInstallMessage(const Message& message) {
+    if ((configured_ && !healthy()) || message.kind != Kind::MigrationInstall) return false;
+    return tx_.enqueue(message);
 }
 
 bool ReadOnlyLink::queueSupportFrame(const Frame& frame) {
