@@ -502,6 +502,38 @@ void maximumTimedMessage() {
     assert(result.length == command.length &&
            std::memcmp(result.payload, command.payload, command.length) == 0);
 }
+
+void ownedQueryCancellation() {
+    Transmitter tx;
+    Sink sink;
+    assert(tx.enqueue(make(Kind::ResultQuery, 10, 200)));
+    tx.invalidateOrdinary(Kind::Command, 10);
+    tx.invalidateOrdinary(Kind::ResultQuery, 9);
+    assert(tx.ordinaryPending()); // Neither wrong kind nor stale owner cancels it.
+    tx.invalidateOrdinary(Kind::ResultQuery, 10);
+    assert(!tx.ordinaryPending() && !tx.pending() && sink.bytes.empty());
+    assert(tx.enqueueTimedOrdinary(make(Kind::Command, 11, 1), 100, 5000));
+    tx.invalidateOrdinary(Kind::ResultQuery, 10);
+    assert(tx.ordinaryPending()); // Late cancellation cannot drop the replacement.
+    assert(tx.pump(100, sink));
+    assert(frames(sink).size() == 1 && frames(sink)[0].kind == Kind::Command);
+
+    tx.reset(); sink = Sink{}; sink.room = 7;
+    assert(tx.enqueue(make(Kind::ResultQuery, 20, 200)));
+    assert(tx.pump(sink));
+    assert(tx.enqueue(make(Kind::Stop, 21, 28)));
+    assert(tx.enqueue(make(Kind::Heartbeat, 22, 0)));
+    tx.invalidateOrdinary(Kind::ResultQuery, 20);
+    tx.invalidateOrdinary(Kind::ResultQuery, 20); // Do not restore a partial CRC.
+    assert(tx.ordinaryPending());
+    assert(!tx.enqueue(make(Kind::Command, 23, 1))); // Residual frame must drain.
+    drain(tx, sink);
+    const auto sent = frames(sink);
+    assert(sent.size() == 2 && sent[0].kind == Kind::Stop && sent[1].kind == Kind::Heartbeat);
+    assert(tx.enqueue(make(Kind::Command, 23, 1)));
+    drain(tx, sink);
+    assert(frames(sink).back().kind == Kind::Command);
+}
 } // namespace
 
 int main() {
@@ -517,5 +549,6 @@ int main() {
     timedWraparoundAndDefaultCompatibility();
     partialControlSurvivesOrdinaryExpiry();
     maximumTimedMessage();
+    ownedQueryCancellation();
     std::puts("PASS v4 bounded transmit, timed ordinary, CRC invalidation and priority");
 }

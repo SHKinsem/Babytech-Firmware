@@ -163,6 +163,7 @@ void ReadOnlyLink::expireStop(uint32_t nowMs) {
 
 void ReadOnlyLink::cancelResultQuery() {
     if (role_ != Role::Brain) return;
+    if (lookupId_) tx_.invalidateOrdinary(Kind::ResultQuery, lookupId_);
     lookupState_ = ResultLookupState::Idle;
     lookupId_ = 0;
 }

@@ -29,6 +29,8 @@ public:
     // Unlike cancelOrdinary(), poison any partial frame before draining it.
     // Already completed frames cannot be revoked. Does not change control slots.
     void invalidateOrdinary();
+    // Cancel only this owner's message, not a later ordinary message in the slot.
+    void invalidateOrdinary(Kind kind, uint32_t messageId);
     void reset();
     bool pending() const;
     bool ordinaryPending() const { return ordinaryPending_; }

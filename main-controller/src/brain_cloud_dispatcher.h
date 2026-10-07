@@ -14,7 +14,8 @@ namespace babytech { namespace brain {
 // Cloud owns issuance, Motion owns durable acceptance. Unknown requests are only
 // queried, not replayed. Expired unknowns may release execution tracking on new
 // idle/stationary evidence; Cloud/Motion records and local NVS remain untouched.
-// Local pending recovery must not share the query slot while busy().
+// Local pending recovery must not share the query slot while busy(). Its durable
+// pending/maintenance ownership is passed to poll; Stop itself never waits on it.
 template<class Link, class Network>
 class BrainCloudDispatcher {
 public:
@@ -26,7 +27,7 @@ public:
     BrainCloudDispatcher(const BrainCloudDispatcher&) = delete;
     BrainCloudDispatcher& operator=(const BrainCloudDispatcher&) = delete;
 
-    bool busy() const { return active_; }
+    bool busy() const { return active_ || stopQuerying_; }
     bool resultPending() const { return replyPending_; }
 
     void command(const boardlink::CloudCommand& incoming, uint32_t generation, uint32_t) {
@@ -46,6 +47,8 @@ public:
         if (active_ || replyPending_) { reject(incoming, "busy"); return; }
         if (const char* reason = admission_()) { reject(incoming, reason); return; }
         if (!link_.connected(clock_())) { reject(incoming, "link_lost"); return; }
+        // Informational Stop recovery yields to a new independent ordinary request.
+        if (stopQuerying_) retryStopQuery(clock_());
 
         boardlink::CommandMessage outgoing;
         outgoing.request = incoming.request;
@@ -116,6 +119,7 @@ public:
             rejectStop(incoming, "busy");
             return;
         }
+        replaceStopTracking();
         stop_ = incoming;
         // A retained informational ACK must not gate a new explicit safety Stop.
         // Motion still retains its durable Cloud Stop evidence independently.
@@ -124,7 +128,7 @@ public:
         stopPending_ = true;
     }
 
-    void poll(uint32_t nowMs) {
+    void poll(uint32_t nowMs, bool localQueryOwner = false) {
         if (stopPending_) {
             const auto state = link_.stopSendState();
             if (state == boardlink::StopSendState::Received || state == boardlink::StopSendState::Rejected) {
@@ -135,8 +139,12 @@ public:
             } else if (state != boardlink::StopSendState::Pending) {
                 // No false rejection/acceptance on an uncertain transport result.
                 stopPending_ = false;
+                stopUnknown_ = true;
+                stopQueryWaiting_ = true;
+                stopRetryAt_ = nowMs;
             }
         }
+        pollStopQuery(nowMs, localQueryOwner);
         if (stopReplyPending_ && network_.publishAck(stop_.commandId, "stop", stop_.sequence,
                 stop_.session, stopAccepted_, stopReason_))
             stopReplyPending_ = false;
@@ -191,6 +199,56 @@ public:
 
 private:
     static constexpr uint32_t kRetryMs = 1000;
+    void replaceStopTracking() {
+        if (stopQuerying_) link_.cancelResultQuery();
+        stopQuerying_ = stopUnknown_ = stopQueryWaiting_ = false;
+    }
+    void retryStopQuery(uint32_t nowMs) {
+        if (stopQuerying_) link_.cancelResultQuery();
+        stopQuerying_ = false;
+        stopQueryWaiting_ = true;
+        stopRetryAt_ = nowMs;
+    }
+    void pollStopQuery(uint32_t nowMs, bool localQueryOwner) {
+        if (!stopUnknown_) return;
+        // Only one read-only query slot exists. Ordinary acceptance recovery and
+        // durable local pending take precedence over this informational reply.
+        if (active_ || stopPending_ || localQueryOwner) {
+            if (stopQuerying_) retryStopQuery(nowMs);
+            return;
+        }
+        if (stopQuerying_) {
+            const auto state = link_.resultLookupState();
+            if (state == boardlink::ResultLookupState::Pending) return;
+            if (state == boardlink::ResultLookupState::Complete) {
+                const auto& result = link_.resultQueryResponse();
+                if (result.status == boardlink::ResultQueryStatus::Known &&
+                    boardlink::sameResultQuery(stopQuery_, result.query) &&
+                    !result.requestDigestHex[0] && result.outcome == boardlink::MotionOutcome::None) {
+                    // Empty digest is the existing codec's Cloud Stop result tag;
+                    // a same-ID ordinary result is not evidence for this Stop.
+                    stopAccepted_ = result.accepted;
+                    std::strcpy(stopRecoveredReason_, result.reason);
+                    stopReason_ = stopRecoveredReason_;
+                    replaceStopTracking();
+                    stopReplyPending_ = true;
+                    return;
+                }
+            }
+            retryStopQuery(nowMs);
+            return;
+        }
+        if (stopQueryWaiting_ && uint32_t(nowMs - stopRetryAt_) < kRetryMs) return;
+        stopQuery_.source = v4::Source::CloudCommand;
+        stopQuery_.sequence = stop_.sequence;
+        std::strcpy(stopQuery_.deviceId, stop_.deviceId);
+        std::strcpy(stopQuery_.commandId, stop_.commandId);
+        // Queries use the current UART session, but retain the original Cloud
+        // identity/session for the ACK. No Cloud freshness or STATUS is required.
+        if (!link_.requestResult(stopQuery_, nowMs)) { retryStopQuery(nowMs); return; }
+        stopQuerying_ = true;
+        stopQueryWaiting_ = false;
+    }
     static const char* name(boardlink::ProductCommand command) {
         switch (command) {
             case boardlink::ProductCommand::Prepare: return "prepare";
@@ -238,6 +296,7 @@ private:
             network_.publishAck(stop.commandId, "stop", stop.sequence, stop.session, false, reason);
             return;
         }
+        replaceStopTracking();
         stop_ = stop;
         stopAccepted_ = false;
         stopReason_ = reason;
@@ -297,7 +356,9 @@ private:
     boardlink::CloudCommand current_{};
     boardlink::CommandResult result_{};
     boardlink::ResultQuery query_{};
+    boardlink::ResultQuery stopQuery_{};
     boardlink::CloudStop stop_{};
+    char stopRecoveredReason_[65]{};
     // A bounded RAM guard for the last retired ID; Cloud's permanent issuance
     // ledger prevents reuse of every historical ID, including after Brain boot.
     char retiredCommandId_[129]{};
@@ -306,6 +367,7 @@ private:
     uint64_t seenStopSequence_ = 0;
     uint32_t generation_ = 0;
     uint32_t retryAt_ = 0;
+    uint32_t stopRetryAt_ = 0;
     bool active_ = false;
     bool waiting_ = false;
     bool querying_ = false;
@@ -313,6 +375,9 @@ private:
     bool stopPending_ = false;
     bool stopReplyPending_ = false;
     bool stopAccepted_ = false;
+    bool stopUnknown_ = false;
+    bool stopQuerying_ = false;
+    bool stopQueryWaiting_ = false;
     bool idleStop_ = false;
     const char* stopReason_ = "stop_rejected";
 };

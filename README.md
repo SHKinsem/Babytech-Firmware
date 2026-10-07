@@ -163,7 +163,11 @@ Brain的共享UART core、Arduino适配器和Controller现提供单次`requestCo
 
 Stop绑定新鲜product执行ID或明确静止idle，独立序号不受更高普通水位误挡；不等待Store/普通结果/旧信息ACK。main在可能Flash路径前再次服务UART，短写/FIFO忙时不保证已完整发送。Received不是停稳。`publishAck=true`仅入队，入队失败的已有回复槽保留重试，busy额外回复best-effort，新Stop可替换旧信息ACK；不保证wire/broker/Cloud落库。测温未知保持null，不以目标温度冒充实测；`commands_enabled`仅新鲜链路开放，`can_start=false`保留。
 
-`python3 tools/test_brain_cloud_dispatcher.py --sanitize`双SHA各205场景，含各5项真实UART core/codec/Store组合；Network150及静态接线21另测，不合称生产main/Network/runtime/broker动态闭环。Stop原TTL边界/回绕、Unknown放行反例、ID保护、Known优先及持久证据保留已覆盖，真实Flash/CAN/RTOS/Stop时限仍待台架。production mode3保留local pending只证明退出不清证据，不代表main允许此时新Cloud命令（仍由原admission拒绝）；生产Controller连接仍需新鲜STATUS，FakeLink无STATUS不代表实际main允许。
+Stop传输结果未知时，只按原device/source/seq/ID经既有RESULT_QUERY重查，不重发Stop、不绑定后来任务。精确Known且空普通摘要/outcome=none才补原ACK/reason/session；unknown/过期/冲突/故障不伪造结果。只用有界RAM跟踪最后一笔Stop；新命令/Stop可抢占信息查询，普通接受恢复、本地持久pending或维护优先使用唯一查询槽。查询不要求Cloud在线或新鲜STATUS，也不写Flash；Brain复位后由Cloud永久账本保留原未知，不自动恢复/重发Stop。
+
+取消仅匹配当前ResultQuery的kind/message ID，未发字节的查询立即释放普通槽，不误删后来的COMMAND。若已有半帧上UART，单次作废CRC后先排空、不交织下一帧；这段真实背压仍可返回busy，不另排动作或自动重试已消费请求。Stop/心跳优先槽保留。
+
+`python3 tools/test_brain_cloud_dispatcher.py --sanitize`双SHA各247场景，保留205并新增42项Stop恢复（`--case stop_recovery`），每版含10项真实UART core/codec/Store组合；静态接线21另测，不合称生产main/Network/runtime/broker动态闭环。新增三项持久Stop丢回执/查询、换Motion boot及五类identity/摘要反例，未发查询同loop被Clean抢占、半帧CRC排空不交织且只执行新的显式Clean。查询无Store写入，Stop不重发；Motion handler是测试回调，不是生产Runtime或真实停稳证明。Stop原TTL边界/回绕、Unknown放行反例、ID保护、Known优先及持久证据保留继续覆盖。production mode3保留local pending只证明退出不清证据，不代表main允许此时新Cloud命令（仍由原admission拒绝）；生产Controller连接仍需新鲜STATUS，FakeLink无STATUS不代表实际main允许。真实Flash/CAN/RTOS/Stop时限仍待台架。
 
 Cloud Unknown最小放行已获用户2026-10-07确认：原TTL耗尽，过期后收到的新鲜Motion状态无活动/无busy且已停稳时，仅退出RAM执行在途；不同ID/更高序号的新请求可进入。原结果仍Unknown、无伪造ACK、不重发/清持久证据；已到达精确Known优先处理，旧/未来/失联状态不放行。最后retired ID仅有界RAM guard，所有历史ID由Cloud永久账本防复用；local NVS pending不因此清除。触控、工作台UART目标化、版本配置和终态/Cloud回执仍待接；仅本地软件验证交付，未推送、烧录或部署。
 

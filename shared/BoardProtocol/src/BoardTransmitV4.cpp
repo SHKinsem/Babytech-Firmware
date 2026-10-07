@@ -156,6 +156,11 @@ void Transmitter::invalidateOrdinary() {
     ordinaryTimed_ = false;
 }
 
+void Transmitter::invalidateOrdinary(Kind kind, uint32_t messageId) {
+    if (ordinaryPending_ && ordinary_.kind == kind && ordinary_.messageId == messageId)
+        invalidateOrdinary();
+}
+
 void Transmitter::reset() { *this = Transmitter{}; }
 
 bool Transmitter::pending() const {

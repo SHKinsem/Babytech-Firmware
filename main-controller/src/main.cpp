@@ -117,7 +117,7 @@ void loop() {
   const uint32_t nowMs = millis();
   controllerLink.poll(nowMs);
 #if BABYTECH_BOARD_LINK_V4
-  cloudDispatcher.poll(nowMs);
+  cloudDispatcher.poll(nowMs, commissioningSession.active() || productState.state().pending);
   network.poll(controllerLink.lastTelemetry(), controllerLink.connected(nowMs), nowMs,
                controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false);
   // Drain a queued urgent Stop before installer/recovery may perform Flash I/O.

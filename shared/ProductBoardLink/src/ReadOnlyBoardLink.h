@@ -43,7 +43,8 @@ public:
     bool requestResult(const ResultQuery& query, uint32_t nowMs);
     ResultLookupState resultLookupState() const { return lookupState_; }
     const QueriedResult& resultQueryResponse() const { return queriedResult_; }
-    // Cancels only transient query tracking, never a durable request or action.
+    // Cancels this transient query/queued bytes, never a durable request/action.
+    // Partial frames drain with invalid CRC before other ordinary bytes may send.
     void cancelResultQuery();
     // Explicit installer borrows the sole receive assembler/scratch. The same
     // loop owns both paths; interleaved ordinary fragments remain backpressure.
