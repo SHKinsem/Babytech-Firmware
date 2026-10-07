@@ -11,6 +11,7 @@
 
 using namespace babytech;
 using boardlink::Status;
+using boardlink::ExecutionOwner;
 using v4::Message;
 namespace {
 size_t rejected = 0;
@@ -75,6 +76,7 @@ Status status() {
     result.motionBusy = true;
     result.stationary = true;
     result.eventPending = true;
+    result.executionOwner = ExecutionOwner::Product;
     set(result.activeExecutionId, "abcdef1234567890abcdef1234567890");
     set(result.pendingEventId, u8"事件-\"\\\n");
     set(result.productProgress, "dispensing_powder");
@@ -160,6 +162,7 @@ void roundTrip() {
     Status initial;
     assert(initial.snapshot.stage == display::DisplayStage::NotReady);
     assert(!initial.snapshot.startEnabled && !initial.stationary);
+    assert(initial.executionOwner == ExecutionOwner::None);
     Message m;
     assert(boardlink::encodeStatus(initial, m));
     Status copy = status();
@@ -168,6 +171,7 @@ void roundTrip() {
     assert(!copy.stationary && !copy.motionBusy && !copy.eventPending);
     assert(std::string(copy.cloudWatermark) == "0" && std::string(copy.localWatermark) == "0");
     assert(!copy.activeExecutionId[0] && !copy.pendingEventId[0]);
+    assert(copy.executionOwner == ExecutionOwner::None);
     assert(std::string(initial.productProgress) == "noready" && std::string(copy.productProgress) == "noready");
     assert(std::string(initial.productError) == "NONE" && std::string(copy.productError) == "NONE");
     assert(initial.powderGrams == 0 && copy.powderGrams == 0 && !initial.babyId[0] && !copy.babyId[0]);
@@ -190,6 +194,7 @@ void roundTrip() {
     assert(std::string(copy.cloudWatermark) == original.cloudWatermark);
     assert(std::string(copy.localWatermark) == original.localWatermark);
     assert(copy.motionBusy && copy.stationary && copy.eventPending);
+    assert(copy.executionOwner == original.executionOwner);
     assert(std::string(copy.activeExecutionId) == original.activeExecutionId);
     assert(std::string(copy.pendingEventId) == original.pendingEventId);
     assert(std::string(copy.productProgress) == original.productProgress);
@@ -203,7 +208,8 @@ void roundTrip() {
 
     StaticJsonDocument<8192> json;
     assert(!deserializeJson(json, static_cast<const uint8_t*>(m.payload), m.length));
-    assert(json.size() == 35);
+    assert(json.size() == 36);
+    assert(json["execution_owner"].is<JsonString>() && json["execution_owner"].as<std::string>() == "product");
     for (const auto& field : kProductBools) {
         assert(json[field.key].is<bool>() && json[field.key].as<bool>());
     }
@@ -261,6 +267,119 @@ void roundTrip() {
     }
 }
 
+void executionOwnership() {
+    static_assert(std::is_same<std::underlying_type_t<ExecutionOwner>, uint8_t>::value,
+                  "ExecutionOwner must retain its uint8_t API");
+    const std::array<std::pair<ExecutionOwner, const char*>, 3> owners{{
+        {ExecutionOwner::None, "none"}, {ExecutionOwner::Product, "product"},
+        {ExecutionOwner::Workbench, "workbench"},
+    }};
+    const auto beforeRejected = rejected;
+    size_t roundTrips = 0, old35 = 0;
+    for (const auto& owner : owners) {
+        auto input = status();
+        input.executionOwner = owner.first;
+        if (owner.first == ExecutionOwner::None) set(input.activeExecutionId, "");
+        for (bool busy : {false, true}) for (bool stationary : {false, true}) {
+            input.motionBusy = busy;
+            input.stationary = stationary;
+            const auto before = bytes(input);
+            Message message;
+            assert(boardlink::encodeStatus(input, message));
+            assert(bytes(input) == before);
+            StaticJsonDocument<8192> json;
+            assert(!deserializeJson(json, static_cast<const uint8_t*>(message.payload), message.length));
+            assert(json.size() == 36 && json["execution_owner"].is<JsonString>());
+            assert(json["execution_owner"].as<std::string>() == owner.second);
+            Status decoded = status();
+            assert(boardlink::decodeStatus(message, decoded));
+            assert(decoded.executionOwner == owner.first && decoded.motionBusy == busy && decoded.stationary == stationary);
+            assert(std::string(decoded.activeExecutionId) == input.activeExecutionId);
+            Message encoded;
+            assert(boardlink::encodeStatus(decoded, encoded) && payload(message) == payload(encoded));
+            ++roundTrips;
+        }
+        Message message;
+        assert(boardlink::encodeStatus(input, message));
+        const auto legacy = without(message, "execution_owner");
+        StaticJsonDocument<8192> json;
+        assert(!deserializeJson(json, static_cast<const uint8_t*>(legacy.payload), legacy.length));
+        assert(json.size() == 35 && !json.containsKey("execution_owner"));
+        reject(legacy, false); // No inference or compatibility default for old v4.
+        ++old35;
+
+        // Duplicate owner keys cannot conceal a missing field, even when an
+        // escaped key spelling keeps the lexical count at exactly 36.
+        auto duplicate = payload(without(message, "pending_event_id"));
+        duplicate.insert(1, "\"execution_\\u006fwner\":\"none\",");
+        reject(raw(message, duplicate), false);
+        duplicate = payload(message);
+        duplicate.insert(1, "\"execution_owner\":\"none\",");
+        reject(raw(message, duplicate), false);
+        duplicate = payload(message);
+        duplicate.insert(duplicate.size() - 1, ",\"execution_owner\":\"workbench\"");
+        reject(raw(message, duplicate), false);
+    }
+    const auto message = statusMessage();
+    for (const auto* token : {"null", "true", "false", "0", "1", "2", "1.0", "1e0", "[]", "{}",
+                             "\"\"", "\"None\"", "\"Product\"", "\"Workbench\"", "\"idle\"", "\"unknown\"",
+                             "\"none \"", "\" product\"", "\"workbenchx\"", "\"product\\u0000\"",
+                             "\"workbench\\n\"", "\"pr\\u043educt\"", "\"\\ud800\""})
+        reject(field(message, "execution_owner", token), false);
+
+    for (const auto& owner : owners) {
+        for (const std::string& id : {std::string(""), std::string("abcdef1234567890abcdef1234567890"),
+                                     std::string(32, '0'), std::string(32, 'f'), std::string(31, '0') + "1",
+                                     std::string(31, 'a'), std::string(32, 'A'), std::string(31, 'a') + "g"}) {
+            auto input = status();
+            input.executionOwner = owner.first;
+            set(input.activeExecutionId, id);
+            const auto wire = field(field(message, "execution_owner", std::string("\"") + owner.second + "\""),
+                                    "active_execution_id", "\"" + id + "\"");
+            const bool validId = id == "abcdef1234567890abcdef1234567890" ||
+                id == std::string(32, 'f') || id == std::string(31, '0') + "1";
+            if (owner.first == ExecutionOwner::None ? id.empty() : validId) {
+                Message encoded;
+                Status decoded;
+                assert(boardlink::encodeStatus(input, encoded) && boardlink::decodeStatus(wire, decoded));
+                assert(decoded.executionOwner == owner.first && std::string(decoded.activeExecutionId) == id);
+                assert(payload(encoded) == payload(wire));
+                ++roundTrips;
+            } else {
+                rejectEncode(input);
+                reject(wire, false);
+            }
+        }
+        auto input = status();
+        input.executionOwner = owner.first;
+        std::memset(input.activeExecutionId, 'a', sizeof(input.activeExecutionId));
+        rejectEncode(input);
+        reject(field(field(message, "execution_owner", std::string("\"") + owner.second + "\""),
+                     "active_execution_id", "\"" + std::string(33, 'a') + "\""), false);
+    }
+    for (unsigned value : {3u, 127u, 255u}) for (bool withId : {false, true}) {
+        auto input = status();
+        input.executionOwner = ExecutionOwner(value);
+        if (!withId) set(input.activeExecutionId, "");
+        rejectEncode(input);
+    }
+    // JSON escaping may represent ASCII enum characters; output is canonical.
+    for (const auto& owner : owners) {
+        auto wire = field(message, "execution_owner", std::string("\"\\u00") +
+                          (owner.first == ExecutionOwner::None ? "6eone" :
+                           owner.first == ExecutionOwner::Product ? "70roduct" : "77orkbench") + "\"");
+        if (owner.first == ExecutionOwner::None) wire = field(wire, "active_execution_id", "\"\"");
+        Status decoded;
+        assert(boardlink::decodeStatus(wire, decoded) && decoded.executionOwner == owner.first);
+        Message encoded;
+        assert(boardlink::encodeStatus(decoded, encoded));
+        assert(payload(encoded).find(std::string("\"execution_owner\":\"") + owner.second + "\"") != std::string::npos);
+        ++roundTrips;
+    }
+    std::cout << "Execution owner: " << roundTrips << " valid cases, " << old35 << " old-35 regressions, "
+              << rejected - beforeRejected << " atomic rejection cases passed\n";
+}
+
 void invalidFields() {
     const Message h = helloMessage(), s = statusMessage();
     for (const auto* key : {"protocol", "role", "capabilities", "reply_to", "device_id", "pairing_epoch", "physical_id"}) {
@@ -274,7 +393,7 @@ void invalidFields() {
                            "cloud_connected", "start_enabled", "thermal_simulated", "water_ml", "temperature_c",
                            "baby_name", "formula_brand", "sample_uptime_ms", "context_version", "cloud_watermark",
                            "local_watermark", "motion_busy", "stationary", "event_pending",
-                           "active_execution_id", "pending_event_id", "product_progress", "product_error",
+                           "execution_owner", "active_execution_id", "pending_event_id", "product_progress", "product_error",
                            "is_preparing", "low_water_valid", "low_water", "powder_valid", "powder_grams",
                            "actuator_operational", "actuator_config_valid", "actuator_bus_healthy",
                            "actuator_position_referenced", "execution_authorized", "feeding_context_configured",
@@ -284,7 +403,7 @@ void invalidFields() {
         reject(field(s, key, "[]"), false);
         reject(field(s, key, "{}"), false);
         reject(field(without(s, key), "unknown_field", "false"), false);
-        // Keep the lexical count at 35: neither literal nor escaped duplicate
+        // Keep the lexical count at 36: neither literal nor escaped duplicate
         // keys may hide a missing required key after ArduinoJson decoding.
         const std::string missing = payload(without(s, key));
         const bool stageMissing = std::strcmp(key, "stage") == 0;
@@ -464,6 +583,7 @@ void productTelemetry() {
     rejectText(&Status::babyId, "baby_id");
 
     Message legacy = original;
+    legacy = without(legacy, "execution_owner");
     for (const auto& fieldInfo : kProductBools) legacy = without(legacy, fieldInfo.key);
     for (const auto* key : kProductStrings) legacy = without(legacy, key);
     legacy = without(legacy, "powder_grams");
@@ -556,7 +676,8 @@ void malformedJson() {
         assert(isHello ? boardlink::decodeHello(padded, h) : boardlink::decodeStatus(padded, s));
     }
     const Message s = statusMessage();
-    for (const auto* key : {"baby_name", "formula_brand", "pending_event_id", "baby_id", "product_progress", "product_error"}) {
+    for (const auto* key : {"baby_name", "formula_brand", "pending_event_id", "baby_id", "product_progress", "product_error",
+                           "execution_owner"}) {
         for (const std::string& value : {std::string("\xc0\xaf"), std::string("\xed\xa0\x80"),
                                         std::string("\xf4\x90\x80\x80"), std::string("\xe5\xae"),
                                         std::string("\x80"), std::string("\xe5\x41\x41")})
@@ -691,6 +812,7 @@ Message transport(Message message, bool& splitUtf8) {
 void payloadBudget() {
     static_assert(v4::kMaxMessage == 2047, "STATUS must retain the v4 wire cap");
     auto s = status();
+    s.executionOwner = ExecutionOwner::Workbench; // Longest owner spelling.
     s.snapshot.stage = display::DisplayStage::Unknown;
     s.snapshot.primaryCondition = s.snapshot.footerCondition = display::DisplayCondition::Ready;
     s.snapshot.cloudConnected = s.snapshot.startEnabled = s.snapshot.thermalSimulated = false;
@@ -707,7 +829,7 @@ void payloadBudget() {
     const size_t unescapedMaximum = message.length;
     // Each byte in these four UTF-8 strings may require a six-byte JSON escape.
     const size_t escapedMaximum = unescapedMaximum + 5 * (31 + 31 + 128 + 96);
-    assert(unescapedMaximum == 1207 && escapedMaximum == 2637);
+    assert(unescapedMaximum == 1237 && escapedMaximum == 2667);
     const auto allAscii = s;
     const std::array<std::pair<char*, size_t>, 4> strings{{
         {s.snapshot.babyName.data(), 31}, {s.snapshot.formulaBrand.data(), 31},
@@ -737,7 +859,7 @@ void payloadBudget() {
     assert(boardlink::encodeStatus(copy, reencoded) && payload(reencoded) == payload(message));
     StaticJsonDocument<8192> doc;
     assert(!deserializeJson(doc, static_cast<const uint8_t*>(message.payload), message.length));
-    assert(doc.size() == 35);
+    assert(doc.size() == 36);
     // +1 escaped byte crosses the limit even though every field still fits.
     *nextAscii = '"';
     rejectEncode(s);
@@ -752,13 +874,13 @@ void payloadBudget() {
     Message defaults;
     assert(boardlink::encodeStatus(Status{}, defaults));
     assert(boardlink::encodeStatus(allAscii, message));
-    std::cout << "STATUS budget: fields=35, default_payload=" << defaults.length
+    std::cout << "STATUS budget: fields=36, default_payload=" << defaults.length
               << ", max_unescaped_payload=" << unescapedMaximum
               << ", theoretical_max_escaped_payload=" << escapedMaximum
               << ", max_accepted_payload=" << v4::kMaxMessage
               << ", sizeof(Status)=" << sizeof(Status)
-              << ", encode_pool=" << JSON_OBJECT_SIZE(35)
-              << ", decode_pool=" << JSON_OBJECT_SIZE(35) + v4::kMaxMessage + 1 << '\n';
+              << ", encode_pool=" << JSON_OBJECT_SIZE(36)
+              << ", decode_pool=" << JSON_OBJECT_SIZE(36) + v4::kMaxMessage + 1 << '\n';
 }
 
 void fragmentation() {
@@ -795,6 +917,7 @@ void fragmentation() {
 
 int main() {
     roundTrip();
+    executionOwnership();
     invalidFields();
     productTelemetry();
     helloCorrelation();

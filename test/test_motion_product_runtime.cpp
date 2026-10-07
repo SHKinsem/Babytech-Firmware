@@ -1,7 +1,9 @@
 #include "MotionProductRuntime.h"
+#include "MotionStateRecovery.h"
 #include "ReadOnlyBoardLink.h"
 #include "FakeBrainNvs.h"
 #include "FakeProductCrypto.h"
+#include "brain_stop_target.h"
 
 #include <array>
 #include <cstdio>
@@ -162,6 +164,7 @@ struct Executor : motion::DemoExecutor {
     }
     bool reset() override { ++resets; return true; }
     void confirm() { sample = {true, true, false, 0}; }
+    bool stopConfirmed() const { return sample.fresh && sample.stationary && !sample.fault; }
 };
 struct Hardware : motion::MotionProductHardware {
     explicit Hardware(Executor& executor) : executor(executor) {}
@@ -170,6 +173,9 @@ struct Hardware : motion::MotionProductHardware {
     const char* owner = nullptr;
     bool executionValue = true;
     unsigned generated = 0;
+    bool workbenchWriter = false, workbenchFresh = true, workbenchSettled = true;
+    unsigned workbenchStops = 0, recoveryStops = 0;
+    char recoveryId[33]{};
     std::function<void()> beforeId;
     uint32_t nowMs() const override { return clock; }
     const char* unavailable() const override { return owner; }
@@ -183,6 +189,15 @@ struct Hardware : motion::MotionProductHardware {
     bool stationary() const override {
         return executor.sample.fresh && executor.sample.stationary && !executor.sample.fault;
     }
+    bool workbenchBusy() const override { return workbenchWriter; }
+    bool workbenchStationary() const override { return workbenchFresh && workbenchSettled; }
+    void stopWorkbench(uint32_t) override {
+        ++workbenchStops;
+        workbenchWriter = false;
+        workbenchFresh = false;
+    }
+    const char* recoveringExecutionId() const override { return recoveryId; }
+    void stopRecovery(uint32_t) override { ++recoveryStops; }
 };
 struct Fixture {
     MotionStateStore store;
@@ -455,9 +470,12 @@ struct LinkFixture {
         Status status;
         status.snapshot = device.product.displaySnapshot();
         status.sampleUptimeMs = now;
-        status.motionBusy = device.runtime.active() || device.flow.busy() || device.product.active();
+        status.motionBusy = device.runtime.active() || device.flow.busy() || device.product.active() ||
+            device.hardware.workbenchBusy();
         status.stationary = device.hardware.stationary();
         device.runtime.project(status, true);
+        if (status.executionOwner == ExecutionOwner::Workbench)
+            status.stationary = device.hardware.workbenchStationary();
         motionLink.poll(now, toBrain, publishStatus ? &status : nullptr);
         toMotion.deliver(motionLink, now);
         toBrain.deliver(brain, now);
@@ -550,26 +568,29 @@ struct LinkFixture {
     }
     v4::StopRequest observedTarget(v4::Source source, uint64_t sequence = 0) {
         publishStatus = true;
+        const char* expected = device.runtime.workbenchExecutionId()[0] ?
+            device.runtime.workbenchExecutionId() : device.store.state().slot.executionId;
         for (unsigned i = 0; i < 700; ++i) {
             if (brain.freshStatus(now) && !std::strcmp(brain.peerStatus().activeExecutionId,
-                                                     device.store.state().slot.executionId)) break;
+                                                     expected)) break;
             step();
         }
         CHECK(brain.freshStatus(now));
         const auto& status = brain.peerStatus();
         CHECK(std::strlen(status.activeExecutionId) == 32 && status.motionBusy && !status.stationary);
         v4::StopRequest stop;
-        stop.scope = v4::StopScope::Product;
+        struct ObservedLink {
+            const ReadOnlyLink& core;
+            bool connected(uint32_t nowMs) const { return core.connected(nowMs); }
+            const Status* lastTelemetry() const { return &core.peerStatus(); }
+            uint32_t lastTelemetryReceivedAtMs() const { return core.peerStatusReceivedAtMs(); }
+        } observed{brain};
+        CHECK(babytech::brain::bindStopTarget(observed, now, stop));
         stop.source = source;
         stop.sequence = sequence;
         if (source == v4::Source::CloudCommand) {
             std::strcpy(stop.commandId, "cloud-stop-from-brain");
             stop.commandIdLength = uint8_t(std::strlen(stop.commandId));
-        }
-        for (unsigned i = 0; i < 16; ++i) {
-            unsigned byte = 0;
-            CHECK(std::sscanf(status.activeExecutionId + 2 * i, "%2x", &byte) == 1);
-            stop.executionId[i] = uint8_t(byte);
         }
         return stop;
     }
@@ -2081,6 +2102,228 @@ void stops() {
     });
 }
 
+v4::StopRequest workbenchStop(const Fixture& f, v4::Source source, uint64_t sequence = 0) {
+    auto stop = stopRequest(f, source, sequence, true);
+    stop.scope = v4::StopScope::Workbench;
+    const char* id = f.runtime.workbenchExecutionId();
+    CHECK(std::strlen(id) == 32);
+    for (unsigned i = 0; i < 16; ++i) {
+        unsigned byte = 0;
+        CHECK(std::sscanf(id + 2 * i, "%2x", &byte) == 1);
+        stop.executionId[i] = uint8_t(byte);
+    }
+    CHECK(validStop(stop));
+    return stop;
+}
+
+struct RecoveryStationaryHost : motion::MotionRecoveryHardware {
+    struct Busy {
+        bool writer = false, settled = true;
+        bool busy() const { return writer; }
+        bool active() const { return writer; }
+        bool operationBusy() const { return writer; }
+        bool affectedAxesStationary() const { return settled; }
+    } endpoint, motor, queue;
+    bool canStarted = true;
+    motion::ProductSession& product;
+    motion::DemoFlowController& demo;
+    Executor& demoExecutor;
+    RecoveryStationaryHost(motion::ProductSession& p, motion::DemoFlowController& d, Executor& e)
+        : product(p), demo(d), demoExecutor(e) {}
+    void supervisedStop(uint32_t nowMs) override { product.recoverAfterRestart(nowMs); }
+#include "MotionRecoveryStationaryHost.inc"
+};
+
+void workbenchOwnership() {
+    scenario("real Recovery and production stationary adapter retain journal after raw writer Done", [] {
+        Fixture f;
+        decision(f.deliver(request()), true, "accepted");
+        motion::DemoFlowController rebootFlow(f.executor);
+        CHECK(rebootFlow.apply(f.flow.config()));
+        motion::ProductSession rebootProduct(rebootFlow);
+        RecoveryStationaryHost hardware(rebootProduct, rebootFlow, f.executor);
+        motion::MotionStateRecovery recovery(f.store, hardware);
+        CHECK(recovery.begin(pairing(), 1001) == MotionLoad::Ready);
+        CHECK(recovery.motionPending() && recovery.executionPending());
+        f.executor.confirm();
+        rebootFlow.tick(1002);
+        rebootProduct.tick(1002);
+        CHECK(!rebootFlow.busy() && !rebootProduct.ownsMotion() && hardware.demoExecutor.stopConfirmed());
+        // A config-outside workbench axis remains physically moving although
+        // the old Demo axes and software writer have already finished.
+        hardware.motor.writer = false;
+        hardware.motor.settled = false;
+        const auto before = encode(f.store.state());
+        const auto calls = io.calls.size();
+        const auto disk = io.disk;
+        recovery.poll();
+        CHECK(recovery.motionPending() && recovery.executionPending());
+        CHECK(before == encode(f.store.state()) && calls == io.calls.size() && disk == io.disk);
+        Status status;
+        recovery.project(status);
+        CHECK(status.executionOwner == ExecutionOwner::Product && status.activeExecutionId[0]);
+        hardware.motor.settled = true;
+        recovery.poll();
+        CHECK(!recovery.motionPending() && !recovery.executionPending());
+        CHECK(f.store.state().slot.kind == MotionSlotKind::Empty && f.store.state().pendingResultCount == 1);
+        recovery.project(status);
+        CHECK(status.executionOwner == ExecutionOwner::None && !status.activeExecutionId[0] && status.pendingEventId[0]);
+    });
+    for (auto source : {v4::Source::LocalTouch, v4::Source::CloudCommand})
+        scenario("workbench Stop exact owner, old generation rejected, ACK before physical/NVS source=" +
+                 std::to_string(int(source)), [=] {
+            Fixture f;
+            f.hardware.workbenchWriter = true;
+            f.hardware.workbenchSettled = false;
+            const auto disk = io.disk;
+            const auto calls = io.calls.size();
+            CHECK(f.runtime.workbenchAccepted());
+            const std::string first = f.runtime.workbenchExecutionId();
+            auto old = workbenchStop(f, source, source == v4::Source::CloudCommand ? 40 : 0);
+            for (unsigned i = 0; i < 5; ++i) f.runtime.poll(1001 + i);
+            CHECK(first == f.runtime.workbenchExecutionId() && f.hardware.generated == 1);
+            CHECK(io.calls.size() == calls && io.disk == disk);
+            CHECK(f.runtime.workbenchAccepted());
+            CHECK(first != f.runtime.workbenchExecutionId());
+            CHECK(!f.runtime.stop(old, 1010) && !f.hardware.workbenchStops);
+            auto target = workbenchStop(f, source, source == v4::Source::CloudCommand ? 41 : 0);
+            const std::string targetId = f.runtime.workbenchExecutionId();
+            auto wrongOwner = target;
+            wrongOwner.scope = v4::StopScope::Product;
+            CHECK(!f.runtime.stop(wrongOwner, 1011));
+            Status status;
+            f.runtime.project(status, true);
+            CHECK(status.executionOwner == ExecutionOwner::Workbench && !status.snapshot.startEnabled);
+            CHECK(!std::strcmp(status.activeExecutionId, f.runtime.workbenchExecutionId()));
+            CHECK(f.runtime.stop(target, 1012) && f.hardware.workbenchStops == 1);
+            CHECK(!f.executor.stops && !f.executor.starts && io.calls.size() == calls && io.disk == disk);
+            f.runtime.poll(1013);
+            CHECK(f.runtime.workbenchExecutionId()[0] && io.disk == disk);
+            f.hardware.workbenchFresh = f.hardware.workbenchSettled = true;
+            f.runtime.poll(1014);
+            CHECK(!f.runtime.workbenchExecutionId()[0]);
+            f.runtime.project(status, true);
+            CHECK(status.executionOwner == ExecutionOwner::None && !status.activeExecutionId[0]);
+            CHECK(!f.runtime.stop(target, 1015));
+            CHECK(f.store.state().slot.kind == MotionSlotKind::Empty && !f.store.state().pendingResultCount);
+            if (source == v4::Source::CloudCommand) {
+                CHECK(f.store.state().cloudSequence == 41);
+                CHECK(f.store.state().cloudResult.kind == MotionResultKind::CloudStop);
+                CHECK(targetId == f.store.state().cloudResult.stopExecutionId);
+                CHECK(std::strlen(f.store.state().cloudResult.stopExecutionId) == 32);
+                CHECK(f.store.state().cloudResult.accepted && decodedDisk().cloudSequence == 41);
+            } else CHECK(io.disk == disk && io.calls.size() == calls);
+        });
+    scenario("workbench natural completion requires writer done and fresh evidence", [] {
+        Fixture f;
+        f.hardware.workbenchWriter = true;
+        CHECK(f.runtime.workbenchAccepted());
+        const std::string id = f.runtime.workbenchExecutionId();
+        f.runtime.poll(1001);
+        CHECK(id == f.runtime.workbenchExecutionId()); // read/config-only queue still has a writer.
+        f.hardware.workbenchWriter = false;
+        f.hardware.workbenchFresh = false;
+        f.runtime.poll(1002);
+        CHECK(id == f.runtime.workbenchExecutionId());
+        f.hardware.workbenchFresh = true;
+        f.hardware.workbenchSettled = false;
+        f.runtime.poll(1003);
+        CHECK(id == f.runtime.workbenchExecutionId());
+        f.hardware.workbenchSettled = true;
+        f.runtime.poll(1004);
+        CHECK(!f.runtime.workbenchExecutionId()[0] && !f.hardware.workbenchStops);
+    });
+    scenario("failed workbench ID generation preserves previous target", [] {
+        Fixture f;
+        CHECK(f.runtime.workbenchAccepted());
+        const std::string original = f.runtime.workbenchExecutionId();
+        f.hardware.executionValue = false;
+        CHECK(!f.runtime.workbenchAccepted() && original == f.runtime.workbenchExecutionId());
+    });
+    scenario("accepted product generation revokes old workbench Stop target", [] {
+        Fixture f;
+        CHECK(f.runtime.workbenchAccepted());
+        const auto old = workbenchStop(f, v4::Source::LocalTouch);
+        decision(f.deliver(request(20, ProductCommand::Initialize)), true, "accepted");
+        CHECK(f.runtime.ownsMotion() && !f.runtime.workbenchExecutionId()[0]);
+        CHECK(!f.runtime.stop(old, 1001) && !f.hardware.workbenchStops);
+        Status status;
+        f.runtime.project(status, true);
+        CHECK(status.executionOwner == ExecutionOwner::Product && status.activeExecutionId[0]);
+    });
+    scenario("unfinished workbench writer cannot overlap a product acceptance", [] {
+        Fixture f;
+        CHECK(f.runtime.workbenchAccepted());
+        f.hardware.workbenchWriter = true;
+        decision(f.deliver(request(20, ProductCommand::Initialize)), false, "busy");
+        CHECK(!f.runtime.ownsMotion() && !f.executor.starts && f.runtime.workbenchExecutionId()[0]);
+    });
+    scenario("workbench local Stop remains available with unavailable durable store", [] {
+        Fixture f;
+        CHECK(f.runtime.workbenchAccepted());
+        auto target = workbenchStop(f, v4::Source::LocalTouch);
+        fake::fail(Op::OpenRO, fake::count(Op::OpenRO) + 1);
+        CHECK(f.store.load(pairing()) == MotionLoad::IoError);
+        CHECK(!f.store.ready());
+        const auto calls = io.calls.size();
+        CHECK(f.runtime.stop(target, 1001) && f.hardware.workbenchStops == 1);
+        CHECK(io.calls.size() == calls);
+        f.runtime.linkLost(1002);
+        CHECK(f.hardware.workbenchStops == 1); // no new workbench network gate.
+    });
+    scenario("workbench Cloud Stop archives without product Demo stationary eligibility", [] {
+        Fixture f(false);
+        CHECK(f.runtime.workbenchAccepted());
+        f.executor.sample.fresh = false;
+        f.hardware.workbenchFresh = f.hardware.workbenchSettled = false;
+        auto stop = workbenchStop(f, v4::Source::CloudCommand, 44);
+        CHECK(f.runtime.stop(stop, 1001));
+        f.hardware.workbenchFresh = f.hardware.workbenchSettled = true;
+        CHECK(!f.hardware.stationary());
+        f.runtime.poll(1002);
+        CHECK(f.store.state().cloudSequence == 44 && decodedDisk().cloudSequence == 44);
+        CHECK(f.store.state().slot.kind == MotionSlotKind::Empty && !f.store.state().pendingResultCount);
+    });
+    scenario("retained unarchived product terminal cannot starve independent workbench Cloud Stop", [] {
+        Fixture f;
+        decision(f.deliver(request()), true, "accepted");
+        const auto terminalAt = f.finishFeed();
+        f.tick(terminalAt + 3000);
+        CHECK(f.runtime.active() && f.runtime.ownsMotion() && !f.hardware.stationary());
+        CHECK(f.store.state().slot.kind == MotionSlotKind::Intent);
+        CHECK(f.runtime.workbenchAccepted());
+        auto expected = f.store.state();
+        auto stop = workbenchStop(f, v4::Source::CloudCommand, 44);
+        CHECK(f.runtime.stop(stop, terminalAt + 3001));
+        f.hardware.workbenchFresh = f.hardware.workbenchSettled = true;
+        CHECK(!f.hardware.stationary());
+        f.runtime.poll(terminalAt + 3002);
+        CHECK(f.store.state().cloudSequence == 44 && decodedDisk().cloudSequence == 44);
+        expected.cloudSequence = 44;
+        expected.cloudResult = f.store.state().cloudResult;
+        CHECK(sameMotionState(expected, f.store.state()));
+        CHECK(f.runtime.active() && !f.runtime.workbenchExecutionId()[0]);
+        CHECK(f.store.state().slot.kind == MotionSlotKind::Intent);
+    });
+    scenario("recovery Product target stays explicit and history alone has no owner", [] {
+        Fixture f;
+        std::strcpy(f.hardware.recoveryId, executionId(9876).c_str());
+        auto stop = stopRequest(f, v4::Source::LocalTouch, 0, true);
+        stop.scope = v4::StopScope::Product;
+        for (unsigned i = 0; i < 16; ++i) {
+            unsigned byte = 0;
+            CHECK(std::sscanf(f.hardware.recoveryId + 2 * i, "%2x", &byte) == 1);
+            stop.executionId[i] = uint8_t(byte);
+        }
+        CHECK(f.runtime.stop(stop, 1001) && f.hardware.recoveryStops == 1);
+        f.hardware.recoveryId[0] = 0;
+        CHECK(!f.runtime.stop(stop, 1002) && f.hardware.recoveryStops == 1);
+        Status status;
+        f.runtime.project(status, true);
+        CHECK(status.executionOwner == ExecutionOwner::None && !status.activeExecutionId[0]);
+    });
+}
+
 void faults() {
     for (bool failedWrite : {false, true})
         scenario("Clean Error releases mechanical ownership without clearing fault/Ready " +
@@ -2198,6 +2441,46 @@ void faults() {
 }
 
 void uartIntegration() {
+    for (auto source : {v4::Source::LocalTouch, v4::Source::CloudCommand})
+        scenario("real UART workbench STATUS target/Stop routes current ID only source=" +
+                 std::to_string(int(source)), [=] {
+            ++brainSenderScenarios;
+            LinkFixture link;
+            link.handshake();
+            auto& f = link.device;
+            f.hardware.workbenchWriter = true;
+            f.hardware.workbenchFresh = f.hardware.workbenchSettled = false;
+            CHECK(f.runtime.workbenchAccepted());
+            auto old = link.observedTarget(source, source == v4::Source::CloudCommand ? 100 : 0);
+            CHECK(old.scope == v4::StopScope::Workbench);
+            CHECK(f.runtime.workbenchAccepted());
+            CHECK(link.brain.requestStop(old, link.now));
+            for (unsigned i = 0; i < 300 && link.brain.stopSendState() == StopSendState::Pending; ++i) link.step();
+            CHECK(link.brain.stopSendState() == StopSendState::Rejected && !f.hardware.workbenchStops);
+            link.run(1000);
+            auto current = link.observedTarget(source, source == v4::Source::CloudCommand ? 101 : 0);
+            CHECK(current.scope == v4::StopScope::Workbench);
+            CHECK(link.brain.requestStop(current, link.now));
+            for (unsigned i = 0; i < 300 && link.brain.stopSendState() == StopSendState::Pending; ++i) link.step();
+            CHECK(link.brain.stopSendState() == StopSendState::Received && f.hardware.workbenchStops == 1);
+            CHECK(!f.executor.starts && !f.executor.stops && io.calls.empty());
+            CHECK(f.runtime.workbenchExecutionId()[0]);
+            f.hardware.workbenchFresh = f.hardware.workbenchSettled = true;
+            link.run(100);
+            CHECK(!f.runtime.workbenchExecutionId()[0]);
+            CHECK(f.store.state().slot.kind == MotionSlotKind::Empty && !f.store.state().pendingResultCount);
+            if (source == v4::Source::CloudCommand) {
+                CHECK(decodedDisk().cloudSequence == 101);
+                ResultQuery query;
+                query.source = source; query.sequence = 101;
+                std::strcpy(query.deviceId, pairing().deviceId);
+                std::strcpy(query.commandId, current.commandId);
+                QueriedResult result;
+                CHECK(queryMotionResult(f.store, query, result));
+                CHECK(result.status == ResultQueryStatus::Known && result.accepted && result.outcome == MotionOutcome::None);
+            } else CHECK(io.calls.empty());
+            ++uartExchanges;
+        });
     scenario("real two-role UART command acceptance Stop between fragments archive original query", [] {
         LinkFixture link;
         link.handshake();
@@ -2527,7 +2810,7 @@ int main(int argc, char** argv) {
         {"writes", writes}, {"duplicates", duplicates},
         {"rejections", rejections}, {"deferred", deferredRejections}, {"ttl", ttl}, {"terminals", terminals}, {"queues", queues},
         {"manual_owner", manualOwnership}, {"offline_link", offlineAndLink},
-        {"stops", stops}, {"faults", faults}, {"uart", uartIntegration}};
+        {"stops", stops}, {"workbench", workbenchOwnership}, {"faults", faults}, {"uart", uartIntegration}};
     if (argc > 2) { std::fprintf(stderr, "Expected at most one test group\n"); return 2; }
     bool found = argc == 1;
     for (const auto& group : groups) {

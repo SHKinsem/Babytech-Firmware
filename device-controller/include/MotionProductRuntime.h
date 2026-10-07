@@ -17,6 +17,11 @@ public:
     virtual const char* unavailable() const = 0;
     virtual bool newExecution(char (&id)[33]) = 0;
     virtual bool stationary() const = 0;
+    virtual bool workbenchBusy() const { return false; }
+    virtual bool workbenchStationary() const { return stationary(); }
+    virtual void stopWorkbench(uint32_t) {}
+    virtual const char* recoveringExecutionId() const { return ""; }
+    virtual void stopRecovery(uint32_t) {}
 };
 
 // One loop owner, using the existing session/flow and durable store. No CAN or
@@ -34,11 +39,16 @@ public:
     bool resultReady(babytech::boardlink::CommandResult& result);
     void releaseMotionOwnership() { motionOwned_ = false; }
     bool ownsMotion() const { return motionOwned_; }
+    // A whole accepted queue/Demo or an independently submitted movement owns
+    // one RAM identity. The hardware retains affected axes across generations.
+    bool workbenchAccepted();
+    const char* workbenchExecutionId() const { return workbenchExecution_; }
     bool stopOwned(uint32_t nowMs);
     bool stop(const babytech::v4::StopRequest& request, uint32_t nowMs);
     void linkLost(uint32_t nowMs);
     void poll(uint32_t nowMs);
-    void project(babytech::boardlink::Status& status, bool linkConnected) const;
+    void project(babytech::boardlink::Status& status, bool linkConnected,
+                 bool recoveringMotion = false) const;
     bool active() const { return execution_[0] != 0; }
 private:
     bool contextSynchronized() const;
@@ -46,6 +56,7 @@ private:
     bool matchingDigest(const babytech::boardlink::ProductRequest& request,
                         const char (&hex)[65]);
     void finishFailed(const char* reason, uint32_t nowMs);
+    void archiveExecution();
     babytech::boardlink::MotionStateStore& store_;
     ProductSession& product_;
     DemoFlowController& flow_;
@@ -59,6 +70,7 @@ private:
     ProductTerminal terminal_{};
     uint32_t terminalAt_ = 0;
     char execution_[33]{};
+    char workbenchExecution_[33]{};
     babytech::boardlink::ProductCommand operation_ = babytech::boardlink::ProductCommand::None;
     bool terminalSeen_ = false;
     bool operationFailed_ = false;

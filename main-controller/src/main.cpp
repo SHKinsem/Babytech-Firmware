@@ -13,6 +13,7 @@
 #include "brain_pending_recovery.h"
 #include "brain_cloud_dispatcher.h"
 #include "brain_local_dispatcher.h"
+#include "brain_touch_stop.h"
 #include "brain_context_sync.h"
 #include "brain_simulation_console.h"
 #include "brain_simulation_dispatcher.h"
@@ -61,6 +62,27 @@ const char* cloudAdmission() {
 }
 babytech::brain::BrainCloudDispatcher<babytech::display::ControllerLink,
   babytech::brain::BrainNetwork> cloudDispatcher(controllerLink, network, installNowMs, cloudAdmission);
+babytech::brain::BrainTouchStop touchStop;
+void localStopEvent(lv_event_t* event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+  const uint32_t nowMs = uint32_t(millis());
+  if (!touchStop.dispatch(localDispatcher, simulation.get(), nowMs))
+    Serial.printf("[Brain] Local Stop unavailable: %s\n", localDispatcher.reason());
+}
+void createLocalStopButton() {
+  auto* button = lv_btn_create(lv_scr_act());
+  lv_obj_set_size(button, 128, 48);
+  lv_obj_set_pos(button, 18, 112);
+  lv_obj_set_style_radius(button, 12, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(button, lv_color_hex(0xA44F48), LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+  lv_obj_add_event_cb(button, localStopEvent, LV_EVENT_CLICKED, nullptr);
+  auto* label = lv_label_create(button);
+  lv_label_set_text(label, "Stop");
+  lv_obj_set_style_text_font(label, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_center(label);
+}
 void refreshSimulationContext() {
   if (simulation) simulation->setContext(
     productState.ready() && productState.state().hasContext ? &productState.state().context : nullptr,
@@ -110,7 +132,8 @@ void pollCommissioningConsole() {
           !productState.ready() || productState.state().pending ||
           simulationModeGuard.unresolved(last, controllerLink.connected(uint32_t(millis())),
             controllerLink.lastTelemetryReceivedAtMs(), uint32_t(millis())) ||
-          (last && (last->motionBusy || last->isPreparing || last->activeExecutionId[0] || !last->stationary));
+          (last && (last->motionBusy || last->isPreparing || last->activeExecutionId[0] ||
+            last->executionOwner != babytech::boardlink::ExecutionOwner::None || !last->stationary));
         const bool before = simulating();
         const bool handled = babytech::brain::BrainSimulationConsole::handle(
           line, *simulation, realUnresolved, output, capacity);
@@ -146,6 +169,9 @@ void setup() {
 #endif
   Serial.setTimeout(20);
   displayReady = panel.begin() && view.begin(true);
+#if BABYTECH_BOARD_LINK_V4
+  if (displayReady) createLocalStopButton();
+#endif
   if (displayReady) {
     Serial.println("[Display] LVGL UI ready");
   } else {
@@ -182,9 +208,14 @@ void setup() {
 }
 
 void loop() {
-  const uint32_t nowMs = millis();
+  uint32_t nowMs = millis();
   controllerLink.poll(nowMs);
 #if BABYTECH_BOARD_LINK_V4
+  // Service touchscreen Stop before simulation completion and any Store I/O.
+  touchStop.beginPass();
+  if (displayReady) view.poll(uint32_t(millis()));
+  controllerLink.poll(uint32_t(millis()));
+  nowMs = uint32_t(millis());
   simulationModeGuard.unresolved(controllerLink.lastTelemetry(), controllerLink.connected(nowMs),
     controllerLink.lastTelemetryReceivedAtMs(), nowMs);
   cloudDispatcher.poll(nowMs, commissioningSession.active() || productState.state().pending);
@@ -214,7 +245,9 @@ void loop() {
   }
 
   const uint32_t displayNowMs = millis();
+#if !BABYTECH_BOARD_LINK_V4
   view.poll(displayNowMs);
+#endif
   babytech::display::DisplaySnapshot snapshot;
   bool controllerConnected = controllerLink.connected(displayNowMs);
   bool intentPending = controllerLink.intentPending();
@@ -264,7 +297,7 @@ void loop() {
   babytech::display::DisplayIntent intent;
   const bool hasIntent = view.takeIntent(intent);
 #if BABYTECH_BOARD_LINK_V4
-  if (hasIntent && (commissioningSession.active() || simulating())) {
+  if (hasIntent && (touchStop.requested() || commissioningSession.active() || simulating())) {
     delay(5);
     return;
   }

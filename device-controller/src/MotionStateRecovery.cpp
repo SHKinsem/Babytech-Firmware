@@ -56,6 +56,8 @@ void MotionStateRecovery::project(Status& status) const {
     if (!began_) return;
     status.snapshot.startEnabled = false;
     status.executionAuthorized = false;
+    status.activeExecutionId[0] = 0;
+    status.executionOwner = ExecutionOwner::None;
     if (!store_.ready()) {
         // Zero watermarks in this required wire layout are placeholders only:
         // this explicit fault is not a synchronized/ready product state.
@@ -76,8 +78,11 @@ void MotionStateRecovery::project(Status& status) const {
     std::snprintf(status.localWatermark, sizeof(status.localWatermark), "%llu",
                   static_cast<unsigned long long>(state.localSequence));
     status.activeExecutionId[0] = status.pendingEventId[0] = 0;
-    if (state.slot.kind != MotionSlotKind::Empty)
+    status.executionOwner = ExecutionOwner::None;
+    if (stopPending_ && state.slot.kind != MotionSlotKind::Empty) {
         std::strcpy(status.activeExecutionId, state.slot.executionId);
+        status.executionOwner = ExecutionOwner::Product;
+    }
     if (state.slot.kind == MotionSlotKind::Terminal)
         std::strcpy(status.pendingEventId, state.slot.eventId);
     else if (state.pendingResultCount)

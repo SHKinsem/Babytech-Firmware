@@ -6,6 +6,8 @@
 
 namespace babytech { namespace boardlink {
 
+enum class ExecutionOwner : uint8_t { None, Product, Workbench };
+
 // Flat JSON objects, all fields required; unknown/duplicate fields rejected.
 // HELLO/HELLO_ACK: protocol (integer 4), role ("brain" or "motion"),
 // capabilities (uint32, bit 0 set), device_id (1..64 ASCII, validHello rules),
@@ -18,9 +20,11 @@ namespace babytech { namespace boardlink {
 // temperature_c (int16), baby_name, formula_brand (UTF-8, <=31 bytes each),
 // sample_uptime_ms (uint32), context_version (0..INT32_MAX),
 // cloud_watermark, local_watermark (canonical decimal strings 0..INT64_MAX),
-// motion_busy, stationary, event_pending (bool), active_execution_id
-// (empty or nonzero 32 lower hex), pending_event_id (UTF-8, 0..128 bytes).
-// STATUS adds 14 required product fields (35 total), still UART v4:
+// motion_busy, stationary, event_pending (bool), execution_owner (ASCII
+// none/product/workbench), active_execution_id (empty for none, nonzero 32
+// lower hex for product/workbench), pending_event_id (UTF-8, 0..128 bytes).
+// Owner none does not imply idle or stationary. No owner field wire default.
+// STATUS adds 14 required product fields (36 total), still UART v4:
 // product_progress (ready/noready/error/cleaning/unscrewing_cap/dispensing_water/
 // dispensing_powder/screwing_cap/mixing/complete), product_error (1..39 bytes,
 // [A-Z0-9_]+, including NONE and extensible E_* codes), is_preparing (bool),
@@ -43,6 +47,7 @@ struct Status {
     bool motionBusy = false;
     bool stationary = false;
     bool eventPending = false;
+    ExecutionOwner executionOwner = ExecutionOwner::None;
     char activeExecutionId[33]{};
     char pendingEventId[129]{};
     char productProgress[24] = "noready";

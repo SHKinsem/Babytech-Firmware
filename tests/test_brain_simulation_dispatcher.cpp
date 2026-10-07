@@ -1,5 +1,6 @@
 #include "brain_simulation_dispatcher.h"
 #include "brain_simulation_mode_guard.h"
+#include "brain_touch_stop.h"
 #include "FakeProductCrypto.h"
 
 #include <array>
@@ -408,6 +409,40 @@ void stop_failure() {
     r.poll(360);
     CHECK(r.net.events.back().payload == event.payload && r.d.resultCount() == 1);
     CHECK(!r.d.status().complete && r.d.status().canStart);
+}
+
+void local_stop() {
+    Rig r;
+    CHECK(!r.d.stopLocal(nowMs));
+    r.enable();
+    const auto c = r.command(); r.send(c);
+    const auto acknowledgements = r.net.acks.size();
+    nowMs = 110;
+    struct LocalTrap {
+        unsigned calls = 0;
+        bool stop(uint32_t) { ++calls; return false; }
+    } local;
+    babytech::brain::BrainTouchStop touch;
+    CHECK(touch.dispatch(local, &r.d, nowMs) && touch.requested());
+    CHECK(!local.calls);
+    CHECK(!r.d.running() && !r.d.status().complete && r.d.resultCount() == 1);
+    CHECK(r.net.acks.size() == acknowledgements);
+    r.poll(nowMs);
+    const auto event = r.net.events.back();
+    CHECK(!event.terminal.completed && event.terminal.uptimeMs == nowMs);
+    CHECK(!std::strcmp(event.terminal.reason, "stopped"));
+    CHECK(sameProductRequest(event.terminal.request, c.request));
+    CHECK(r.d.stopLocal(nowMs + 1) && r.d.resultCount() == 1);
+    CHECK(r.d.setEnabled(false, false) == SimulationModeResult::Changed);
+    r.poll(360);
+    CHECK(r.net.events.back().payload == event.payload);
+    auto retry = c; text(retry.session, r.net.token); retry.sampledAtMs = nowMs;
+    CHECK(r.d.setEnabled(true, false) == SimulationModeResult::Changed);
+    text(retry.session, r.net.token); r.send(retry);
+    CHECK(!r.d.running() && r.d.resultCount() == 1);
+    CHECK(r.net.acks.back().session == c.session);
+    r.d.receipt(stored(event.terminal));
+    CHECK(!r.d.resultCount());
 }
 
 void freshness() {
@@ -1029,12 +1064,15 @@ void mode_guard() {
             CHECK(gate.unresolved(&decodedIdle, true, 102, 101)); // Future receipt.
             CHECK(gate.unresolved(&decodedIdle, true, 101, 1601)); // Exact stale boundary.
 
-            for (unsigned fault = 0; fault < 4; ++fault) {
+            for (unsigned fault = 0; fault < 5; ++fault) {
                 auto moving = idle;
                 if (fault == 0) moving.motionBusy = true;
                 if (fault == 1) moving.isPreparing = true;
                 if (fault == 2) moving.stationary = false;
-                if (fault == 3) text(moving.activeExecutionId, "11111111111111111111111111111111");
+                if (fault == 3 || fault == 4) {
+                    text(moving.activeExecutionId, "11111111111111111111111111111111");
+                    moving.executionOwner = fault == 3 ? ExecutionOwner::Product : ExecutionOwner::Workbench;
+                }
                 text(moving.productProgress, "complete"); // A display terminal label cannot override motion evidence.
                 const auto decoded = typedStatus(moving);
                 CHECK(gate.unresolved(&decoded, true, 101, 101));
@@ -1271,7 +1309,7 @@ int main(int argc, char** argv) {
         {"stop_ack_pending", stop_ack_pending}, {"full_receipts", full_receipts},
         {"receipts_off", receipts_off}, {"delayed_old_mode", delayed_old_mode},
         {"status_pulse", status_pulse}, {"retained_ack_session", retained_ack_session},
-        {"mode_guard", mode_guard}
+        {"mode_guard", mode_guard}, {"local_stop", local_stop}
     };
     if (argc > 2) { std::fprintf(stderr, "Expected at most one group name\n"); return 2; }
     unsigned passed = 0, failed = 0;

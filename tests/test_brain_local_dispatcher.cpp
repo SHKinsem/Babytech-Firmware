@@ -1,4 +1,5 @@
 #include "brain_local_dispatcher.h"
+#include "brain_touch_stop.h"
 #include "brain_pending_recovery.h"
 #include "FakeBrainNvs.h"
 #include "FakeProductCrypto.h"
@@ -113,6 +114,8 @@ struct FakeLink {
     CommandSendState send = CommandSendState::Idle;
     CommandResult reply;
     unsigned attempts = 0, cancellations = 0;
+    bool allowStop = true;
+    std::vector<v4::StopRequest> stops;
     std::vector<CommandMessage> commands;
     std::vector<uint32_t> sentAt;
     std::function<void()> beforePreflight;
@@ -141,6 +144,19 @@ struct FakeLink {
         v4::Message wire;
         CHECK(encodeCommandResult(r, wire) && decodeCommandResult(wire, reply));
         send = CommandSendState::Complete;
+    }
+    bool requestStop(const v4::StopRequest& request, uint32_t) {
+        if (!allowStop) return false;
+        auto outgoing = request;
+        CHECK(outgoing.source == v4::Source::LocalTouch && !outgoing.sequence);
+        std::snprintf(outgoing.commandId, sizeof(outgoing.commandId), "stop-%016llx-%08x",
+            101ull, unsigned(stops.size() + 1));
+        outgoing.commandIdLength = uint8_t(std::strlen(outgoing.commandId));
+        uint8_t bytes[v4::kMaxFragment]; v4::StopRequest decoded;
+        const auto length = v4::encodeStop(outgoing, bytes, sizeof(bytes));
+        CHECK(length && v4::decodeStop(bytes, length, decoded));
+        stops.push_back(decoded); cancelCommand();
+        return true;
     }
 };
 using Dispatcher = babytech::brain::BrainLocalDispatcher<FakeLink>;
@@ -193,6 +209,88 @@ void unchanged(Rig& rig, const std::function<void()>& action) {
     action();
     CHECK(sameBrainState(rig.store.state(), before) && nvs::io.disk == disk);
     CHECK(nvs::io.calls.size() == calls && rig.link.attempts == sends);
+}
+void localStops() {
+    for (auto owner : {ExecutionOwner::None, ExecutionOwner::Product, ExecutionOwner::Workbench})
+        for (bool ordinaryPending : {false, true}) scenario("local Stop bypasses ordinary owner / " +
+            std::to_string(unsigned(owner)) + "/" + std::to_string(ordinaryPending), [=] {
+            Rig rig;
+            if (ordinaryPending) CHECK(rig.start());
+            rig.link.status.executionOwner = owner;
+            if (owner != ExecutionOwner::None) std::strcpy(rig.link.status.activeExecutionId, execution);
+            rig.link.status.motionBusy = owner != ExecutionOwner::None;
+            rig.link.status.stationary = owner == ExecutionOwner::None;
+            rig.link.status.snapshot.startEnabled = false;
+            rig.link.status.eventPending = true; rig.link.status.feedingContextConfigured = false;
+            rig.link.status.executionAuthorized = false; rig.link.preflight = false;
+            v4::Message wire; Status decoded;
+            CHECK(encodeStatus(rig.link.status, wire) && decodeStatus(wire, decoded));
+            rig.link.status = decoded;
+            const auto before = rig.store.state(); const auto disk = nvs::io.disk;
+            const auto calls = nvs::io.calls.size();
+            CHECK(rig.d.stop(nowMs)); reason(rig.d, "stop_requested");
+            CHECK(nvs::io.calls.size() == calls && nvs::io.disk == disk && sameBrainState(rig.store.state(), before));
+            CHECK(rig.link.stops.size() == 1);
+            const auto& target = rig.link.stops[0];
+            CHECK(target.source == v4::Source::LocalTouch && !target.sequence);
+            CHECK(target.scope == (owner == ExecutionOwner::None ? v4::StopScope::Idle :
+                owner == ExecutionOwner::Product ? v4::StopScope::Product : v4::StopScope::Workbench));
+            for (auto byte : target.executionId) CHECK(byte == (owner == ExecutionOwner::None ? 0 : 0x11));
+            rig.poll(101); rig.poll(10000);
+            CHECK(rig.link.stops.size() == 1 && rig.link.commands.size() == unsigned(ordinaryPending));
+            CHECK(rig.store.state().pending == ordinaryPending);
+        });
+    scenario("local Stop works with unavailable Store", [] {
+        BrainStateStore store; FakeLink link; Dispatcher d(link, store, clockNow);
+        link.status.stationary = true; const auto calls = nvs::io.calls.size();
+        CHECK(d.stop(nowMs) && link.stops.size() == 1 && !store.ready());
+        CHECK(nvs::io.calls.size() == calls);
+    });
+    for (unsigned fault = 0; fault < 9; ++fault) scenario("local Stop unavailable target / " + std::to_string(fault), [=] {
+        Rig rig;
+        if (fault == 0) rig.link.board = false;
+        if (fault == 1) rig.link.telemetry = false;
+        if (fault == 2) nowMs += 1500;
+        if (fault == 3) rig.link.status.stationary = false;
+        if (fault == 4) rig.link.status.motionBusy = true;
+        if (fault == 5) std::strcpy(rig.link.status.activeExecutionId, execution);
+        if (fault == 6) rig.link.status.executionOwner = ExecutionOwner::Workbench;
+        if (fault == 7) rig.link.status.executionOwner = static_cast<ExecutionOwner>(99);
+        if (fault == 8) rig.link.allowStop = false;
+        unchanged(rig, [&] { CHECK(!rig.d.stop(nowMs)); });
+        CHECK(rig.link.stops.empty()); reason(rig.d, fault == 8 ? "busy" : "motion_state_unavailable");
+    });
+}
+struct SimulationStopBoundary {
+    bool active = false;
+    unsigned calls = 0;
+    uint32_t stoppedAt = 0;
+    bool enabled() const { return active; }
+    bool stopLocal(uint32_t at) { ++calls; stoppedAt = at; return true; }
+};
+void touchStops() {
+    for (unsigned mode = 0; mode < 4; ++mode) scenario("production touch adapter route and pass priority / " + std::to_string(mode), [=] {
+        Rig rig; babytech::brain::BrainTouchStop touch;
+        SimulationStopBoundary simulation;
+        simulation.active = mode == 2;
+        rig.link.status.executionOwner = ExecutionOwner::Workbench;
+        std::strcpy(rig.link.status.activeExecutionId, execution);
+        rig.link.status.stationary = false;
+        rig.link.allowStop = mode != 3;
+        const auto before = rig.store.state(); const auto calls = nvs::io.calls.size();
+        CHECK(!touch.requested());
+        const bool accepted = touch.dispatch(rig.d, mode ? &simulation : nullptr, nowMs);
+        CHECK(accepted == (mode != 3) && touch.requested());
+        CHECK(simulation.calls == unsigned(mode == 2));
+        CHECK(rig.link.stops.size() == unsigned(mode < 2));
+        if (mode == 2) CHECK(simulation.stoppedAt == nowMs);
+        CHECK(nvs::io.calls.size() == calls && sameBrainState(before, rig.store.state()));
+        touch.beginPass(); CHECK(!touch.requested());
+        rig.link.allowStop = true; simulation.active = false;
+        CHECK(touch.dispatch(rig.d, &simulation, nowMs) && touch.requested());
+        CHECK(rig.link.stops.size() == unsigned(mode < 2) + 1);
+        CHECK(rig.link.stops.back().scope == v4::StopScope::Workbench);
+    });
 }
 void rebootPending(const BrainState& expected) {
     nvs::reboot(); crypto::reset();
@@ -273,7 +371,10 @@ void gates() {
             if (fault == 1) rig.link.telemetry = false;
             if (fault == 2) rig.link.status.stationary = false;
             if (fault == 3) rig.link.status.motionBusy = true;
-            if (fault == 4) std::strcpy(rig.link.status.activeExecutionId, execution);
+            if (fault == 4) {
+                std::strcpy(rig.link.status.activeExecutionId, execution);
+                rig.link.status.executionOwner = ExecutionOwner::Product;
+            }
             if (fault == 5) rig.link.receivedAt = nowMs - 1500u;
             if (fault == 6) rig.link.receivedAt = nowMs - 100000u;
             if (fault == 7) rig.link.preflight = false;
@@ -582,6 +683,7 @@ void responses() {
 MotionStateStore* motionStore = nullptr;
 bool motionAccepts = true;
 unsigned commandCalls = 0, queryCalls = 0, stopCalls = 0;
+v4::StopRequest receivedStop;
 CommandMessage receivedCommand;
 bool commandHandler(const CommandMessage& incoming, uint32_t, CommandResult& reply) {
     ++commandCalls; CHECK(motionStore); receivedCommand = incoming;
@@ -593,7 +695,7 @@ bool commandHandler(const CommandMessage& incoming, uint32_t, CommandResult& rep
 bool queryHandler(const ResultQuery& query, QueriedResult& reply) {
     ++queryCalls; CHECK(motionStore); return queryMotionResult(*motionStore, query, reply);
 }
-bool stopHandler(const v4::StopRequest&, uint32_t) { ++stopCalls; return true; }
+bool stopHandler(const v4::StopRequest& request, uint32_t) { ++stopCalls; receivedStop = request; return true; }
 struct TelemetryLink : ReadOnlyLink {
     const Status* lastTelemetry() const { return freshStatus(nowMs) ? &peerStatus() : nullptr; }
     uint32_t lastTelemetryReceivedAtMs() const { return peerStatusReceivedAtMs(); }
@@ -675,8 +777,7 @@ void production() {
         const auto reserved = brainStore.state();
         if (mode == 3) {
             // Real binary Stop cancels the ordinary sender before any command frame.
-            v4::StopRequest stop; stop.scope = v4::StopScope::Idle;
-            CHECK(brain.requestStop(stop, nowMs)); d.poll(nowMs);
+            CHECK(d.stop(nowMs)); d.poll(nowMs);
             CHECK(!d.busy() && brainStore.state().pending);
             for (unsigned tick = 0; tick < 400; ++tick) { step(); d.poll(nowMs); }
             CHECK(!commandCalls && !toMotion.commands && stopCalls == 1 && toMotion.stops == 1);
@@ -744,6 +845,43 @@ void production() {
         motionStore = nullptr;
     }, true);
 }
+void productionStops() {
+    for (auto owner : {ExecutionOwner::None, ExecutionOwner::Product, ExecutionOwner::Workbench})
+        scenario("local targeted Stop crosses real STATUS and control codecs / " + std::to_string(unsigned(owner)), [=] {
+            stopCalls = 0;
+            BrainStateStore store;
+            TelemetryLink brain; ReadOnlyLink motion; ShortWire toMotion, toBrain;
+            CHECK(brain.begin(pairing(), 101) && motion.begin(pairing(v4::Role::Motion), 202));
+            CHECK(motion.setStopHandler(stopHandler));
+            Status status; status.executionOwner = owner;
+            status.stationary = owner == ExecutionOwner::None;
+            if (owner != ExecutionOwner::None) std::strcpy(status.activeExecutionId, execution);
+            auto step = [&] {
+                status.sampleUptimeMs = nowMs;
+                brain.poll(nowMs, toMotion); motion.poll(nowMs, toBrain, &status);
+                toMotion.deliver(motion); toBrain.deliver(brain); ++nowMs;
+            };
+            for (unsigned tick = 0; tick < 400; ++tick) step();
+            CHECK(brain.connected(nowMs) && brain.lastTelemetry());
+            CHECK(brain.lastTelemetry()->executionOwner == owner);
+            const auto calls = nvs::io.calls.size(); const auto disk = nvs::io.disk;
+            babytech::brain::BrainLocalDispatcher<TelemetryLink> d(brain, store, clockNow);
+            babytech::brain::BrainTouchStop touch;
+            CHECK(touch.dispatch(d, static_cast<SimulationStopBoundary*>(nullptr), nowMs));
+            for (unsigned tick = 0; tick < 1000 && brain.stopSendState() == StopSendState::Pending; ++tick) {
+                step(); d.poll(nowMs);
+            }
+            CHECK(brain.stopSendState() == StopSendState::Received && stopCalls == 1 && toMotion.stops == 1);
+            CHECK(receivedStop.scope == (owner == ExecutionOwner::None ? v4::StopScope::Idle :
+                owner == ExecutionOwner::Product ? v4::StopScope::Product : v4::StopScope::Workbench));
+            CHECK(receivedStop.source == v4::Source::LocalTouch && !receivedStop.sequence);
+            CHECK(!std::strncmp(receivedStop.commandId, "stop-0000000000000065-", 22));
+            for (auto byte : receivedStop.executionId) CHECK(byte == (owner == ExecutionOwner::None ? 0 : 0x11));
+            for (unsigned tick = 0; tick < 200; ++tick) step();
+            CHECK(toMotion.stops == 1 && !toMotion.commands && !toMotion.queries);
+            CHECK(nvs::io.calls.size() == calls && nvs::io.disk == disk && !store.ready());
+        });
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -751,7 +889,8 @@ int main(int argc, char** argv) {
     const struct { const char* name; void (*run)(); } groups[] = {
         {"basics", basics}, {"gates", gates}, {"identity", identity}, {"timing", timing},
         {"storage", storage}, {"responses", responses}, {"production", production},
-        {"acceptance", acceptanceCallbacks}};
+        {"acceptance", acceptanceCallbacks}, {"stops", localStops}, {"touch_stops", touchStops},
+        {"production_stops", productionStops}};
     bool found = selected == "all";
     for (const auto& group : groups) if (selected == "all" || selected == group.name) {
         found = true; group.run();

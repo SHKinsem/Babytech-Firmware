@@ -42,6 +42,15 @@ public:
     }
     const SimulationStatus& status() const { return status_; }
 
+    bool stopLocal(uint32_t nowMs) {
+        if (!enabled()) return false;
+        if (simulation_.stop(nowMs))
+            std::strcpy(resultSessions_[resultCount() - 1], activeSession_);
+        completed_ = false;
+        refresh();
+        return true;
+    }
+
     void command(const boardlink::CloudCommand& incoming, uint32_t generation, uint32_t) {
         if (!enabled() || incoming.request.source != v4::Source::CloudCommand ||
             !boardlink::validProductRequest(incoming.request) ||

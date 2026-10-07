@@ -35,6 +35,10 @@ std::function<void(const ProductRequest&, uint32_t)> acceptanceHook;
     "line " + std::to_string(__LINE__) + ": " #condition); } while (false)
 
 uint32_t clockNow() { ++clockCalls; if (clockHook) clockHook(); return nowMs; }
+void setExecution(Status& status, const char* id, ExecutionOwner owner = ExecutionOwner::Product) {
+    std::strcpy(status.activeExecutionId, id);
+    status.executionOwner = id[0] ? owner : ExecutionOwner::None;
+}
 const char* admission() { ++admissionCalls; return admissionHook ? admissionHook() : blocked; }
 void observeAcceptance(const ProductRequest& request, uint32_t at) {
     CHECK(acceptanceHook); acceptanceHook(request, at);
@@ -259,7 +263,7 @@ void stopRecoveryFaults() {
         scenario(std::string("Stop recovery exact original reason/session / ") + reason, [=] {
             Rig r; auto s = stop();
             if (!std::strcmp(reason, "accepted")) {
-                std::strcpy(r.link.status.activeExecutionId, executionA);
+                setExecution(r.link.status, executionA);
                 r.link.status.motionBusy = true; r.link.status.stationary = false;
             }
             beginStopQuery(r, s);
@@ -341,6 +345,7 @@ void stopRecoveryFaults() {
         scenario(maximumId ? "Stop recovery full identity capacity" : "Stop recovery retry timer wraps uint32", [=] {
             const uint32_t sample = maximumId ? 100u : UINT32_MAX - 100u;
             nowMs = sample; FakeLink link; FakeNetwork net(sample - 1); Dispatcher d(link, net, clockNow, admission);
+            link.telemetryReceivedAt = nowMs;
             auto s = stop(maximumId ? v4::kMaxSequence : 2, sample);
             if (maximumId) { std::memset(s.commandId, 's', 128); s.commandId[128] = 0; }
             d.stop(s, 7, nowMs); CHECK(link.stops.size() == 1);
@@ -428,7 +433,7 @@ void stopRecoveryArbitration() {
             Rig r; const auto old = stop(); r.d.stop(old, 7, nowMs);
             r.link.stopState = StopSendState::TimedOut; r.poll(101);
             if (querying) r.poll(1101);
-            std::strcpy(r.link.status.activeExecutionId, executionB);
+            setExecution(r.link.status, executionB);
             r.link.status.motionBusy = true; r.link.status.stationary = false;
             blocked = "storage_fault"; const auto next = stop(3, nowMs); r.d.stop(next, 7, nowMs);
             CHECK(r.link.stops.size() == 2 && !admissionCalls && !r.d.busy());
@@ -773,7 +778,7 @@ void results() {
             r.link.completeQuery(unknown); r.poll(1102);
             nowMs = 6000;
             r.link.telemetryReceivedAt = nowMs;
-            std::strcpy(r.link.status.activeExecutionId, executionA);
+            setExecution(r.link.status, executionA);
             r.link.status.motionBusy = true; r.link.status.stationary = false;
             const auto blockedRequest = command(ProductCommand::Clean, 2, nowMs);
             r.start(blockedRequest);
@@ -906,12 +911,13 @@ void expiredUnknown() {
             if (fault == 7) link.telemetryFresh = false;
             if (fault == 8) link.status.motionBusy = true;
             if (fault == 9) link.status.stationary = false;
-            if (fault == 10) std::strcpy(link.status.activeExecutionId, executionA);
+            if (fault == 10) setExecution(link.status, executionA);
             d.poll(nowMs);
             CHECK(d.busy() && !d.resultPending() && net.acks.empty());
             CHECK(!link.cancellations && !link.queryCancellations && link.commands.size() == 1);
             link.board = link.telemetry = link.telemetryFresh = true;
             link.status.motionBusy = false; link.status.stationary = true; link.status.activeExecutionId[0] = 0;
+            link.status.executionOwner = ExecutionOwner::None;
             link.telemetryReceivedAt = nowMs; d.poll(nowMs);
             CHECK(!d.busy() && !d.resultPending() && net.acks.empty());
             CHECK(link.cancellations == 1 && link.queryCancellations == 1 && link.commands.size() == 1);
@@ -1000,7 +1006,7 @@ void expiredUnknown() {
     scenario("expired release never gates independent Product Stop on business admission", [] {
         Rig r; const auto c = command(); r.query(c);
         r.link.telemetryReceivedAt = 6000; r.poll(6000); CHECK(!r.d.busy());
-        std::strcpy(r.link.status.activeExecutionId, executionB);
+        setExecution(r.link.status, executionB);
         r.link.status.motionBusy = true; r.link.status.stationary = false;
         blocked = "storage_fault"; const auto calls = admissionCalls; const auto s = stop(2, nowMs);
         r.d.stop(s, 7, nowMs);
@@ -1062,13 +1068,59 @@ void replyRetries() {
 }
 
 void stops() {
+    for (auto owner : {ExecutionOwner::Product, ExecutionOwner::Workbench})
+        for (bool stationary : {false, true}) scenario("owner binds exact scope without resource gates / " +
+            std::to_string(unsigned(owner)) + "/" + std::to_string(stationary), [=] {
+            Rig r; setExecution(r.link.status, executionA, owner);
+            r.link.status.stationary = stationary; r.link.status.motionBusy = false;
+            r.link.status.eventPending = true; r.link.status.executionAuthorized = false;
+            r.link.status.snapshot.startEnabled = false; blocked = "storage_fault";
+            v4::Message wire; Status decoded;
+            CHECK(encodeStatus(r.link.status, wire) && decodeStatus(wire, decoded));
+            r.link.status = decoded;
+            const auto s = stop(); r.d.stop(s, 7, nowMs);
+            CHECK(r.link.stops.size() == 1 && !admissionCalls && !crypto::calls);
+            CHECK(r.link.stops[0].scope == (owner == ExecutionOwner::Product ?
+                v4::StopScope::Product : v4::StopScope::Workbench));
+            for (auto byte : r.link.stops[0].executionId) CHECK(byte == 0x11);
+            setExecution(r.link.status, executionB, owner == ExecutionOwner::Product ?
+                ExecutionOwner::Workbench : ExecutionOwner::Product);
+            r.link.stopState = StopSendState::Received; r.poll(101);
+            r.d.stop(s, 7, nowMs); r.poll(102);
+            CHECK(r.link.stops.size() == 1 && r.net.acks.size() == 1);
+            stopAck(r.net.acks[0], s, true, "accepted");
+        });
+    for (unsigned fault = 0; fault < 9; ++fault) scenario("owner target invalid boundary / " + std::to_string(fault), [=] {
+        Rig r; setExecution(r.link.status, executionA, ExecutionOwner::Workbench);
+        if (fault == 0) r.link.status.executionOwner = ExecutionOwner::None;
+        if (fault == 1) r.link.status.activeExecutionId[0] = 0;
+        if (fault == 2) r.link.status.executionOwner = static_cast<ExecutionOwner>(99);
+        if (fault == 3) std::memset(r.link.status.activeExecutionId, '0', 32);
+        if (fault == 4) r.link.status.activeExecutionId[0] = 'A';
+        if (fault == 5) r.link.status.activeExecutionId[32] = '1';
+        if (fault == 6) nowMs = 1600;
+        if (fault == 7) r.link.telemetryReceivedAt = nowMs + 1;
+        if (fault == 8) r.link.board = false;
+        const auto s = stop(2, nowMs); r.d.stop(s, 7, nowMs);
+        CHECK(r.link.stops.empty() && !admissionCalls && !crypto::calls);
+        CHECK(r.net.acks.size() == 1); stopAck(r.net.acks[0], s, false, "motion_state_unavailable");
+    });
+    for (bool wrap : {false, true}) scenario("fresh owner STATUS at 1499ms / " + std::to_string(wrap), [=] {
+        Rig r; setExecution(r.link.status, executionA, ExecutionOwner::Workbench);
+        r.link.telemetryReceivedAt = wrap ? UINT32_MAX - 100 : 100;
+        nowMs = r.link.telemetryReceivedAt + 1499;
+        CHECK(r.net.session.open(sessionB, 8, nowMs - 1));
+        auto s = stop(2, nowMs); std::strcpy(s.session, sessionB);
+        r.d.stop(s, 8, nowMs);
+        CHECK(r.link.stops.size() == 1 && r.link.stops[0].scope == v4::StopScope::Workbench);
+    });
     for (unsigned ordinaryState = 0; ordinaryState < 4; ++ordinaryState)
         scenario("Stop seq19 remains valid after ordinary seq20 / " + std::to_string(ordinaryState), [=] {
             Rig r; const auto c = command(ProductCommand::Prepare, 20);
             if (ordinaryState == 0) blocked = "busy";
             r.start(c); blocked = nullptr;
             if (ordinaryState == 1 || ordinaryState == 2) r.resolve(c.request, ordinaryState == 2);
-            std::strcpy(r.link.status.activeExecutionId, executionA);
+            setExecution(r.link.status, executionA);
             r.link.status.motionBusy = true; r.link.status.stationary = false;
             const auto s = stop(19); const auto admissions = admissionCalls;
             r.d.stop(s, 7, nowMs);
@@ -1076,7 +1128,7 @@ void stops() {
             CHECK(r.link.stops[0].sequence == 19 && r.link.stops[0].scope == v4::StopScope::Product);
             for (auto byte : r.link.stops[0].executionId) CHECK(byte == 0x11);
             r.link.stopState = StopSendState::Received; r.poll(101);
-            std::strcpy(r.link.status.activeExecutionId, executionB);
+            setExecution(r.link.status, executionB);
             const auto acks = r.net.acks.size(); r.d.stop(s, 7, nowMs); r.poll(102);
             CHECK(r.link.stops.size() == 1 && r.net.acks.size() == acks);
             r.start(c); CHECK(r.link.commands.size() == (ordinaryState ? 1u : 0u));
@@ -1093,13 +1145,13 @@ void stops() {
         CHECK(r.net.checks.back().result == cloud::Freshness::Expired);
         CHECK(r.net.acks.size() == 1);
         stopAck(r.net.acks[0], s, received, received ? "already_idle" : "request_expired");
-        nowMs = 100; std::strcpy(r.link.status.activeExecutionId, executionB); r.d.stop(s, 7, nowMs);
+        nowMs = 100; setExecution(r.link.status, executionB); r.d.stop(s, 7, nowMs);
         CHECK(r.link.stops.size() == (received ? 1u : 0u) && r.net.acks.size() == 1);
     });
     for (bool idle : {false, true}) for (bool received : {false, true})
         scenario(std::string("Stop matched target / ") + (idle ? "idle" : "execution") + (received ? " received" : " rejected"), [=] {
             Rig r; const auto s = stop(); blocked = "storage_fault";
-            if (!idle) { std::strcpy(r.link.status.activeExecutionId, executionA); r.link.status.motionBusy = true; r.link.status.stationary = false; }
+            if (!idle) { setExecution(r.link.status, executionA); r.link.status.motionBusy = true; r.link.status.stationary = false; }
             r.d.stop(s, 7, nowMs); CHECK(r.link.stops.size() == 1 && !admissionCalls && !crypto::calls);
             const auto& target = r.link.stops[0]; CHECK(target.scope == (idle ? v4::StopScope::Idle : v4::StopScope::Product));
             CHECK(target.source == v4::Source::CloudCommand && target.sequence == s.sequence);
@@ -1125,7 +1177,7 @@ void stops() {
     });
     scenario("Stop cancels ordinary; uncertain original is only queried", [] {
         Rig r; const auto c = command(); r.start(c); blocked = "maintenance";
-        std::strcpy(r.link.status.activeExecutionId, executionA);
+        setExecution(r.link.status, executionA);
         r.link.status.motionBusy = true; r.link.status.stationary = false;
         r.d.stop(stop(), 7, nowMs); CHECK(r.link.stops.size() == 1 && r.link.cancellations == 1 && r.d.busy());
         CHECK(admissionCalls == 1); r.link.stopState = StopSendState::Received; r.poll(101); r.poll(1101);
@@ -1141,8 +1193,8 @@ void stops() {
         CHECK(r.link.stops.size() == 1 && admissionCalls == admissions && r.d.resultPending());
     });
     scenario("late Stop never rebinds from A to newer execution B", [] {
-        Rig r; const auto s = stop(); std::strcpy(r.link.status.activeExecutionId, executionA);
-        r.d.stop(s, 7, nowMs); std::strcpy(r.link.status.activeExecutionId, executionB);
+        Rig r; const auto s = stop(); setExecution(r.link.status, executionA);
+        r.d.stop(s, 7, nowMs); setExecution(r.link.status, executionB);
         r.poll(101); r.link.stopState = StopSendState::Received; r.poll(102); r.d.stop(s, 7, nowMs);
         CHECK(r.link.stops.size() == 1); for (auto byte : r.link.stops[0].executionId) CHECK(byte == 0x11);
         CHECK(!std::strcmp(r.link.status.activeExecutionId, executionB));
@@ -1166,7 +1218,7 @@ void stops() {
         scenario("ACK waiting for network never gates new explicit Stop / " + std::to_string(oldAck), [=] {
             Rig r; const auto old = stop(1); r.net.publishAvailable = false;
             if (oldAck == 1) {
-                std::strcpy(r.link.status.activeExecutionId, executionA);
+                setExecution(r.link.status, executionA);
                 r.link.status.motionBusy = true; r.link.status.stationary = false;
             }
             if (oldAck == 2) r.link.telemetry = false;
@@ -1177,7 +1229,8 @@ void stops() {
             CHECK(r.net.acks.size() == 1 && !r.net.acks[0].sent);
             const auto actionsBefore = r.link.stops.size();
             r.link.telemetry = true; r.link.allowStop = true;
-            std::strcpy(r.link.status.activeExecutionId, executionB);
+            r.link.telemetryReceivedAt = nowMs;
+            setExecution(r.link.status, executionB);
             r.link.status.motionBusy = true; r.link.status.stationary = false;
             blocked = "storage_fault"; const auto admissions = admissionCalls;
             r.net.session.close(); CHECK(r.net.session.open(sessionB, 8, nowMs));
@@ -1213,6 +1266,7 @@ void stops() {
                 std::strcpy(s.session, sessionB);
             }
             nowMs = sampled + age;
+            r.link.telemetryReceivedAt = nowMs;
             r.d.stop(s, 7, nowMs);
             CHECK(r.link.stops.size() == (age <= 5000 ? 1u : 0u));
             CHECK(admissionCalls == 0 && crypto::calls == 0);
@@ -1460,6 +1514,7 @@ bool persistedStopHandler(const v4::StopRequest& s, uint32_t) {
     simulatedStopStatus->motionBusy = false;
     simulatedStopStatus->stationary = true;
     simulatedStopStatus->activeExecutionId[0] = 0;
+    simulatedStopStatus->executionOwner = ExecutionOwner::None;
     simulatedIdle = true;
     char execution[33]{};
     if (s.scope == v4::StopScope::Product) {
@@ -1528,7 +1583,7 @@ void stopRecoveryProduction() {
             for (unsigned tick = 0; tick < 400; ++tick) step();
             CHECK(brain.connected(nowMs) && motion.connected(nowMs) && brain.lastTelemetry());
             if (mode) {
-                std::strcpy(status.activeExecutionId, executionA); status.motionBusy = true; status.stationary = false;
+                setExecution(status, executionA); status.motionBusy = true; status.stationary = false;
                 for (unsigned tick = 0; tick < 600; ++tick) step();
                 CHECK(brain.lastTelemetry() && !std::strcmp(brain.lastTelemetry()->activeExecutionId, executionA));
             }

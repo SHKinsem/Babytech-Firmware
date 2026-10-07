@@ -2,6 +2,7 @@
 
 #include "BrainStateStore.h"
 #include "ReadOnlyBoardLink.h"
+#include "brain_stop_target.h"
 
 #include <cstring>
 
@@ -22,6 +23,20 @@ public:
     const char* reason() const { return reason_; }
     void setPrepareReadyHandler(bool (*ready)()) { prepareReady_ = ready; }
     void setAcceptanceHandler(void (*handler)(const boardlink::ProductRequest&, uint32_t)) { acceptance_ = handler; }
+
+    bool stop(uint32_t nowMs) {
+        v4::StopRequest target;
+        if (!bindStopTarget(link_, nowMs, target)) {
+            reason_ = "motion_state_unavailable";
+            return false;
+        }
+        target.source = v4::Source::LocalTouch;
+        target.sequence = 0;
+        // The link generates this boot/message's canonical transient Stop ID.
+        if (!link_.requestStop(target, nowMs)) { reason_ = "busy"; return false; }
+        reason_ = "stop_requested";
+        return true;
+    }
 
     bool canStart(uint32_t nowMs, bool blocked = false) const {
         if (!available(nowMs, blocked) || (prepareReady_ && !prepareReady_())) return false;

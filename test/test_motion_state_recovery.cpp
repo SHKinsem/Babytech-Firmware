@@ -219,7 +219,8 @@ void projectionMatches(MotionStateRecovery& recovery, const MotionState& state) 
     CHECK(std::string(status.cloudWatermark) == std::to_string(state.cloudSequence));
     CHECK(std::string(status.localWatermark) == std::to_string(state.localSequence));
     CHECK(!std::strcmp(status.activeExecutionId,
-          state.slot.kind != MotionSlotKind::Empty ? state.slot.executionId : ""));
+          recovery.motionPending() && state.slot.kind != MotionSlotKind::Empty ? state.slot.executionId : ""));
+    CHECK(status.executionOwner == (status.activeExecutionId[0] ? ExecutionOwner::Product : ExecutionOwner::None));
     const char* pending = state.slot.kind == MotionSlotKind::Terminal ? state.slot.eventId :
         (state.pendingResultCount ? state.pendingResults[0].eventId : "");
     CHECK(!std::strcmp(status.pendingEventId, pending));

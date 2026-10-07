@@ -297,7 +297,26 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
 
     FeedbackSample sample;
     if (!decodeFeedback(frame.data, frame.length, sample)) return;
+    const bool queryPending = queries_.evidence(id, function).pending;
     queries_.receive(id,function,now);
+
+    auto& physical = physical_[id];
+    if (physical.affected && (sample.field == FeedbackField::Position || sample.field == FeedbackField::Velocity)) {
+        const auto query = queries_.evidence(id, function);
+        const bool postStopQuery = physical.stopSubmitted && queryPending && query.received &&
+            query.receivedAt == now && isStrictlyNewerThan(query.sampleRequestAt, physical.stopAt);
+        if (sample.field == FeedbackField::Position) {
+            physical.positionAt = now; physical.positionValid = true;
+            physical.positionControlFreshMs = physicalEvidenceWindow(false);
+            physical.positionOtaFreshMs = physicalEvidenceWindow(true);
+            physical.positionAfterStopQuery = postStopQuery;
+        } else {
+            physical.velocityAt = now; physical.velocityValid = true; physical.velocity = sample.value;
+            physical.velocityControlFreshMs = physicalEvidenceWindow(false);
+            physical.velocityOtaFreshMs = physicalEvidenceWindow(true);
+            physical.velocityAfterStopQuery = postStopQuery;
+        }
+    }
 
     node.seenEver = true;
     node.lastSeenMs = now;
@@ -523,6 +542,7 @@ bool MotorControl::faultAppliesTo(uint8_t id) const {
 
 bool MotorControl::nodeOfInterest(uint8_t id) const {
     if (id == 0) return false;
+    if (physical_[id].affected) return true;
     if (demoWatched_[id]) return true;
     if (id == selectedId_ || id == experimentId_ || id == queueObserveId_ || syncObserve_[id]) return true;
     const uint8_t fields[]={0x36,0x35,0x3A,0x33,0x3B};
@@ -794,6 +814,15 @@ void MotorControl::serviceQueries(uint32_t now) {
         else targetPollId_=0;
     }
     if (config_.state==2 && !config_.readIssued) demand(config_.id,0x22,3000,3);
+    // Retiring the current writer must not depend on refreshing released OTA
+    // history. Keep every participating pair demanded: rotating only four
+    // targets after release(Controller) can phase-lock against the TX gap.
+    // The SAME scheduler still limits actual queries; no discovery probes.
+    const bool controlPending = hasUnsettledMotionEvidence();
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        if (controlPending ? !physical_[id].controlPending : !physical_[id].affected) continue;
+        demand(id,0x36,200,2); demand(id,0x35,200,2);
+    }
 }
 
 bool MotorControl::sendQuery(void* context,uint8_t id,uint8_t field) {
@@ -923,7 +952,9 @@ bool MotorControl::sendHomeTrigger(uint8_t id, uint8_t mode) {
     // does not supervise.
     const uint8_t frame[5] = {id, kFrameHome, mode, 0, kProtocolChecksum};
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Motion, id);
     const bool queued = can_.sendValidatedCommand(frame, sizeof(frame));
+    finishEvidenceTx(queued && !can_.hasTransmissionError());
     if (!queued || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -947,7 +978,9 @@ bool MotorControl::sendHomeInterrupt(uint8_t id) {
 bool MotorControl::sendStop(uint8_t id) {
     if (!canReady()) return false;
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Stop, id);
     can_.stopNow(id, false);
+    finishEvidenceTx(!can_.hasTransmissionError());
     if (can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -1089,6 +1122,7 @@ Result MotorControl::move(const MoveRequest& request) {
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
 
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Motion, id);
     can_.positionControlWithCurrentLimit(
         id,
         plan.direction,
@@ -1099,6 +1133,7 @@ Result MotorControl::move(const MoveRequest& request) {
         plan.motionMode,
         plan.sync,
         plan.currentMa);
+    finishEvidenceTx(!can_.hasTransmissionError());
     if (can_.hasTransmissionError()) {
         // A partial transmission may have reached the motor. Stop it best
         // effort and latch instead of returning a bare 503 with a live motor.
@@ -1207,6 +1242,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     }
 
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Motion, id);
     if (plan.withCurrentLimit) {
         can_.passthroughPositionControlWithCurrentLimit(
             id,
@@ -1227,6 +1263,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
             plan.motionMode,
             false);
     }
+    finishEvidenceTx(!can_.hasTransmissionError());
     if (can_.hasTransmissionError()) {
         // A partial transmission may have reached the motor. Stop it best
         // effort and latch instead of returning a bare 503 with a live motor.
@@ -1356,7 +1393,9 @@ bool MotorControl::rawLogical(const uint8_t* bytes, uint8_t length) {
     // bus must be healthy: nothing here stops or enables anything to make room.
     if (!canReady() || operationBusy()) return false;
     can_.clearTransmissionError();
+    beginEvidenceTx(logicalEvidenceEffect(bytes, length), bytes[0]);
     const bool sent = can_.sendRawLogical(bytes, length);
+    finishEvidenceTx(sent && !can_.hasTransmissionError());
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -1448,7 +1487,13 @@ bool MotorControl::rawCanFrame(uint32_t id, bool extended, const uint8_t* data, 
     if (length > kMaxCanDataBytes) return false;
     if (!canReady() || operationBusy()) return false;
     can_.clearTransmissionError();
+    uint8_t logical[9] = {x42sCanAddress(id)};
+    if (data && length <= 8) memcpy(logical + 1, data, length);
+    beginEvidenceTx(x42sCanIsSinglePacketDataFrame(id, extended, false) && data ?
+        logicalEvidenceEffect(logical, uint8_t(length + 1)) : EvidenceEffect::Unknown,
+        extended && !(id & ~0xFFFFU) ? x42sCanAddress(id) : 0);
     const bool sent = can_.sendRawFrame(id, extended, data, length);
+    finishEvidenceTx(sent && !can_.hasTransmissionError());
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -1464,7 +1509,9 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
     if (!canReady()) return false;
     can_.clearTransmissionError();
     queueTransport_=true;
+    beginEvidenceTx(logicalEvidenceEffect(bytes, length), bytes[0]);
     const bool sent = can_.sendRawLogical(bytes, length);
+    finishEvidenceTx(sent && !can_.hasTransmissionError());
     queueTransport_=false;
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
@@ -1496,7 +1543,13 @@ bool MotorControl::queueSendFrame(uint32_t id, bool extended, const uint8_t* dat
     if (!canReady()) return false;
     can_.clearTransmissionError();
     queueTransport_=true;
+    uint8_t logical[9] = {x42sCanAddress(id)};
+    if (data && length <= 8) memcpy(logical + 1, data, length);
+    beginEvidenceTx(x42sCanIsSinglePacketDataFrame(id, extended, false) && data ?
+        logicalEvidenceEffect(logical, uint8_t(length + 1)) : EvidenceEffect::Unknown,
+        extended && !(id & ~0xFFFFU) ? x42sCanAddress(id) : 0);
     const bool sent = can_.sendRawFrame(id, extended, data, length);
+    finishEvidenceTx(sent && !can_.hasTransmissionError());
     queueTransport_=false;
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
@@ -1620,7 +1673,7 @@ Result MotorControl::stopAll() {
         // broadcast still stops every address. Explicitly commanded/pending
         // nodes and observed selected nodes still require fresh stop evidence.
         const bool touched = (id == selectedId_ && node.seenEver) || node.stopRequested ||
-            node.enablePending || node.enableDesired || node.enableConfirmed;
+            node.enablePending || node.enableDesired || node.enableConfirmed || physical_[id].controlPending;
         if (!touched) continue;
         node.enableAck = false; node.enableTimedOut = false;
         node.stopRequested = true;
@@ -1642,7 +1695,9 @@ Result MotorControl::stopAll() {
 
     // id 0 is the dedicated broadcast for stopAll.
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Stop, 0);
     can_.stopNow(0, false);
+    finishEvidenceTx(!can_.hasTransmissionError());
     if (can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return Result{kCodeUnavailable, "can_tx_failed"};
@@ -1902,6 +1957,127 @@ bool MotorControl::hasActiveMotion() const {
     return false;
 }
 
+MotorControl::EvidenceEffect MotorControl::logicalEvidenceEffect(const uint8_t* b, uint8_t n) {
+    if (!b || n < 3 || n > 30 || b[n - 1] != 0x6B) return EvidenceEffect::Unknown;
+    if (b[1] == 0xFE && n == 5 && b[2] == 0x98 && b[3] <= 1)
+        return b[3] == 0 ? EvidenceEffect::Stop : EvidenceEffect::None;
+    if (b[1] == 0x9C && n == 4 && b[2] == 0x48) return EvidenceEffect::None;
+    if (b[1] == 0x22 && n == 3) return EvidenceEffect::None;
+    if (b[1] == 0x50 && n == 4 && b[2] == 1) return EvidenceEffect::None;
+    // Raw/queue commands keep their existing policy-free transport. Recognize
+    // documented motion shapes, including cached/absolute queue forms, rather
+    // than applying the manual controller's travel/enable/ownership gates.
+    bool motion = false;
+    switch (b[1]) {
+        case 0xFD: case 0xCD:
+            motion = n == (b[1] == 0xFD ? 16 : 18) && b[2] <= 1 && b[13] <= 2 && b[14] <= 1; break;
+        case 0xFB: case 0xCB:
+            motion = n == (b[1] == 0xFB ? 12 : 14) && b[2] <= 1 && b[9] <= 2 && b[10] <= 1; break;
+        case 0x9A: motion = n == 5 && b[2] <= kHomeModeMax && b[3] <= 1; break;
+        case 0xF5: case 0xF6: case 0xC5: case 0xC6:
+            motion = n == ((b[1] == 0xF5 || b[1] == 0xF6) ? 9 : 11) && b[2] <= 1 && b[7] <= 1; break;
+        default: break;
+    }
+    if (motion) return b[0] ? EvidenceEffect::Motion : EvidenceEffect::Unknown;
+    uint8_t addressed[30]; memcpy(addressed, b, n); addressed[0] = 1;
+    DebugLimits protocolLimits;
+    protocolLimits.maxSpeedTenths = 30000; protocolLimits.maxAccelRpmS = 65535;
+    protocolLimits.maxCurrentMa = 5000;
+    const auto kind = validateCommand(addressed, n, protocolLimits);
+    return kind == CommandKind::Read || kind == CommandKind::Configure || kind == CommandKind::Enable ?
+        EvidenceEffect::None : EvidenceEffect::Unknown;
+}
+
+void MotorControl::beginEvidenceTx(EvidenceEffect effect, uint8_t id) {
+    evidenceTx_ = EvidenceTransmission{};
+    evidenceTx_.effect = effect; evidenceTx_.id = id;
+}
+
+void MotorControl::recordEvidenceTx(uint32_t now) {
+    const auto effect = evidenceTx_.effect;
+    if (effect == EvidenceEffect::Motion || effect == EvidenceEffect::Unknown) {
+        if (!evidenceTx_.submitted) ++movementGeneration_;
+        if (effect == EvidenceEffect::Unknown) unknownPhysicalRisk_ = true;
+        if (effect == EvidenceEffect::Motion && evidenceTx_.id) {
+            auto& e = physical_[evidenceTx_.id];
+            e.affected = e.controlPending = true; e.movementAt = now; e.stopSubmitted = false;
+            e.positionValid = e.velocityValid = false;
+            e.positionAfterStopQuery = e.velocityAfterStopQuery = false;
+        }
+    }
+    evidenceTx_.submitted = true;
+}
+
+void MotorControl::finishEvidenceTx(bool complete) {
+    if (complete && evidenceTx_.submitted && evidenceTx_.effect == EvidenceEffect::Stop) {
+        const uint32_t now = millis();
+        for (uint16_t id = 1; id < kNodeCount; ++id) {
+            auto& e = physical_[id];
+            if (!e.affected || (evidenceTx_.id && evidenceTx_.id != id)) continue;
+            e.stopSubmitted = true; e.stopAt = now;
+            e.positionAfterStopQuery = e.velocityAfterStopQuery = false;
+        }
+    }
+    evidenceTx_ = EvidenceTransmission{};
+}
+
+uint16_t MotorControl::physicalEvidenceWindow(bool ota) const {
+    uint32_t axes = 0, demoAxes = 0;
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        if (ota ? physical_[id].affected : physical_[id].controlPending) ++axes;
+        if (demoWatched_[id]) ++demoAxes;
+    }
+    const auto& c = queries_.config();
+    uint32_t gap = (1000u + c.queriesPerSecond - 1) / c.queriesPerSecond;
+    if (gap < c.gapMs) gap = c.gapMs;
+    const uint32_t responseGap = (uint32_t(c.timeoutMs) + c.maxInflight - 1) / c.maxInflight;
+    if (gap < responseGap) gap = responseGap;
+    const uint32_t fields = 2 * axes + 4 * demoAxes +
+        (autoQueriesEnabled_ && selectedId_ ? 3u : 0u) + c.maxInflight;
+    const uint32_t window = fields * gap + c.timeoutMs;
+    return uint16_t(window < kFeedbackFreshMs ? kFeedbackFreshMs : window > 5000 ? 5000 : window);
+}
+
+bool MotorControl::physicalStationary(const PhysicalEvidence& e, uint32_t now, bool ota) const {
+    const uint16_t positionWindow = ota ? e.positionOtaFreshMs : e.positionControlFreshMs;
+    const uint16_t velocityWindow = ota ? e.velocityOtaFreshMs : e.velocityControlFreshMs;
+    return e.positionValid && e.velocityValid &&
+        ageWithin(now, e.positionAt, positionWindow) && ageWithin(now, e.velocityAt, velocityWindow) &&
+        isStrictlyNewerThan(e.positionAt, e.movementAt) && isStrictlyNewerThan(e.velocityAt, e.movementAt) &&
+        (!e.stopSubmitted || (isStrictlyNewerThan(e.positionAt, e.stopAt) && isStrictlyNewerThan(e.velocityAt, e.stopAt))) &&
+        e.velocity >= -kStopSpeedTenths && e.velocity <= kStopSpeedTenths;
+}
+
+bool MotorControl::affectedAxesStationary() const {
+    const uint32_t now = millis();
+    for (uint16_t id = 1; id < kNodeCount; ++id)
+        if (physical_[id].controlPending && (!canReady() || !physicalStationary(physical_[id], now, false))) return false;
+    return true;
+}
+
+bool MotorControl::hasUnsettledMotionEvidence() const {
+    for (uint16_t id = 1; id < kNodeCount; ++id)
+        if (physical_[id].controlPending) return true;
+    return false;
+}
+
+bool MotorControl::releaseSettledMotion() {
+    if (!affectedAxesStationary()) return false;
+    for (uint16_t id = 1; id < kNodeCount; ++id) physical_[id].controlPending = false;
+    return true;
+}
+
+bool MotorControl::otaMotionSafe() const {
+    if (unknownPhysicalRisk_) return false;
+    const uint32_t now = millis();
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        const auto& e = physical_[id];
+        if (e.affected && (!canReady() || !physicalStationary(e, now, true) || !e.stopSubmitted ||
+                          !e.positionAfterStopQuery || !e.velocityAfterStopQuery)) return false;
+    }
+    return true;
+}
+
 bool MotorControl::setDebugLimits(const DebugLimits& limits) {
     if (!validDebugLimits(limits) || operationBusy()) return false;
     limits_ = limits;
@@ -1985,7 +2161,9 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
             return Result{409, "enable_and_wait_for_stationary_feedback"};
     }
     can_.clearTransmissionError();
+    beginEvidenceTx(kind == CommandKind::Experiment ? EvidenceEffect::Motion : EvidenceEffect::None, id);
     const bool queued = can_.sendValidatedCommand(b, n);
+    finishEvidenceTx(queued && !can_.hasTransmissionError());
     if (kind == CommandKind::Interrupt) {
         // 0x9C aborts a homing run. The operator's own frame is already on the
         // wire, so the supervised run is cancelled without a second interrupt
@@ -2022,7 +2200,10 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
 
 void MotorControl::traceSink(void* context, const CanRawFrame& frame, bool tx) {
     MotorControl* self = static_cast<MotorControl*>(context);
-    if (tx) { ++self->txFrameCount_; self->queries_.noteTraffic(millis()); }
+    if (tx) {
+        ++self->txFrameCount_; self->queries_.noteTraffic(millis());
+        self->recordEvidenceTx(millis());
+    }
     if(tx && !self->queueTransport_ && frame.length && (frame.identifier&0xFF)==0 &&
        !CanQueryScheduler::supported(frame.data[0])) {
         self->queueDiagnostics_.invalidate(uint8_t(frame.identifier>>8));

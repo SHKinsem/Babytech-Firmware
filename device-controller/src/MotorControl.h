@@ -137,6 +137,18 @@ public:
     // True when at least one node has fresh position *and* velocity.
     bool anyMotorOnline() const;
     bool hasActiveMotion() const;
+    // Independent physical evidence, never a manual/queue admission gate.
+    // Natural completion can retire an owner; OTA additionally needs a fully
+    // submitted Stop and fresh responses to queries issued after that Stop.
+    bool otaMotionSafe() const;
+    // Only unreleased known-axis evidence; unknown raw risk is OTA-only.
+    bool affectedAxesStationary() const;
+    // Remains true even at low speed until the finished writer releases it.
+    bool hasUnsettledMotionEvidence() const;
+    // Caller must first finish ALL writers; instantaneous low speed alone must
+    // not retire a live trajectory. This releases only settled control evidence.
+    bool releaseSettledMotion();
+    uint32_t movementGeneration() const { return movementGeneration_; }
 
     enum class MoveOutcome : uint8_t { None, Running, Done, Cancelled, Failed };
     // Homing outcome. NoMotion is the manual's 12/22 answer ("already at the
@@ -188,6 +200,30 @@ public:
 
 private:
     friend class CommandQueue;
+    enum class EvidenceEffect : uint8_t { None, Motion, Unknown, Stop };
+    struct PhysicalEvidence {
+        uint32_t movementAt = 0, stopAt = 0, positionAt = 0, velocityAt = 0;
+        int32_t velocity = 0;
+        // Receipt-time bounded TTLs; later load/budget changes are not retroactive.
+        uint16_t positionControlFreshMs = 0, velocityControlFreshMs = 0;
+        uint16_t positionOtaFreshMs = 0, velocityOtaFreshMs = 0;
+        bool affected = false, controlPending = false, stopSubmitted = false;
+        bool positionValid = false, velocityValid = false;
+        bool positionAfterStopQuery = false, velocityAfterStopQuery = false;
+    } physical_[256];
+    struct EvidenceTransmission {
+        EvidenceEffect effect = EvidenceEffect::None;
+        uint8_t id = 0;
+        bool submitted = false;
+    } evidenceTx_;
+    bool unknownPhysicalRisk_ = false;
+    uint32_t movementGeneration_ = 0;
+    static EvidenceEffect logicalEvidenceEffect(const uint8_t* bytes, uint8_t length);
+    void beginEvidenceTx(EvidenceEffect effect, uint8_t id);
+    void finishEvidenceTx(bool complete);
+    void recordEvidenceTx(uint32_t now);
+    uint16_t physicalEvidenceWindow(bool ota) const;
+    bool physicalStationary(const PhysicalEvidence& evidence, uint32_t now, bool ota) const;
     bool demoWatched_[256] = {};
     bool syncObserve_[256]={};
     bool queueTransport_=false;

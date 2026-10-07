@@ -148,6 +148,8 @@ bool MotionProductRuntime::command(const CommandMessage& message, uint32_t nowMs
     ProductRun prepared;
     if (!reason && (active() || state.slot.kind != MotionSlotKind::Empty ||
                     flow_.busy() || product_.ownsMotion())) reason = "busy";
+    if (!reason && workbenchExecution_[0] &&
+        (hardware_.workbenchBusy() || !hardware_.workbenchStationary())) reason = "busy";
     if (!reason) switch (request.command) {
         case ProductCommand::Prepare:
             if (!contextSynchronized()) reason = "context_required";
@@ -205,6 +207,7 @@ bool MotionProductRuntime::command(const CommandMessage& message, uint32_t nowMs
         operationFailed_ = stopped_ = terminalSeen_ = false;
         stopDelivered_ = false;
         motionOwned_ = true;
+        workbenchExecution_[0] = 0; // An older workbench Stop cannot reach this product generation.
     }
     if (uint32_t(hardware_.nowMs() - nowMs) >= message.remainingTtlMs) {
         if (motion) finishFailed("request_expired", hardware_.nowMs());
@@ -258,6 +261,14 @@ void MotionProductRuntime::finishFailed(const char* reason, uint32_t nowMs) {
     }
 }
 
+bool MotionProductRuntime::workbenchAccepted() {
+    char next[33]{};
+    if (!hardware_.newExecution(next) || !validExecutionId(next)) return false;
+    std::strcpy(workbenchExecution_, next);
+    releaseMotionOwnership();
+    return true;
+}
+
 bool MotionProductRuntime::stop(const v4::StopRequest& request, uint32_t nowMs) {
     uint8_t validated[155];
     if (!v4::encodeStop(request, validated, sizeof(validated)) ||
@@ -269,9 +280,19 @@ bool MotionProductRuntime::stop(const v4::StopRequest& request, uint32_t nowMs) 
         target[2 * i + 1] = hex[request.executionId[i] & 15];
     }
     const bool idle = request.scope == v4::StopScope::Idle;
-    if (idle ? (motionOwned_ || product_.ownsMotion() || flow_.busy() || !hardware_.stationary()) :
-        (request.scope != v4::StopScope::Product || !motionOwned_ || !active() || std::strcmp(target, execution_))) return false;
-    if (!idle) stopOwned(nowMs);
+    if (idle) {
+        if (motionOwned_ || workbenchExecution_[0] || product_.ownsMotion() ||
+            flow_.busy() || !hardware_.stationary()) return false;
+    } else if (request.scope == v4::StopScope::Workbench) {
+        if (!workbenchExecution_[0] || std::strcmp(target, workbenchExecution_)) return false;
+        hardware_.stopWorkbench(nowMs); // No Flash or product event before Stop.
+    } else {
+        if (request.scope != v4::StopScope::Product) return false;
+        if (motionOwned_ && active() && !std::strcmp(target, execution_)) stopOwned(nowMs);
+        else if (hardware_.recoveringExecutionId()[0] &&
+                 !std::strcmp(target, hardware_.recoveringExecutionId())) hardware_.stopRecovery(nowMs);
+        else return false;
+    }
     if (request.source == v4::Source::CloudCommand &&
         (!cloudStopPending_ || request.sequence > cloudStop_.sequence)) {
         cloudStop_ = request;
@@ -312,6 +333,8 @@ void MotionProductRuntime::linkLost(uint32_t nowMs) {
 }
 
 void MotionProductRuntime::poll(uint32_t nowMs) {
+    if (workbenchExecution_[0] && !hardware_.workbenchBusy() && hardware_.workbenchStationary())
+        workbenchExecution_[0] = 0;
     if (active() && operation_ == ProductCommand::Prepare && !terminalSeen_) {
         if (product_.takeTerminal(terminal_)) {
             terminalSeen_ = true;
@@ -333,31 +356,13 @@ void MotionProductRuntime::poll(uint32_t nowMs) {
         }
         return;
     }
-    if (active()) {
-        if (operation_ == ProductCommand::Prepare && terminalSeen_) {
-            if (!hardware_.stationary()) return;
-            auto written = store_.finishFeeding(execution_, terminal_.completed,
-                terminal_.reason.c_str(), terminal_.errorCode.c_str(), terminalAt_);
-            if (written != MotionWrite::Stored && written != MotionWrite::Unchanged) return;
-            if (!hardware_.stationary()) return; // Flash may have aged the feedback.
-            written = store_.archiveFeeding(true);
-            if (written != MotionWrite::Stored && written != MotionWrite::Unchanged) return;
-            execution_[0] = 0; terminalSeen_ = false;
-        } else if (operation_ != ProductCommand::Prepare && hardware_.stationary() &&
-                   (stopped_ || operationFailed_ || flow_.stage() == babytech::display::DisplayStage::Error ||
-                    (operation_ == ProductCommand::Clean ? product_.cleaning() : !flow_.busy()))) {
-            const auto outcome = operationFailed_ || flow_.stage() == babytech::display::DisplayStage::Error ?
-                MotionOutcome::Failed : stopped_ ? MotionOutcome::Interrupted : MotionOutcome::Succeeded;
-            const auto written = store_.finishOperation(execution_, outcome, true);
-            if (written == MotionWrite::Stored || written == MotionWrite::Unchanged) {
-                execution_[0] = 0;
-                motionOwned_ = false;
-            }
-        }
-    }
-    if (cloudStopPending_ && hardware_.stationary()) {
+    archiveExecution();
+    if (!store_.ready()) return;
+    const bool stopStationary = cloudStop_.scope == v4::StopScope::Workbench ?
+        !motionOwned_ && !hardware_.workbenchBusy() && hardware_.workbenchStationary() : hardware_.stationary();
+    if (cloudStopPending_ && stopStationary) {
         char target[33]{};
-        if (cloudStop_.scope == v4::StopScope::Product) {
+        if (cloudStop_.scope != v4::StopScope::Idle) {
             constexpr char hex[] = "0123456789abcdef";
             for (size_t i = 0; i < 16; ++i) {
                 target[2 * i] = hex[cloudStop_.executionId[i] >> 4];
@@ -381,7 +386,32 @@ void MotionProductRuntime::poll(uint32_t nowMs) {
     }
 }
 
-void MotionProductRuntime::project(Status& status, bool linkConnected) const {
+void MotionProductRuntime::archiveExecution() {
+    if (active()) {
+        if (operation_ == ProductCommand::Prepare && terminalSeen_) {
+            if (!hardware_.stationary()) return;
+            auto written = store_.finishFeeding(execution_, terminal_.completed,
+                terminal_.reason.c_str(), terminal_.errorCode.c_str(), terminalAt_);
+            if (written != MotionWrite::Stored && written != MotionWrite::Unchanged) return;
+            if (!hardware_.stationary()) return; // Flash may have aged the feedback.
+            written = store_.archiveFeeding(true);
+            if (written != MotionWrite::Stored && written != MotionWrite::Unchanged) return;
+            execution_[0] = 0; terminalSeen_ = false;
+        } else if (operation_ != ProductCommand::Prepare && hardware_.stationary() &&
+                   (stopped_ || operationFailed_ || flow_.stage() == babytech::display::DisplayStage::Error ||
+                    (operation_ == ProductCommand::Clean ? product_.cleaning() : !flow_.busy()))) {
+            const auto outcome = operationFailed_ || flow_.stage() == babytech::display::DisplayStage::Error ?
+                MotionOutcome::Failed : stopped_ ? MotionOutcome::Interrupted : MotionOutcome::Succeeded;
+            const auto written = store_.finishOperation(execution_, outcome, true);
+            if (written == MotionWrite::Stored || written == MotionWrite::Unchanged) {
+                execution_[0] = 0;
+                motionOwned_ = false;
+            }
+        }
+    }
+}
+
+void MotionProductRuntime::project(Status& status, bool linkConnected, bool recoveringMotion) const {
     status.executionAuthorized = product_.executionAuthorized() && store_.ready() && linkConnected &&
         !cloudStopPending_ && !deferred_ && !hardware_.unavailable();
     status.snapshot.startEnabled = status.executionAuthorized && !active() && product_.canStart() &&
@@ -389,7 +419,18 @@ void MotionProductRuntime::project(Status& status, bool linkConnected) const {
         store_.state().context.present && !store_.state().context.cleared &&
         store_.state().pendingResultCount < kMotionResultQueueCapacity;
     status.activeExecutionId[0] = 0;
-    if (active() && motionOwned_) std::strcpy(status.activeExecutionId, execution_);
+    status.executionOwner = ExecutionOwner::None;
+    if (active() && motionOwned_) {
+        std::strcpy(status.activeExecutionId, execution_);
+        status.executionOwner = ExecutionOwner::Product;
+    } else if (recoveringMotion && store_.ready() && store_.state().slot.kind != MotionSlotKind::Empty) {
+        std::strcpy(status.activeExecutionId, store_.state().slot.executionId);
+        status.executionOwner = ExecutionOwner::Product;
+    } else if (workbenchExecution_[0]) {
+        std::strcpy(status.activeExecutionId, workbenchExecution_);
+        status.executionOwner = ExecutionOwner::Workbench;
+        status.snapshot.startEnabled = false;
+    }
 }
 
 } // namespace motion

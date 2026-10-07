@@ -44,6 +44,7 @@ jobs:
           python tests/test_prepare_board_pairing.py
           python tools/test_cloud_session.py --sanitize
           python tools/test_motion.py
+          python tools/test_motor_control_evidence.py --sanitize
           python tools/test_raw_can.py
           python tools/test_demo.py
 

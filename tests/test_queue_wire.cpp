@@ -151,12 +151,21 @@ int main() {
     assert(queue.start(program,strlen(program),2,rotation,now).code==202);
     for(int i=0;i<6;++i) queue.poll(now);
     reply(1,2); motor.poll(); assert(contains(queue.statusJson(),"association_uncertain"));
-    // Unanswered command becomes visible without another TX or hidden stop.
+    // Unanswered motion is not replayed or stopped implicitly. Independent
+    // stationary evidence may issue budgeted position/velocity reads.
     const char* silent="move 3 90";
     assert(queue.start(silent,strlen(silent),1,rotation,now).code==202);
     queue.poll(now); queue.poll(now); const size_t sent=tx.size();
     now+=2001; motor.poll();
-    assert(contains(queue.statusJson(),"receive_unconfirmed") && tx.size()==sent);
+    assert(contains(queue.statusJson(),"receive_unconfirmed"));
+    assert(tx.size()>sent);
+    for (size_t i=sent;i<tx.size();++i) {
+        const auto& frame=tx[i];
+        const uint8_t id=uint8_t(frame.identifier>>8);
+        assert(id>=1 && id<=3 && frame.identifier==(uint32_t(id)<<8));
+        assert(frame.extd && frame.ss && !frame.rtr && frame.data_length_code==2);
+        assert((frame.data[0]==0x36 || frame.data[0]==0x35) && frame.data[1]==0x6B);
+    }
     // Middle packet failure terminates this logical send; motor 5 is not sent.
     const char* failure="move 4 90\nmove 5 90";
     assert(queue.start(failure,strlen(failure),1,rotation,now).code==202);

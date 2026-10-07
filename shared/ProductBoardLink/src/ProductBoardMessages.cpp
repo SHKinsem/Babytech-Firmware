@@ -13,7 +13,7 @@ static_assert(ARDUINOJSON_VERSION_MAJOR == 6, "ProductBoardLink requires Arduino
 namespace babytech { namespace boardlink {
 namespace {
 constexpr size_t kHelloFields = 7;
-constexpr size_t kStatusFields = 35;
+constexpr size_t kStatusFields = 36;
 using Document = StaticJsonDocument<JSON_OBJECT_SIZE(kStatusFields) + v4::kMaxMessage + 1>;
 
 bool validHelloKind(v4::Kind kind, uint32_t replyTo) {
@@ -75,6 +75,25 @@ bool executionId(const char (&text)[33]) {
     return nonzero;
 }
 
+const char* executionOwnerName(ExecutionOwner owner) {
+    switch (owner) {
+        case ExecutionOwner::None: return "none";
+        case ExecutionOwner::Product: return "product";
+        case ExecutionOwner::Workbench: return "workbench";
+        default: return nullptr;
+    }
+}
+
+bool readExecutionOwner(JsonVariantConst value, ExecutionOwner& output) {
+    char name[10]{};
+    if (!readText(value, name, sizeof(name))) return false;
+    if (!std::strcmp(name, "none")) output = ExecutionOwner::None;
+    else if (!std::strcmp(name, "product")) output = ExecutionOwner::Product;
+    else if (!std::strcmp(name, "workbench")) output = ExecutionOwner::Workbench;
+    else return false;
+    return true;
+}
+
 bool productProgress(const char (&text)[24]) {
     size_t length;
     if (!boundedText(text, sizeof(text), length)) return false;
@@ -106,6 +125,8 @@ bool validStatus(const Status& status) {
            boundedText(s.formulaBrand.data(), s.formulaBrand.size(), length) &&
            status.contextVersion <= INT32_MAX && watermark(status.cloudWatermark) &&
            watermark(status.localWatermark) && executionId(status.activeExecutionId) &&
+           executionOwnerName(status.executionOwner) &&
+           ((status.executionOwner == ExecutionOwner::None) == !status.activeExecutionId[0]) &&
            boundedText(status.pendingEventId, sizeof(status.pendingEventId), length) &&
            productProgress(status.productProgress) && productError(status.productError) &&
            status.powderGrams >= 0 && boundedText(status.babyId, sizeof(status.babyId), length);
@@ -314,6 +335,7 @@ bool encodeStatus(const Status& status, v4::Message& output) {
     doc["motion_busy"] = status.motionBusy;
     doc["stationary"] = status.stationary;
     doc["event_pending"] = status.eventPending;
+    doc["execution_owner"] = executionOwnerName(status.executionOwner);
     doc["active_execution_id"] = status.activeExecutionId;
     doc["pending_event_id"] = status.pendingEventId;
     doc["product_progress"] = status.productProgress;
@@ -358,6 +380,7 @@ bool decodeStatus(const v4::Message& message, Status& output) {
         !readBool(root["motion_busy"], next.motionBusy) ||
         !readBool(root["stationary"], next.stationary) ||
         !readBool(root["event_pending"], next.eventPending) ||
+        !readExecutionOwner(root["execution_owner"], next.executionOwner) ||
         !readText(root["active_execution_id"], next.activeExecutionId, sizeof(next.activeExecutionId)) ||
         !readText(root["pending_event_id"], next.pendingEventId, sizeof(next.pendingEventId)) ||
         !readText(root["product_progress"], next.productProgress, sizeof(next.productProgress)) ||

@@ -101,6 +101,12 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertIn("if (commissioningActive()) return true;", network)
         ota = function_body(self.motion, "bool safeForOta() {")
         self.assertIn("!commissioningActive()", ota)
+        self.assertIn("!otaWriterBusy()", ota)
+        self.assertIn("motor.otaMotionSafe()", ota)
+        self.assertNotIn("controlBusy()", ota)
+        writers = function_body(self.motion, "bool otaWriterBusy() {")
+        self.assertNotIn("eventPending()", writers)
+        self.assertNotIn("hasActiveMotion()", writers)
         wifi = (ROOT / "device-controller/src/WiFiSetup.cpp").read_text()
         for handler in ("handleConnect", "handleForget", "handleScanStart"):
             self.assertIn("isMotionBusy()", function_body(wifi, "void WiFiSetup::" + handler + "()"))
@@ -159,7 +165,7 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(loop.index("pollCommissioningConsole()"), loop.index("server.handleClient()"))
         loop = function_body(self.brain, "void loop()")
         self.assertLess(loop.index("pollCommissioningConsole()"), loop.index("view.takeIntent"))
-        self.assertIn("hasIntent && (commissioningSession.active() || simulating())", loop)
+        self.assertIn("hasIntent && (touchStop.requested() || commissioningSession.active() || simulating())", loop)
 
     def test_brain_simulation_is_separate_from_motion_and_persistent_local_intents(self):
         command = function_body(self.brain, "void dispatchCloudCommand(")
@@ -171,7 +177,7 @@ class MaintenanceWiringTest(unittest.TestCase):
         loop = function_body(self.brain, "void loop()")
         self.assertIn("cloudDispatcher.busy() || localDispatcher.busy(), !simulating()", loop)
         self.assertLess(loop.index("network.poll("), loop.index("simulation->poll("))
-        self.assertLess(loop.index("hasIntent && (commissioningSession.active() || simulating())"),
+        self.assertLess(loop.index("hasIntent && (touchStop.requested() || commissioningSession.active() || simulating())"),
                         loop.index("localDispatcher.dispatch("))
         self.assertIn("network.setReceiptHandler(receiveCloudReceipt, nullptr)", self.brain)
         receipt = function_body(self.brain, "void receiveCloudReceipt(")
@@ -255,9 +261,10 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(loop.index("controllerLink.poll(nowMs)"), loop.index("cloudDispatcher.poll(nowMs,"))
         self.assertLess(loop.index("cloudDispatcher.poll(nowMs,"), loop.index("pendingRecovery.poll("))
         self.assertIn("cloudDispatcher.poll(nowMs, commissioningSession.active() || productState.state().pending)", loop)
-        self.assertLess(loop.index("network.poll("), loop.index("controllerLink.poll(uint32_t(millis()))"))
-        self.assertLess(loop.index("controllerLink.poll(uint32_t(millis()))"), loop.index("installer.poll("))
-        self.assertLess(loop.index("controllerLink.poll(uint32_t(millis()))"), loop.index("pendingRecovery.poll("))
+        stopDrain = loop.index("controllerLink.poll(uint32_t(millis()))", loop.index("network.poll("))
+        self.assertLess(stopDrain, loop.index("installer.poll("))
+        self.assertLess(stopDrain, loop.index("pendingRecovery.poll("))
+        self.assertLess(loop.index("view.poll(uint32_t(millis()))"), loop.index("network.poll("))
         self.assertIn("controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false", loop)
         ordinary = function_body(self.brain, "const char* cloudAdmission()")
         self.assertIn("productState.ready()", ordinary)
@@ -358,7 +365,8 @@ class MaintenanceWiringTest(unittest.TestCase):
                          r"demo\.stage\(\)\s*==\s*babytech::display::DisplayStage::Complete;")
         self.assertRegex(stationary, r"return\s+canStarted\s*&&\s*!endpoint\.busy\(\)\s*&&\s*"
                          r"!motor\.operationBusy\(\)\s*&&\s*!queue\.active\(\)\s*&&\s*flowIdle\s*&&\s*"
-                         r"\(demo\.stationary\(\)\s*\|\|\s*demoExecutor\.stopConfirmed\(\)\);\s*$")
+                         r"\(demo\.stationary\(\)\s*\|\|\s*demoExecutor\.stopConfirmed\(\)\)\s*&&\s*"
+                         r"motor\.affectedAxesStationary\(\);\s*$")
         for forbidden in ("product.ownsMotion()", "product.cleaning()", "healthy()", "motor.ready()",
                           "demo.referenceValid()", "controlBusy()", "hasActiveMotion()"):
             self.assertNotIn(forbidden, stationary)
@@ -426,8 +434,10 @@ class MaintenanceWiringTest(unittest.TestCase):
         stopping = function_body(runtime, "bool MotionProductRuntime::stopOwned(")
         self.assertLess(stopping.index("stopped_ = true"), stopping.index("product_.stop("))
         polling = function_body(runtime, "void MotionProductRuntime::poll(")
-        self.assertIn("stopped_ ? MotionOutcome::Interrupted : MotionOutcome::Succeeded", polling)
-        self.assertIn("store_.finishOperation(execution_, outcome, true)", polling)
+        self.assertIn("archiveExecution();", polling)
+        archival = function_body(runtime, "void MotionProductRuntime::archiveExecution(")
+        self.assertIn("stopped_ ? MotionOutcome::Interrupted : MotionOutcome::Succeeded", archival)
+        self.assertIn("store_.finishOperation(execution_, outcome, true)", archival)
 
     def test_static_manual_admission_cannot_release_product_motion_identity(self):
         # Runtime + the actual admission helper are exercised by the host suite;
@@ -454,25 +464,24 @@ class MaintenanceWiringTest(unittest.TestCase):
             with self.subTest(non_execution=handler):
                 self.assertNotIn("releaseMotionOwnership", function_body(self.motion, "void " + handler + "()"))
 
-    def test_static_workbench_execution_handoff_requires_success(self):
+    def test_static_workbench_execution_handoff_requires_acceptance_or_partial_motion_tx(self):
         # Static HTTP/CAN outcome wiring, not a dynamic HTTP or real CAN test.
-        release = "productRuntime.releaseMotionOwnership();"
+        release = "productRuntime.workbenchAccepted();"
         move = function_body(self.motion, "void handleMove()")
         self.assertIn("const motion::Result result = motor.move(request);", move)
         self.assertLess(move.rindex("sendError("), move.index("motor.move("))
         self.assertLess(move.index("motor.move("), move.index(release))
-        self.assertRegex(move, r"#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\s*"
-                         r"if \(result\.code < 300\) \{\s*productRuntime\.releaseMotionOwnership\(\);\s*\}\s*#endif")
+        self.assertLess(move.index("const auto movementBefore"), move.index("motor.move("))
+        self.assertIn("if (result.code < 300 || motor.movementGeneration() != movementBefore)", move)
         self.assertLess(move.index(release), move.index('sendResult("move", id, result)'))
         raw = function_body(self.motion, "void handleCommand()")
         self.assertIn("const motion::Result result = motor.command(bytes, hex.length()/2);", raw)
-        self.assertNotIn("releaseMotionOwnership", function_body(raw, "if (kind == motion::CommandKind::Invalid)"))
+        self.assertNotIn("workbenchAccepted", function_body(raw, "if (kind == motion::CommandKind::Invalid)"))
         self.assertLess(raw.rindex("sendError("), raw.index("const motion::Result result"))
-        self.assertRegex(raw, r"#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\s*"
-                         r"if \(result\.code < 300 &&\s*"
-                         r"\(kind == motion::CommandKind::Move \|\| kind == motion::CommandKind::DirectMove \|\|\s*"
-                         r"kind == motion::CommandKind::Experiment \|\| kind == motion::CommandKind::Home\)\) \{\s*"
-                         r"productRuntime\.releaseMotionOwnership\(\);\s*\}\s*#endif")
+        self.assertLess(raw.index("const auto movementBefore"), raw.index("const motion::Result result"))
+        self.assertIn("(result.code < 300 || motor.movementGeneration() != movementBefore)", raw)
+        for kind in ("Move", "DirectMove", "Experiment", "Home"):
+            self.assertIn("kind == motion::CommandKind::" + kind, raw)
         self.assertLess(raw.index("const motion::Result result"), raw.index(release))
         self.assertLess(raw.index(release), raw.index('sendResult("command", bytes[0], result)'))
         queue = function_body(self.motion, "void handleQueueStart()")
@@ -480,21 +489,33 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(queue.index("queue.start("), queue.index("if (started.code < 300)"))
         accepted = function_body(queue, "if (started.code < 300)")
         self.assertRegex(accepted, r"^\s*#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\s*"
-                         r"productRuntime\.releaseMotionOwnership\(\);\s*#endif")
+                         r"productRuntime\.workbenchAccepted\(\);\s*#endif")
         self.assertLess(accepted.index(release), accepted.index("endpoint.cancelPending("))
         self.assertLess(queue.index(release), queue.index("sendQueueResult(started, true)"))
         for body in (move, raw, queue):
             self.assertEqual(body.count(release), 1)
         self.assertEqual(self.motion.count(release), 4) # Three workbench paths plus accepted Demo.
 
-    def test_static_accepted_demo_retains_success_only_handoff(self):
-        release = "productRuntime.releaseMotionOwnership();"
+    def test_static_demo_handoff_includes_partial_submission_but_not_no_tx_rejection(self):
+        release = "productRuntime.workbenchAccepted();"
         action = function_body(self.motion, "void handleDemoAction()")
         self.assertIn("if (demoBusy() ||", action)
         for launch in ("accepted = demo.initialize(", "accepted = demo.start(", "accepted = demo.single("):
-            self.assertLess(action.index(launch), action.index("if (!accepted)"))
-        self.assertLess(action.index("if (!accepted)"), action.index(release))
+            self.assertLess(action.index("const auto movementBefore"), action.index(launch))
+            self.assertLess(action.index(launch), action.index(release))
+        self.assertIn("if (accepted || motor.movementGeneration() != movementBefore)", action)
+        self.assertLess(action.index(release), action.index("if (!accepted)"))
         self.assertLess(action.index(release), action.index("sendJson(202,"))
+
+    def test_static_workbench_stop_and_projection_use_existing_backend(self):
+        adapter = function_body(self.motion, "void stopWorkbench(uint32_t nowMs) override")
+        self.assertIn("demo.stop(nowMs)", adapter)
+        self.assertIn('queue.cancel("stopped")', adapter)
+        self.assertNotIn("server.", adapter)
+        status = function_body(self.motion, "void serviceBrainLink()")
+        self.assertIn("productRecovery.motionPending()", status)
+        self.assertIn("ExecutionOwner::Workbench", status)
+        self.assertIn("productHardware.workbenchStationary()", status)
 
     def test_static_control_reset_preserves_runtime_interruption_before_clear(self):
         # Source branch/order checks, not dynamic Stop-window or Flash confirmation.

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "brain_stop_target.h"
+
 #include "CloudSession.h"
 #include "ProductBoardMessages.h"
 #include "ProductCommandResult.h"
@@ -329,24 +331,7 @@ private:
         return text[64] == 0;
     }
     bool stopTarget(v4::StopRequest& target, uint32_t nowMs) const {
-        const auto* status = link_.lastTelemetry();
-        if (!link_.connected(nowMs) || !status) return false;
-        if (!status->activeExecutionId[0]) {
-            if (status->motionBusy || !status->stationary) return false;
-            target.scope = v4::StopScope::Idle;
-            return true;
-        }
-        target.scope = v4::StopScope::Product;
-        for (size_t i = 0; i < sizeof(target.executionId); ++i) {
-            const auto value = [](char c) -> int {
-                return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
-            };
-            const int high = value(status->activeExecutionId[2 * i]);
-            const int low = value(status->activeExecutionId[2 * i + 1]);
-            if (high < 0 || low < 0) return false;
-            target.executionId[i] = uint8_t(high * 16 + low);
-        }
-        return status->activeExecutionId[32] == 0;
+        return bindStopTarget(link_, nowMs, target);
     }
     void complete(bool accepted, const char* reason) {
         if (accepted && acceptance_) acceptance_(current_.request, clock_());

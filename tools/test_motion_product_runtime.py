@@ -39,6 +39,19 @@ def manual_admission_source(root):
             "#undef MOTION_UART_PEER_PRODUCT_BRAIN\n")
 
 
+def recovery_stationary_source(root):
+    source = (root / "device-controller/src/main.cpp").read_text()
+    start = source.index("bool stationary() const override", source.index("class RecoveryHardware :"))
+    end = source.index("{", start) + 1
+    depth = 1
+    while depth and end < len(source):
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    if depth:
+        raise SystemExit("Unbalanced main.cpp recovery stationary definition")
+    return source[start:end] + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitize", action="store_true")
@@ -57,7 +70,7 @@ def main():
     includes = (json_dir, root / "tests/fakes/brain_state_store",
                 root / "tests/fakes/product_crypto", root / "shared/BoardProtocol/src",
                 root / "shared/ProductBoardLink/src", root / "shared/BabytechDisplayCore/src",
-                root / "device-controller/include")
+                root / "device-controller/include", root / "main-controller/src")
     sources = [root / "shared/BoardProtocol/src" / name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
@@ -66,7 +79,7 @@ def main():
                  "MotionStateRecord.cpp", "BrainStateRecord.cpp", "BoardPairingRecord.cpp", "MotionStateStore.cpp",
                  "ProductEventMessages.cpp", "ReadOnlyBoardLink.cpp")]
     sources += [root / "device-controller/src" / name for name in
-                ("MotionProductRuntime.cpp", "ProductSession.cpp", "DemoFlowController.cpp")]
+                ("MotionProductRuntime.cpp", "MotionStateRecovery.cpp", "ProductSession.cpp", "DemoFlowController.cpp")]
     sources += [root / "tests/fakes/brain_state_store/FakeBrainNvs.cpp",
                 root / "tests/fakes/product_crypto/FakeProductCrypto.cpp",
                 root / "test/test_motion_product_runtime.cpp"]
@@ -77,6 +90,7 @@ def main():
     failed = False
     with tempfile.TemporaryDirectory(prefix="babytech-motion-product-runtime-") as directory:
         (Path(directory) / "MotionManualAdmissionHost.inc").write_text(manual_admission_source(root))
+        (Path(directory) / "MotionRecoveryStationaryHost.inc").write_text(recovery_stationary_source(root))
         for major in (("2", "3") if args.mbedtls_major == "both" else (args.mbedtls_major,)):
             binary = Path(directory) / ("motion_product_runtime_" + major)
             command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",

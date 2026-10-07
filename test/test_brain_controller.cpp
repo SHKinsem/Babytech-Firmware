@@ -297,7 +297,7 @@ void partialNoneDoesNotClearFault() {
     f.expect("NONE", 220);
     f.drain(221);
     f.expectStatus(clear, 220);
-    std::puts("PASS incomplete NONE cannot clear fault; full receipt atomically updates all 35 fields/time");
+    std::puts("PASS incomplete NONE cannot clear fault; full receipt atomically updates all 36 fields/time");
 }
 
 void longOfflineFaultAcrossRollover() {

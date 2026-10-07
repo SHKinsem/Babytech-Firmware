@@ -42,7 +42,8 @@ public:
         const uint32_t receivedElapsed = uint32_t(receivedAtMs - acceptedAtMs_);
         if (!connected || !status || uint32_t(nowMs - receivedAtMs) >= 1500 ||
             !receivedElapsed || receivedElapsed > elapsed || status->motionBusy ||
-            status->isPreparing || !status->stationary || status->activeExecutionId[0]) return true;
+            status->isPreparing || !status->stationary || status->activeExecutionId[0] ||
+            status->executionOwner != boardlink::ExecutionOwner::None) return true;
         const auto* watermark = source_ == v4::Source::CloudCommand ? status->cloudWatermark : status->localWatermark;
         // The watermark excludes an idle STATUS queued before acceptance but
         // received afterward. Decode already bounds/canonicalizes these fields.
