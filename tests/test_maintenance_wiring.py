@@ -429,14 +429,12 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertIn("stopped_ ? MotionOutcome::Interrupted : MotionOutcome::Succeeded", polling)
         self.assertIn("store_.finishOperation(execution_, outcome, true)", polling)
 
-    def test_static_debug_takeover_releases_old_product_motion_identity(self):
-        # Guard/release order only; no old Stop or new debug action is executed.
+    def test_static_manual_admission_cannot_release_product_motion_identity(self):
+        # Runtime + the actual admission helper are exercised by the host suite;
+        # these checks tie rejected/configuration-only HTTP paths to that helper.
         manual = function_body(self.motion, "bool demoManualMutation()")
-        release = "productRuntime.releaseMotionOwnership();"
-        self.assertLess(manual.index("if (demoBusy())"), manual.index(release))
-        self.assertLess(manual.index(release), manual.index("demo.invalidate()"))
-        self.assertIn("#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\n"
-                      "    " + release + "\n#endif", manual)
+        self.assertNotIn("releaseMotionOwnership", manual)
+        self.assertLess(manual.index("if (demoBusy())"), manual.index("demo.invalidate()"))
         for handler, guard, mutation in (
             ("handleEnable", "if (enabling && !demoManualMutation()) return;", "motor.enable("),
             ("handleEnableAll", "if (enabled && !demoManualMutation()) return;", "motor.broadcastEnable("),
@@ -452,6 +450,45 @@ class MaintenanceWiringTest(unittest.TestCase):
                 self.assertIn(guard, body)
                 # The raw-command invalid/read branch is not a mechanical takeover.
                 self.assertLess(body.index(guard), body.rindex(mutation))
+        for handler in ("handleEnable", "handleEnableAll", "handleLimits", "handleMotorDistance"):
+            with self.subTest(non_execution=handler):
+                self.assertNotIn("releaseMotionOwnership", function_body(self.motion, "void " + handler + "()"))
+
+    def test_static_workbench_execution_handoff_requires_success(self):
+        # Static HTTP/CAN outcome wiring, not a dynamic HTTP or real CAN test.
+        release = "productRuntime.releaseMotionOwnership();"
+        move = function_body(self.motion, "void handleMove()")
+        self.assertIn("const motion::Result result = motor.move(request);", move)
+        self.assertLess(move.rindex("sendError("), move.index("motor.move("))
+        self.assertLess(move.index("motor.move("), move.index(release))
+        self.assertRegex(move, r"#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\s*"
+                         r"if \(result\.code < 300\) \{\s*productRuntime\.releaseMotionOwnership\(\);\s*\}\s*#endif")
+        self.assertLess(move.index(release), move.index('sendResult("move", id, result)'))
+        raw = function_body(self.motion, "void handleCommand()")
+        self.assertIn("const motion::Result result = motor.command(bytes, hex.length()/2);", raw)
+        self.assertNotIn("releaseMotionOwnership", function_body(raw, "if (kind == motion::CommandKind::Invalid)"))
+        self.assertLess(raw.rindex("sendError("), raw.index("const motion::Result result"))
+        self.assertRegex(raw, r"#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\s*"
+                         r"if \(result\.code < 300 &&\s*"
+                         r"\(kind == motion::CommandKind::Move \|\| kind == motion::CommandKind::DirectMove \|\|\s*"
+                         r"kind == motion::CommandKind::Experiment \|\| kind == motion::CommandKind::Home\)\) \{\s*"
+                         r"productRuntime\.releaseMotionOwnership\(\);\s*\}\s*#endif")
+        self.assertLess(raw.index("const motion::Result result"), raw.index(release))
+        self.assertLess(raw.index(release), raw.index('sendResult("command", bytes[0], result)'))
+        queue = function_body(self.motion, "void handleQueueStart()")
+        self.assertLess(queue.rindex("sendError("), queue.index("queue.start("))
+        self.assertLess(queue.index("queue.start("), queue.index("if (started.code < 300)"))
+        accepted = function_body(queue, "if (started.code < 300)")
+        self.assertRegex(accepted, r"^\s*#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\s*"
+                         r"productRuntime\.releaseMotionOwnership\(\);\s*#endif")
+        self.assertLess(accepted.index(release), accepted.index("endpoint.cancelPending("))
+        self.assertLess(queue.index(release), queue.index("sendQueueResult(started, true)"))
+        for body in (move, raw, queue):
+            self.assertEqual(body.count(release), 1)
+        self.assertEqual(self.motion.count(release), 4) # Three workbench paths plus accepted Demo.
+
+    def test_static_accepted_demo_retains_success_only_handoff(self):
+        release = "productRuntime.releaseMotionOwnership();"
         action = function_body(self.motion, "void handleDemoAction()")
         self.assertIn("if (demoBusy() ||", action)
         for launch in ("accepted = demo.initialize(", "accepted = demo.start(", "accepted = demo.single("):

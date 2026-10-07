@@ -943,9 +943,8 @@ void serviceBrainLink() {
 
 bool demoManualMutation() {
     if (demoBusy()) { sendError(409, F("demo_busy")); return false; }
-#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
-    productRuntime.releaseMotionOwnership();
-#endif
+    // Admission is not an execution handoff: a rejected or configuration-only
+    // request must leave the retained product's Stop/D1 owner intact.
 #if MOTION_HAS_PRODUCT
     demo.invalidate();
 #endif
@@ -1451,7 +1450,13 @@ void handleMove() {
     request.decelRpmS = static_cast<float>(decel);
     request.currentMa = static_cast<uint16_t>(currentMa);
 
-    sendResult("move", id, motor.move(request));
+    const motion::Result result = motor.move(request);
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    if (result.code < 300) {
+        productRuntime.releaseMotionOwnership();
+    }
+#endif
+    sendResult("move", id, result);
 }
 
 void handleStop() {
@@ -1610,7 +1615,15 @@ void handleCommand() {
         sendError(409, F("wifi_busy")); return;
     }
     if (kind == motion::CommandKind::Enable && bytes[3] == 0) cancelUartForLocalDisable();
-    sendResult("command", bytes[0], motor.command(bytes, hex.length()/2));
+    const motion::Result result = motor.command(bytes, hex.length()/2);
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    if (result.code < 300 &&
+        (kind == motion::CommandKind::Move || kind == motion::CommandKind::DirectMove ||
+         kind == motion::CommandKind::Experiment || kind == motion::CommandKind::Home)) {
+        productRuntime.releaseMotionOwnership();
+    }
+#endif
+    sendResult("command", bytes[0], result);
 }
 
 String limitsJson() {
@@ -1775,6 +1788,9 @@ void handleQueueStart() {
     const motion::Result started =
         queue.start(program.c_str(), program.length(), repeat, boardRotation, millis());
     if (started.code < 300) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+        productRuntime.releaseMotionOwnership();
+#endif
         // Only a started program takes the bus over: finish any pending UART
         // record so the two owners cannot interleave. An invalid program has no
         // side effects at all - nothing is cancelled and nothing is sent.

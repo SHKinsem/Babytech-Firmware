@@ -3,6 +3,8 @@
 Uses FakeBrainNvs and system SHA-256 through both mbedTLS SDK shims. Only
 clock, executor and board I/O are replaced. No hardware, broker, installs or
 downloads; fake feedback/NVS cannot prove real mechanical or Flash behavior.
+The manual-admission regression compiles the actual main.cpp helper in a host
+fixture; HTTP handler wiring remains a separate static check, not live HTTP.
 """
 import argparse
 import os
@@ -11,6 +13,30 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+
+def manual_admission_source(root):
+    source = (root / "device-controller/src/main.cpp").read_text()
+    definitions = []
+    # These two small definitions use the same balanced-body convention as
+    # test_maintenance_wiring.py. Never restate their admission/ownership logic.
+    for signature in ("bool demoBusy() {", "bool demoManualMutation() {"):
+        start = source.index(signature)
+        end = source.index("{", start) + 1
+        depth = 1
+        while depth and end < len(source):
+            depth += (source[end] == "{") - (source[end] == "}")
+            end += 1
+        if depth:
+            raise SystemExit("Unbalanced main.cpp manual admission definition")
+        definitions.append(source[start:end])
+    return ("#define MOTION_HAS_PRODUCT 1\n"
+            "#define MOTION_UART_PEER 2\n"
+            "#define MOTION_UART_PEER_PRODUCT_BRAIN 2\n" +
+            "\n".join(definitions) + "\n"
+            "#undef MOTION_HAS_PRODUCT\n"
+            "#undef MOTION_UART_PEER\n"
+            "#undef MOTION_UART_PEER_PRODUCT_BRAIN\n")
 
 
 def main():
@@ -50,6 +76,7 @@ def main():
         environment["UBSAN_OPTIONS"] = environment.get("UBSAN_OPTIONS", "") + ":halt_on_error=1:print_stacktrace=1"
     failed = False
     with tempfile.TemporaryDirectory(prefix="babytech-motion-product-runtime-") as directory:
+        (Path(directory) / "MotionManualAdmissionHost.inc").write_text(manual_admission_source(root))
         for major in (("2", "3") if args.mbedtls_major == "both" else (args.mbedtls_major,)):
             binary = Path(directory) / ("motion_product_runtime_" + major)
             command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
@@ -63,6 +90,7 @@ def main():
                             "-fno-omit-frame-pointer", "-g"]
             for include in includes:
                 command += ["-I", str(include)]
+            command += ["-I", directory]
             command += [str(source) for source in sources]
             if sys.platform == "linux":
                 command += ["-lcrypto"]

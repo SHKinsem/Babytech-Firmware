@@ -1627,6 +1627,139 @@ void queues() {
             });
 }
 
+// Compile the real HTTP admission helper, not a copied ownership decision.
+// This fixture has no boot recovery in progress; HTTP parsing, MotorControl
+// Results and the success-only handler handoffs are checked statically.
+struct ManualAdmission {
+    motion::MotionProductRuntime& productRuntime;
+    motion::DemoFlowController& demo;
+    motion::ProductSession& product;
+    unsigned error = 0;
+    explicit ManualAdmission(Fixture& f) : productRuntime(f.runtime), demo(f.flow), product(f.product) {}
+    bool recoveryMotionPending() const { return false; }
+    static const char* F(const char* text) { return text; }
+    void sendError(unsigned code, const char* reason) {
+        CHECK(!std::strcmp(reason, "demo_busy"));
+        error = code;
+    }
+#include "MotionManualAdmissionHost.inc"
+};
+
+void manualOwnership() {
+    for (auto source : {v4::Source::LocalTouch, v4::Source::CloudCommand}) {
+        const auto suffix = " source=" + std::to_string(int(source));
+        scenario("manual admission rejects active product without dropping its owner" + suffix, [=] {
+            Fixture f;
+            decision(f.deliver(request(20, ProductCommand::Prepare, source)), true, "accepted");
+            f.tick(1001);
+            ManualAdmission manual(f);
+            const auto before = encode(f.store.state());
+            const auto disk = io.disk;
+            const auto calls = io.calls.size();
+            CHECK(!manual.demoManualMutation() && manual.error == 409);
+            CHECK(f.runtime.active() && f.runtime.ownsMotion() && f.product.active());
+            CHECK(f.runtime.stopOwned(1002) && f.executor.stops == 1 && f.executor.starts == 1);
+            CHECK(encode(f.store.state()) == before && io.disk == disk && io.calls.size() == calls);
+        });
+        for (unsigned stopPath = 0; stopPath < 4; ++stopPath)
+            scenario("terminal manual admission retains Stop/D1 until physically settled path=" +
+                     std::to_string(stopPath) + suffix, [=] {
+                Fixture f;
+                const auto original = request(20, ProductCommand::Prepare, source);
+                decision(f.deliver(original), true, "accepted");
+                const auto terminalAt = f.finishFeed();
+                ManualAdmission manual(f);
+                CHECK(!manual.demoManualMutation() && manual.error == 409); // Complete display hold.
+                f.tick(terminalAt + 3000);
+                CHECK(!f.product.active() && !f.flow.busy() && !f.hardware.stationary());
+                CHECK(f.runtime.active() && f.runtime.ownsMotion());
+                CHECK(f.store.state().slot.kind == MotionSlotKind::Intent);
+                const auto before = encode(f.store.state());
+                const auto disk = io.disk;
+                const auto calls = io.calls.size();
+                const auto target = stopRequest(f, source, source == v4::Source::CloudCommand ? 21 : 0);
+                CHECK(validStop(target));
+                // HTTP may still reject validation/busy/CAN dispatch, or only
+                // configure the bench. Admission itself cannot transfer motion.
+                for (unsigned i = 0; i < 3; ++i) {
+                    CHECK(manual.demoManualMutation());
+                    CHECK(f.runtime.ownsMotion() && f.runtime.active());
+                    CHECK(!f.flow.referenceValid() && !f.executor.stops && f.executor.starts == 5);
+                    CHECK(encode(f.store.state()) == before && io.disk == disk && io.calls.size() == calls);
+                }
+                const auto now = terminalAt + 3010;
+                if (stopPath == 0) CHECK(f.runtime.stopOwned(now)); // HTTP Stop's production target.
+                else if (stopPath == 1) CHECK(f.runtime.stop(target, now));
+                else if (stopPath == 2) f.runtime.linkLost(now); // D1 supervision.
+                else {
+                    f.executor.stopValue = false;
+                    CHECK(!f.runtime.stopOwned(now));
+                    CHECK(f.runtime.ownsMotion() && f.executor.stops == 1);
+                    f.executor.stopValue = true;
+                    CHECK(f.runtime.stopOwned(now + 1));
+                }
+                const auto stops = stopPath == 3 ? 2u : 1u;
+                CHECK(f.executor.stops == stops && f.runtime.ownsMotion());
+                CHECK(encode(f.store.state()) == before && io.disk == disk && io.calls.size() == calls);
+                CHECK(f.runtime.stopOwned(now + 2));
+                f.runtime.linkLost(now + 3);
+                f.poll(now + 4);
+                CHECK(f.executor.stops == stops && f.runtime.active() && f.runtime.ownsMotion());
+                CHECK(io.calls.size() == calls && io.disk == disk);
+                f.executor.confirm();
+                f.tick(now + 5);
+                CHECK(!f.runtime.active() && !f.runtime.ownsMotion() && f.executor.starts == 5);
+                CHECK(f.store.state().pendingResultCount == 1 && f.store.state().pendingResults[0].uptimeMs == terminalAt);
+                lookup(f.store, original, true, "accepted", MotionOutcome::Succeeded);
+            });
+        scenario("manual admission leaves native stationary release and dedup intact" + suffix, [=] {
+            Fixture f;
+            const auto original = request(20, ProductCommand::Prepare, source);
+            decision(f.deliver(original), true, "accepted");
+            const auto terminalAt = f.finishFeed();
+            f.tick(terminalAt + 3000);
+            ManualAdmission manual(f);
+            CHECK(manual.demoManualMutation() && f.runtime.ownsMotion());
+            f.executor.confirm();
+            f.tick(terminalAt + 3001);
+            CHECK(!f.runtime.active() && !f.runtime.ownsMotion() && !f.executor.stops);
+            lookup(f.store, original, true, "accepted", MotionOutcome::Succeeded);
+            decision(f.deliver(original), true, "accepted");
+            CHECK(!f.runtime.active() && f.executor.starts == 5 && f.hardware.generated == 1);
+        });
+        for (bool accepted : {false, true})
+            scenario("independent Demo acceptance controls explicit retained-terminal handoff accepted=" +
+                     std::to_string(accepted) + suffix, [=] {
+                Fixture f;
+                decision(f.deliver(request(20, ProductCommand::Prepare, source)), true, "accepted");
+                const auto terminalAt = f.finishFeed();
+                f.tick(terminalAt + 3000);
+                const auto target = stopRequest(f, source, source == v4::Source::CloudCommand ? 21 : 0);
+                CHECK(validStop(target));
+                const auto before = encode(f.store.state());
+                const auto disk = io.disk;
+                const auto calls = io.calls.size();
+                f.executor.availableValue = accepted;
+                const bool launched = f.flow.single(0, terminalAt + 3001);
+                CHECK(launched == accepted);
+                // Mirrors only the external ownership action after a real
+                // production Demo acceptance; main's ordering is checked statically.
+                if (launched) f.runtime.releaseMotionOwnership();
+                if (accepted) {
+                    f.tick(terminalAt + 3002);
+                    CHECK(!f.runtime.ownsMotion() && f.runtime.active() && f.executor.starts == 6);
+                    CHECK(!f.runtime.stopOwned(terminalAt + 3003) && !f.runtime.stop(target, terminalAt + 3003));
+                    f.runtime.linkLost(terminalAt + 3004);
+                    CHECK(!f.executor.stops && f.flow.busy());
+                } else {
+                    CHECK(f.runtime.ownsMotion() && f.runtime.stopOwned(terminalAt + 3003));
+                    CHECK(f.executor.stops == 1 && f.executor.starts == 5);
+                }
+                CHECK(encode(f.store.state()) == before && io.disk == disk && io.calls.size() == calls);
+            });
+    }
+}
+
 void offlineAndLink() {
     scenario("independent workbench stage handoff cannot apply metadata or write moving Flash", [] {
         Fixture f;
@@ -2393,7 +2526,8 @@ int main(int argc, char** argv) {
         {"acceptance", acceptance}, {"contexts", contexts}, {"context_uart", contextUart},
         {"writes", writes}, {"duplicates", duplicates},
         {"rejections", rejections}, {"deferred", deferredRejections}, {"ttl", ttl}, {"terminals", terminals}, {"queues", queues},
-        {"offline_link", offlineAndLink}, {"stops", stops}, {"faults", faults}, {"uart", uartIntegration}};
+        {"manual_owner", manualOwnership}, {"offline_link", offlineAndLink},
+        {"stops", stops}, {"faults", faults}, {"uart", uartIntegration}};
     if (argc > 2) { std::fprintf(stderr, "Expected at most one test group\n"); return 2; }
     bool found = argc == 1;
     for (const auto& group : groups) {
