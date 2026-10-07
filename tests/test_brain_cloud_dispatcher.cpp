@@ -1,0 +1,1121 @@
+#include "brain_cloud_dispatcher.h"
+#include "BrainStateStore.h"
+#include "FakeBrainNvs.h"
+#include "FakeProductCrypto.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+using namespace babytech::boardlink;
+namespace v4 = babytech::v4;
+namespace cloud = babytech::cloud;
+namespace nvs = fake_brain;
+namespace crypto = fake_product_crypto;
+
+namespace {
+constexpr char device[] = "Babytech_dispatcher-test";
+constexpr char sessionA[] = "0123456789abcdef0123456789abcdef";
+constexpr char sessionB[] = "abcdef0123456789abcdef0123456789";
+constexpr char executionA[] = "11111111111111111111111111111111";
+constexpr char executionB[] = "22222222222222222222222222222222";
+uint32_t nowMs = 100;
+unsigned clockCalls = 0, admissionCalls = 0, scenarios = 0, failures = 0;
+const char* blocked = nullptr;
+std::function<void()> clockHook;
+std::function<const char*()> admissionHook;
+
+#define CHECK(condition) do { if (!(condition)) throw std::runtime_error( \
+    "line " + std::to_string(__LINE__) + ": " #condition); } while (false)
+
+uint32_t clockNow() { ++clockCalls; if (clockHook) clockHook(); return nowMs; }
+const char* admission() { ++admissionCalls; return admissionHook ? admissionHook() : blocked; }
+
+void scenario(const std::string& name, const std::function<void()>& run, bool usesNvs = false) {
+    ++scenarios;
+    nvs::reset(); crypto::reset(); nowMs = 100; clockCalls = admissionCalls = 0;
+    blocked = nullptr; clockHook = {}; admissionHook = {};
+    try {
+        run();
+        if (!usesNvs) CHECK(nvs::io.calls.empty());
+        std::printf("PASS %s\n", name.c_str());
+    } catch (const std::exception& error) {
+        ++failures;
+        std::fprintf(stderr, "FAIL %s: %s\n", name.c_str(), error.what());
+    }
+}
+
+struct Ack {
+    std::string id, name, session, reason;
+    uint64_t sequence;
+    bool accepted, sent;
+};
+struct FreshCheck {
+    std::string session;
+    uint32_t generation, sample, at;
+    uint16_t ttl;
+    cloud::Freshness result;
+};
+// Only network boundaries are replaced; freshness remains production logic.
+struct FakeNetwork {
+    cloud::CloudSession session;
+    bool publishAvailable = true;
+    std::vector<Ack> acks;
+    std::vector<FreshCheck> checks;
+    std::function<void(size_t)> beforeCheck;
+    FakeNetwork(uint32_t opened = 0) { CHECK(session.open(sessionA, 7, opened)); }
+    cloud::Freshness checkFreshness(const char* id, uint32_t generation, uint32_t sample, uint16_t ttl) {
+        if (beforeCheck) beforeCheck(checks.size());
+        const auto result = session.check(id, generation, sample, ttl, nowMs);
+        checks.push_back({id, generation, sample, nowMs, ttl, result});
+        return result;
+    }
+    bool publishAck(const char* id, const char* name, uint64_t seq, const char* originalSession,
+                    bool accepted, const char* reason) {
+        acks.push_back({id, name, originalSession, reason, seq, accepted, publishAvailable});
+        return publishAvailable;
+    }
+};
+
+CloudCommand command(ProductCommand kind = ProductCommand::Prepare, uint64_t seq = 1,
+                     uint32_t sample = 100) {
+    CloudCommand c;
+    std::strcpy(c.session, sessionA); c.sampledAtMs = sample; c.ttlMs = 5000;
+    auto& r = c.request;
+    r.source = v4::Source::CloudCommand; r.command = kind; r.sequence = seq;
+    std::strcpy(r.deviceId, device);
+    std::snprintf(r.commandId, sizeof(r.commandId), "cloud-%llu", static_cast<unsigned long long>(seq));
+    if (kind == ProductCommand::Prepare) {
+        std::strcpy(r.babyId, "original-baby"); r.profileVersion = 10;
+        r.waterMl = 120; r.temperatureC = 40; r.powderGPer100Ml = 13.5f;
+    } else if (kind == ProductCommand::SetTargetTemp) r.temperatureC = 40;
+    CHECK(validProductRequest(r));
+    return c;
+}
+CloudStop stop(uint64_t seq = 2, uint32_t sample = 100) {
+    CloudStop s;
+    std::strcpy(s.deviceId, device); std::strcpy(s.session, sessionA);
+    std::snprintf(s.commandId, sizeof(s.commandId), "stop-%llu", static_cast<unsigned long long>(seq));
+    s.sequence = seq; s.sampledAtMs = sample; s.ttlMs = 5000;
+    return s;
+}
+CommandResult result(const ProductRequest& r, bool accepted = true) {
+    CommandResult reply;
+    reply.source = r.source; reply.sequence = r.sequence;
+    std::strcpy(reply.commandId, r.commandId); reply.accepted = accepted;
+    std::strcpy(reply.reason, accepted ? "accepted" : "not_ready");
+    return reply;
+}
+void digestText(const ProductRequest& r, char (&out)[65]) {
+    uint8_t bytes[kProductDigestSize]; CHECK(requestDigest(r, bytes));
+    constexpr char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(bytes); ++i) {
+        out[2 * i] = hex[bytes[i] >> 4]; out[2 * i + 1] = hex[bytes[i] & 15];
+    }
+    out[64] = 0;
+}
+QueriedResult known(const ProductRequest& r, bool accepted = true) {
+    QueriedResult q;
+    q.query.source = r.source; q.query.sequence = r.sequence;
+    std::strcpy(q.query.deviceId, r.deviceId); std::strcpy(q.query.commandId, r.commandId);
+    q.status = ResultQueryStatus::Known; q.accepted = accepted;
+    std::strcpy(q.reason, accepted ? "accepted" : "not_ready");
+    digestText(r, q.requestDigestHex);
+    return q;
+}
+
+// Precise state faults only. All valid traffic still crosses production codecs.
+struct FakeLink {
+    bool board = true, allowCommand = true, allowQuery = true, allowStop = true;
+    bool telemetry = true, telemetryFresh = true;
+    uint32_t telemetryReceivedAt = 100;
+    Status status;
+    CommandSendState send = CommandSendState::Idle;
+    ResultLookupState lookup = ResultLookupState::Idle;
+    StopSendState stopState = StopSendState::Idle;
+    CommandResult reply;
+    QueriedResult queried;
+    std::vector<CommandMessage> commands;
+    std::vector<uint32_t> sentAt;
+    std::vector<ResultQuery> queries;
+    std::vector<v4::StopRequest> stops;
+    unsigned cancellations = 0, queryCancellations = 0, queryAttempts = 0;
+    FakeLink() { status.stationary = true; }
+    bool connected(uint32_t) const { return board; }
+    const Status* lastTelemetry() const { return telemetry && telemetryFresh ? &status : nullptr; }
+    uint32_t lastTelemetryReceivedAtMs() const { return telemetryReceivedAt; }
+    bool requestCommand(const CommandMessage& c, uint32_t at) {
+        if (!board || !allowCommand || send == CommandSendState::Pending) return false;
+        v4::Message wire; CommandMessage decoded;
+        CHECK(encodeCommand(c, wire) && decodeCommand(wire, decoded));
+        commands.push_back(decoded); sentAt.push_back(at); send = CommandSendState::Pending;
+        return true;
+    }
+    CommandSendState commandSendState() const { return send; }
+    const CommandResult& commandResponse() const { return reply; }
+    void cancelCommand() { ++cancellations; send = CommandSendState::Cancelled; }
+    void complete(const CommandResult& r) {
+        v4::Message wire; CHECK(encodeCommandResult(r, wire) && decodeCommandResult(wire, reply));
+        send = CommandSendState::Complete;
+    }
+    bool requestResult(const ResultQuery& q, uint32_t) {
+        ++queryAttempts;
+        if (!board || !allowQuery || lookup == ResultLookupState::Pending) return false;
+        v4::Message wire; ResultQuery decoded;
+        CHECK(encodeResultQuery(q, wire) && decodeResultQuery(wire, decoded));
+        queries.push_back(decoded); lookup = ResultLookupState::Pending;
+        return true;
+    }
+    ResultLookupState resultLookupState() const { return lookup; }
+    const QueriedResult& resultQueryResponse() const { return queried; }
+    void cancelResultQuery() { ++queryCancellations; lookup = ResultLookupState::Idle; }
+    void completeQuery(const QueriedResult& q, bool codec = true) {
+        if (codec) {
+            v4::Message wire; CHECK(encodeQueriedResult(q, wire) && decodeQueriedResult(wire, queried));
+        } else queried = q; // Deliberately corrupt an already-decoded boundary.
+        lookup = ResultLookupState::Complete;
+    }
+    bool requestStop(const v4::StopRequest& s, uint32_t) {
+        if (!board || !allowStop || stopState == StopSendState::Pending) return false;
+        uint8_t wire[v4::kMaxFragment]; v4::StopRequest decoded;
+        const auto length = v4::encodeStop(s, wire, sizeof(wire));
+        CHECK(length && v4::decodeStop(wire, length, decoded));
+        stops.push_back(decoded); cancelCommand(); stopState = StopSendState::Pending;
+        return true;
+    }
+    StopSendState stopSendState() const { return stopState; }
+};
+using Dispatcher = babytech::brain::BrainCloudDispatcher<FakeLink, FakeNetwork>;
+static_assert(!std::is_copy_constructible<Dispatcher>::value, "one dispatcher owner");
+struct Rig {
+    FakeLink link;
+    FakeNetwork net;
+    Dispatcher d;
+    Rig() : d(link, net, clockNow, admission) {}
+    void start(const CloudCommand& c = command()) { d.command(c, 7, nowMs); }
+    void poll(uint32_t at) { nowMs = at; d.poll(at); }
+    void resolve(const ProductRequest& r, bool accepted = true) {
+        link.complete(result(r, accepted)); d.poll(nowMs);
+        CHECK(!d.busy() && d.resultPending()); d.poll(nowMs);
+    }
+    void query(const CloudCommand& c) {
+        start(c); CHECK(d.busy()); link.send = CommandSendState::TimedOut;
+        poll(101); poll(1100); CHECK(link.queries.empty()); poll(1101);
+        CHECK(link.queries.size() == 1 && d.busy());
+    }
+};
+void ack(const Ack& a, const CloudCommand& c, bool accepted, const char* reason) {
+    CHECK(a.id == c.request.commandId && a.sequence == c.request.sequence);
+    CHECK(a.session == c.session && a.accepted == accepted && a.reason == reason);
+}
+void stopAck(const Ack& a, const CloudStop& s, bool accepted, const char* reason) {
+    CHECK(a.id == s.commandId && a.name == "stop" && a.sequence == s.sequence);
+    CHECK(a.session == s.session && a.accepted == accepted && a.reason == reason);
+}
+
+void basics() {
+    const ProductCommand kinds[] = {ProductCommand::Prepare, ProductCommand::Clean,
+        ProductCommand::SetTargetTemp, ProductCommand::ResetError, ProductCommand::CheckFirmwareUpdate};
+    const char* names[] = {"prepare", "clean", "set_target_temp", "reset_error", "check_firmware_update"};
+    for (unsigned i = 0; i < 5; ++i) for (bool accepted : {false, true})
+        scenario(std::string("Current once / ") + names[i] + (accepted ? " accepted" : " rejected"), [=] {
+            Rig r; const auto c = command(kinds[i]); r.start(c);
+            CHECK(r.link.commands.size() == 1 && r.d.busy() && !r.d.resultPending());
+            CHECK(crypto::calls == 1 && sameProductRequest(r.link.commands[0].request, c.request));
+            for (uint32_t at = 100; at < 130; ++at) { r.start(c); r.poll(at); }
+            CHECK(r.link.commands.size() == 1 && r.net.acks.empty());
+            r.resolve(c.request, accepted); CHECK(r.net.acks.size() == 1);
+            ack(r.net.acks[0], c, accepted, accepted ? "accepted" : "not_ready");
+            CHECK(r.net.acks[0].name == names[i]);
+            r.start(c); r.poll(200); CHECK(r.link.commands.size() == 1 && r.net.acks.size() == 1);
+        });
+    scenario("dispatcher adds no STATUS/Ready gate beyond Link connection policy", [] {
+        Rig r; r.link.telemetry = false; r.start();
+        CHECK(r.link.commands.size() == 1 && r.net.acks.empty());
+    });
+    scenario("noBoard command and Stop never request actions", [] {
+        Rig r; r.link.board = false; r.link.telemetry = false;
+        r.start(); r.d.stop(stop(), 7, nowMs); r.poll(10000);
+        CHECK(r.link.commands.empty() && r.link.stops.empty() && r.link.queries.empty());
+        CHECK(r.net.acks.size() == 2);
+        ack(r.net.acks[0], command(), false, "link_lost");
+        stopAck(r.net.acks[1], stop(), false, "motion_state_unavailable");
+    });
+}
+
+void freshness() {
+    for (uint32_t age : {0u, 123u, 4949u, 4950u, 4999u, 5000u, 5001u})
+        scenario("original sample TTL and 50ms budget / age " + std::to_string(age), [=] {
+            Rig r; auto c = command(); nowMs = c.sampledAtMs + age;
+            // Deliberately stale caller nowMs; the supplied clock owns the deadline.
+            r.d.command(c, 7, 0);
+            const bool allowed = age < 4950;
+            CHECK(r.link.commands.size() == (allowed ? 1u : 0u));
+            if (allowed) CHECK(r.link.commands[0].remainingTtlMs == 5000 - age);
+            else { CHECK(r.net.acks.size() == 1); ack(r.net.acks[0], c, false, "request_expired"); }
+            for (const auto& check : r.net.checks)
+                CHECK(check.sample == c.sampledAtMs && check.ttl == c.ttlMs && check.generation == 7);
+        });
+    for (bool afterSha : {false, true}) scenario(afterSha ? "clock expires after real SHA" : "clock expires before SHA", [=] {
+        Rig r; const auto c = command();
+        clockHook = [=] { if ((afterSha && crypto::calls) || (!afterSha && clockCalls >= 2)) nowMs = 5050; };
+        r.start(c); CHECK(r.link.commands.empty() && !r.d.busy());
+        CHECK(crypto::calls == (afterSha ? 1u : 0u));
+        CHECK(r.net.acks.size() == 1); ack(r.net.acks[0], c, false, "request_expired");
+    });
+    scenario("successful SHA time is deducted, not just checked against deadline", [] {
+        Rig r; nowMs = 2500; clockHook = [] { if (crypto::calls) nowMs = 2512; };
+        r.start(); CHECK(crypto::calls == 1 && r.link.commands.size() == 1);
+        CHECK(r.link.sentAt[0] == 2512 && r.link.commands[0].remainingTtlMs == 2588);
+        for (const auto& check : r.net.checks) CHECK(check.sample == 100 && check.ttl == 5000);
+    });
+    scenario("SHA failure is storage_fault, no action or query", [] {
+        Rig r; crypto::fail = true; r.start();
+        CHECK(crypto::calls == 1 && r.link.commands.empty() && r.link.queries.empty());
+        CHECK(r.net.acks.size() == 1); ack(r.net.acks[0], command(), false, "storage_fault");
+    });
+    for (unsigned shape = 0; shape < 7; ++shape) scenario("untrusted/expired command and Stop / " + std::to_string(shape), [=] {
+        Rig r; auto c = command(); auto s = stop(); uint32_t generation = 7;
+        if (shape == 0) generation = 6;
+        if (shape == 1) { std::strcpy(c.session, sessionB); std::strcpy(s.session, sessionB); }
+        if (shape == 2) r.net.session.close();
+        if (shape == 3) { c.ttlMs = s.ttlMs = 4999; }
+        if (shape == 4) { c.sampledAtMs = s.sampledAtMs = 101; }
+        if (shape == 5) nowMs = 5101;
+        if (shape == 6) { r.net.session.close(); CHECK(r.net.session.open(sessionB, 8, 99)); }
+        r.d.command(c, generation, nowMs); r.d.stop(s, generation, nowMs);
+        CHECK(r.link.commands.empty() && r.link.stops.empty());
+        if (shape == 4 || shape == 5) {
+            CHECK(r.net.acks.size() == 2);
+            ack(r.net.acks[0], c, false, "request_expired");
+            stopAck(r.net.acks[1], s, false, "request_expired");
+            CHECK(r.net.checks[0].result == cloud::Freshness::Expired);
+        } else CHECK(r.net.acks.empty());
+        CHECK(!r.d.busy() && !crypto::calls && !admissionCalls);
+    });
+    for (size_t check = 1; check <= 2; ++check) scenario("session invalidates on recheck / " + std::to_string(check), [=] {
+        Rig r; r.net.beforeCheck = [&](size_t at) { if (at == check) r.net.session.close(); };
+        r.start(); CHECK(r.link.commands.empty() && !r.d.busy());
+        CHECK(crypto::calls == (check == 2 ? 1u : 0u));
+    });
+    scenario("TTL subtraction covers uint32 wrap", [] {
+        nowMs = 10; FakeLink link; FakeNetwork net(0xfffffc00u);
+        Dispatcher d(link, net, clockNow, admission); const auto c = command(ProductCommand::Clean, 1, 0xfffffff0u);
+        d.command(c, 7, nowMs); CHECK(link.commands.size() == 1 && link.commands[0].remainingTtlMs == 4974);
+    });
+    for (unsigned timing = 0; timing < 3; ++timing)
+        scenario("Expired duplicate cannot freeze false ACK over original acceptance / " + std::to_string(timing), [=] {
+            Rig r; const auto c = command(); r.start(c);
+            if (timing == 1) { r.link.complete(result(c.request)); r.poll(101); CHECK(r.d.resultPending()); }
+            if (timing == 2) { r.resolve(c.request); CHECK(r.net.acks.size() == 1); }
+            const auto ackCount = r.net.acks.size(); nowMs = 5101;
+            r.d.command(c, 7, nowMs);
+            CHECK(r.net.checks.back().result == cloud::Freshness::Expired);
+            CHECK(r.net.acks.size() == ackCount && r.link.commands.size() == 1);
+            if (timing == 0) {
+                r.poll(5101); r.poll(6101); CHECK(r.link.queries.size() == 1);
+                r.link.completeQuery(known(c.request)); r.poll(6102); r.poll(6103);
+            } else r.poll(5101);
+            CHECK(r.net.acks.size() == 1); ack(r.net.acks[0], c, true, "accepted");
+            r.d.command(c, 7, nowMs); CHECK(r.net.acks.size() == 1 && r.link.commands.size() == 1);
+        });
+    for (bool newerWhileBusy : {false, true})
+        scenario(newerWhileBusy ? "new Expired higher seq while original awaits acceptance" : "new unseen Expired is rejected and consumed", [=] {
+            Rig r; const auto first = command();
+            if (newerWhileBusy) r.start(first);
+            const auto expired = command(ProductCommand::Clean, newerWhileBusy ? 2 : 1);
+            nowMs = 5101; r.start(expired);
+            CHECK(r.net.checks.back().result == cloud::Freshness::Expired);
+            CHECK(r.net.acks.size() == 1); ack(r.net.acks[0], expired, false, "request_expired");
+            const auto sent = r.link.commands.size();
+            r.start(expired); CHECK(r.net.acks.size() == 1 && r.link.commands.size() == sent);
+            // Even a backwards test clock cannot give consumed bytes new permission.
+            nowMs = 100; r.start(expired);
+            CHECK(r.net.checks.back().result == cloud::Freshness::Current);
+            CHECK(r.net.acks.size() == 1 && r.link.commands.size() == sent);
+            if (newerWhileBusy) {
+                r.resolve(first.request); CHECK(r.net.acks.size() == 2);
+                ack(r.net.acks[1], first, true, "accepted"); r.start(expired);
+                CHECK(r.link.commands.size() == 1);
+            }
+        });
+}
+
+void admissionAndReplay() {
+    for (const char* reason : {"busy", "storage_fault", "maintenance"}) scenario(std::string("admission / ") + reason, [=] {
+        Rig r; blocked = reason; r.start();
+        CHECK(r.link.commands.empty() && r.link.queries.empty() && !crypto::calls);
+        CHECK(r.net.acks.size() == 1); ack(r.net.acks[0], command(), false, reason);
+        blocked = nullptr; r.start(); CHECK(r.link.commands.empty() && r.net.acks.size() == 1);
+    });
+    scenario("local busy rejection consumes newer RAM seq before later replay", [] {
+        Rig r; const auto first = command(); const auto busy = command(ProductCommand::Clean, 2);
+        r.start(first); r.start(busy); CHECK(r.link.commands.size() == 1 && r.net.acks.size() == 1);
+        ack(r.net.acks[0], busy, false, "busy"); r.resolve(first.request);
+        r.start(busy); auto changed = busy; std::strcpy(changed.request.commandId, "different-id-same-seq"); r.start(changed);
+        r.start(first); CHECK(r.link.commands.size() == 1);
+        r.start(command(ProductCommand::Clean, 3)); CHECK(r.link.commands.size() == 2);
+    });
+    scenario("link refuses immediate command: no queue and seq consumed", [] {
+        Rig r; r.link.allowCommand = false; r.start();
+        CHECK(!r.d.busy() && r.link.commands.empty()); CHECK(r.net.acks.size() == 1);
+        ack(r.net.acks[0], command(), false, "busy"); r.link.allowCommand = true; r.start();
+        CHECK(r.link.commands.empty());
+    });
+    scenario("reconnect cannot reopen consumed seq within this boot", [] {
+        Rig r; blocked = "busy"; r.start(); blocked = nullptr;
+        r.net.session.close(); CHECK(r.net.session.open(sessionB, 8, nowMs));
+        auto c = command(); std::strcpy(c.session, sessionB); r.d.command(c, 8, nowMs);
+        CHECK(r.link.commands.empty()); c.request.sequence = 2; r.d.command(c, 8, nowMs);
+        CHECK(r.link.commands.size() == 1);
+    });
+    scenario("real Brain NVS read fault admission is not hidden or cleared", [] {
+        Rig r; BrainStateStore store;
+        v4::Pairing pair; pair.role = v4::Role::Brain; std::strcpy(pair.deviceId, device);
+        std::strcpy(pair.epoch, sessionA); std::strcpy(pair.localPhysicalId, "112233445566");
+        std::strcpy(pair.peerPhysicalId, "aabbccddeeff");
+        nvs::fail(nvs::Op::OpenRO, 1); CHECK(store.load(pair) == BrainLoad::IoError); nvs::verifyFaults();
+        const auto calls = nvs::io.calls.size(); const auto disk = nvs::io.disk;
+        admissionHook = [&] { return store.ready() ? nullptr : "storage_fault"; };
+        r.start(); CHECK(r.link.commands.empty() && nvs::io.calls.size() == calls && nvs::io.disk == disk);
+        CHECK(!nvs::count(nvs::Op::Set) && !nvs::count(nvs::Op::Commit));
+        ack(r.net.acks.at(0), command(), false, "storage_fault");
+    }, true);
+}
+
+void results() {
+    for (unsigned mismatch = 0; mismatch < 3; ++mismatch) scenario("COMMAND_RESULT exact identity / mismatch " + std::to_string(mismatch), [=] {
+        Rig r; const auto c = command(); r.start(c); auto reply = result(c.request);
+        if (mismatch == 0) reply.source = v4::Source::LocalTouch;
+        if (mismatch == 1) ++reply.sequence;
+        if (mismatch == 2) std::strcpy(reply.commandId, "wrong-id");
+        r.link.complete(reply); r.poll(101); CHECK(r.d.busy() && !r.d.resultPending() && r.net.acks.empty());
+        r.poll(1101); CHECK(r.link.queries.size() == 1);
+        r.link.completeQuery(known(c.request)); r.poll(1102); r.poll(1103);
+        CHECK(r.net.acks.size() == 1); ack(r.net.acks[0], c, true, "accepted");
+    });
+    for (bool accepted : {false, true}) scenario(accepted ? "query Known original digest acceptance" : "query Known original digest rejection", [=] {
+        Rig r; const auto c = command(); r.query(c);
+        r.link.completeQuery(known(c.request, accepted)); r.poll(1102);
+        CHECK(!r.d.busy() && r.d.resultPending() && r.net.acks.empty()); r.poll(1103);
+        CHECK(r.net.acks.size() == 1 && r.link.queryCancellations == 1 && r.link.commands.size() == 1);
+        ack(r.net.acks[0], c, accepted, accepted ? "accepted" : "not_ready");
+    });
+    for (unsigned status = 1; status <= 4; ++status) for (bool accepted : {false, true})
+        scenario("query uncertain must not ACK / status " + std::to_string(status) + (accepted ? " forged accepted" : " rejected bit"), [=] {
+            Rig r; const auto c = command(); r.query(c); auto q = known(c.request, accepted);
+            q.status = ResultQueryStatus(status); q.requestDigestHex[0] = 0;
+            const char* reasons[] = {"known", "unknown", "result_expired", "request_conflict", "storage_fault"};
+            std::strcpy(q.reason, reasons[status]);
+            // accepted=true is deliberately an invalid decoded response boundary.
+            r.link.completeQuery(q, !accepted); r.poll(1102); r.poll(2101);
+            CHECK(r.d.busy() && !r.d.resultPending() && r.net.acks.empty() && r.link.queries.size() == 1);
+            r.poll(2102); CHECK(r.link.queries.size() == 2 && r.link.commands.size() == 1);
+            CHECK(sameResultQuery(r.link.queries[0], r.link.queries[1]));
+        });
+    for (unsigned status = 1; status <= 4; ++status)
+        scenario("unresolved ordinary preserves independent Stop and exact Known recovery / " + std::to_string(status), [=] {
+            Rig r; const auto original = command(); r.query(original);
+            auto unknown = known(original.request);
+            unknown.status = ResultQueryStatus(status); unknown.accepted = false;
+            unknown.requestDigestHex[0] = 0;
+            const char* reasons[] = {"known", "unknown", "result_expired", "request_conflict", "storage_fault"};
+            std::strcpy(unknown.reason, reasons[status]);
+            r.link.completeQuery(unknown); r.poll(1102);
+            nowMs = 6000;
+            r.link.telemetryReceivedAt = nowMs;
+            std::strcpy(r.link.status.activeExecutionId, executionA);
+            r.link.status.motionBusy = true; r.link.status.stationary = false;
+            const auto blockedRequest = command(ProductCommand::Clean, 2, nowMs);
+            r.start(blockedRequest);
+            CHECK(r.d.busy() && r.link.commands.size() == 1 && r.net.acks.size() == 1);
+            ack(r.net.acks[0], blockedRequest, false, "busy");
+            const auto safetyStop = stop(3, nowMs); const auto admissions = admissionCalls;
+            blocked = "storage_fault"; r.d.stop(safetyStop, 7, nowMs);
+            CHECK(r.link.stops.size() == 1 && admissionCalls == admissions);
+            CHECK(r.link.stops[0].scope == v4::StopScope::Product);
+            for (auto byte : r.link.stops[0].executionId) CHECK(byte == 0x11);
+            r.link.stopState = StopSendState::Received; r.poll(6001);
+            CHECK(r.d.busy() && r.link.queries.size() == 2 && r.net.acks.size() == 2);
+            stopAck(r.net.acks[1], safetyStop, true, "accepted");
+            CHECK(sameResultQuery(r.link.queries[0], r.link.queries[1]));
+            r.link.completeQuery(known(original.request)); r.poll(6002); r.poll(6003);
+            CHECK(!r.d.busy() && !r.d.resultPending() && r.net.acks.size() == 3);
+            ack(r.net.acks[2], original, true, "accepted");
+            blocked = nullptr;
+            r.start(original); r.start(blockedRequest);
+            CHECK(r.link.commands.size() == 1 && r.net.acks.size() == 3);
+            r.start(command(ProductCommand::Clean, 4, nowMs));
+            CHECK(r.d.busy() && r.link.commands.size() == 2);
+        });
+    for (unsigned shape = 0; shape < 10; ++shape) for (bool accepted : {false, true})
+        scenario("Known wrong identity/digest is uncertain / " + std::to_string(shape) + (accepted ? " accepted" : " rejected"), [=] {
+            Rig r; const auto c = command(); r.query(c); auto q = known(c.request, accepted);
+            if (shape == 0) ++q.query.sequence;
+            if (shape == 1) q.query.source = v4::Source::LocalTouch;
+            if (shape == 2) std::strcpy(q.query.deviceId, "other-device");
+            if (shape == 3) std::strcpy(q.query.commandId, "other-id");
+            if (shape == 4) q.requestDigestHex[0] = q.requestDigestHex[0] == '0' ? '1' : '0';
+            if (shape == 5) q.requestDigestHex[0] = 0;
+            if (shape == 6) q.requestDigestHex[63] = 0;
+            if (shape == 7) q.requestDigestHex[64] = 'a';
+            if (shape == 8) q.requestDigestHex[0] = 'g';
+            if (shape == 9) {
+                bool changed = false;
+                for (unsigned i = 0; i < 64; ++i) if (q.requestDigestHex[i] >= 'a') {
+                    q.requestDigestHex[i] -= 'a' - 'A'; changed = true;
+                }
+                CHECK(changed);
+            }
+            r.link.completeQuery(q, shape <= 4); r.poll(1102);
+            CHECK(r.d.busy() && !r.d.resultPending() && r.net.acks.empty()); r.poll(2102);
+            CHECK(r.link.queries.size() == 2 && r.link.commands.size() == 1);
+        });
+    scenario("late ordinary result after timeout cannot bypass owned result query", [] {
+        Rig r; const auto c = command(); r.query(c);
+        r.link.complete(result(c.request)); r.poll(1102);
+        CHECK(r.net.acks.empty() && r.d.busy());
+        r.link.completeQuery(known(c.request)); r.poll(1103); r.poll(1104);
+        CHECK(r.net.acks.size() == 1 && r.link.commands.size() == 1);
+    });
+    for (auto state : {CommandSendState::Idle, CommandSendState::TimedOut,
+                       CommandSendState::Unavailable, CommandSendState::Cancelled})
+        scenario("ordinary uncertain transport / " + std::to_string(unsigned(state)), [=] {
+            Rig r; r.start(); r.link.send = state; r.poll(101); r.poll(1101);
+            CHECK(r.net.acks.empty() && r.d.busy() && r.link.queries.size() == 1 && r.link.commands.size() == 1);
+        });
+    for (auto state : {ResultLookupState::Idle, ResultLookupState::TimedOut, ResultLookupState::Unavailable})
+        scenario("lookup transport retry / " + std::to_string(unsigned(state)), [=] {
+            Rig r; r.query(command()); r.link.lookup = state; r.poll(1102); r.poll(2101);
+            CHECK(r.link.queries.size() == 1 && r.net.acks.empty()); r.poll(2102);
+            CHECK(r.link.queries.size() == 2 && r.link.commands.size() == 1);
+        });
+    scenario("Cloud disconnect cancels only unsent tracking; never Stop or replay", [] {
+        Rig r; const auto c = command(); r.start(c); r.net.session.close(); r.poll(101);
+        CHECK(r.link.cancellations == 1 && r.link.stops.empty() && r.d.busy());
+        CHECK(r.net.session.open(sessionB, 8, 102)); r.poll(1101);
+        CHECK(r.link.queries.size() == 1 && r.link.commands.size() == 1);
+        r.link.completeQuery(known(c.request)); r.poll(1102); r.poll(1103);
+        CHECK(r.net.acks.size() == 1); ack(r.net.acks[0], c, true, "accepted");
+    });
+    scenario("late previous result cannot ACK a newly issued command", [] {
+        Rig r; const auto old = command(); r.start(old); r.resolve(old.request);
+        const auto next = command(ProductCommand::Clean, 2); r.start(next);
+        r.link.complete(result(old.request)); r.poll(101);
+        CHECK(r.d.busy() && r.net.acks.size() == 1 && r.link.commands.size() == 2);
+    });
+    scenario("failed read-only lookup start is bounded and never replays action", [] {
+        Rig r; r.link.allowQuery = false; r.start(); r.link.send = CommandSendState::TimedOut;
+        r.poll(101); r.poll(1101); CHECK(r.link.queryAttempts == 1 && r.link.queries.empty());
+        for (uint32_t at = 1102; at < 2101; ++at) r.poll(at);
+        CHECK(r.link.queryAttempts == 1 && r.net.acks.empty());
+        r.link.allowQuery = true; r.poll(2101);
+        CHECK(r.link.queryAttempts == 2 && r.link.queries.size() == 1 && r.link.commands.size() == 1);
+    });
+}
+
+void expiredUnknown() {
+    for (bool wrap : {false, true}) for (bool querying : {false, true})
+        for (uint32_t age : {4999u, 5000u, 5001u})
+            scenario(std::string("unknown original TTL / ") + (wrap ? "wrap / " : "linear / ") +
+                     (querying ? "querying / " : "waiting / ") + std::to_string(age), [=] {
+                const uint32_t sample = wrap ? UINT32_MAX - 100u : 100u;
+                nowMs = sample; FakeLink link; FakeNetwork net(sample - 1u);
+                Dispatcher d(link, net, clockNow, admission); const auto c = command(ProductCommand::Clean, 1, sample);
+                d.command(c, 7, nowMs); CHECK(d.busy());
+                link.send = CommandSendState::TimedOut; d.poll(nowMs);
+                link.allowQuery = querying;
+                if (querying) { nowMs = sample + 1000u; d.poll(nowMs); CHECK(link.queries.size() == 1); }
+                nowMs = sample + age; link.telemetryReceivedAt = nowMs;
+                d.poll(nowMs);
+                CHECK(d.busy() == (age <= 5000));
+                CHECK(!d.resultPending() && net.acks.empty() && link.commands.size() == 1);
+                if (age > 5000) {
+                    CHECK(link.cancellations == 1 && link.queryCancellations == (querying ? 1u : 0u));
+                    const auto attempts = link.queryAttempts; nowMs += 2000; d.poll(nowMs);
+                    CHECK(!d.busy() && link.queryAttempts == attempts && net.acks.empty());
+                }
+            });
+    const char* faults[] = {"preexpiry receipt", "exact expiry receipt", "future receipt", "age 1500",
+        "age 1501", "offline Motion", "no telemetry", "stale telemetry view", "motion busy",
+        "not stationary", "active execution"};
+    for (bool wrap : {false, true}) for (unsigned fault = 0; fault < 11; ++fault)
+        scenario(std::string("postexpiry STATUS blocks / ") + (wrap ? "wrap / " : "linear / ") + faults[fault], [=] {
+            const uint32_t sample = wrap ? UINT32_MAX - 100u : 100u;
+            nowMs = sample; FakeLink link; FakeNetwork net(sample - 1u);
+            Dispatcher d(link, net, clockNow, admission); const auto c = command(ProductCommand::Clean, 1, sample);
+            d.command(c, 7, nowMs); link.send = CommandSendState::TimedOut; d.poll(nowMs);
+            nowMs = sample + 1000u; d.poll(nowMs); CHECK(link.queries.size() == 1);
+            nowMs = sample + ((fault == 3 || fault == 4) ? 6900u : 5500u);
+            link.telemetryReceivedAt = nowMs;
+            if (fault == 0) link.telemetryReceivedAt = sample + 4999u;
+            if (fault == 1) link.telemetryReceivedAt = sample + 5000u;
+            if (fault == 2) link.telemetryReceivedAt = nowMs + 1u;
+            if (fault == 3 || fault == 4) link.telemetryReceivedAt = nowMs - (fault == 3 ? 1500u : 1501u);
+            if (fault == 5) link.board = false;
+            if (fault == 6) link.telemetry = false;
+            if (fault == 7) link.telemetryFresh = false;
+            if (fault == 8) link.status.motionBusy = true;
+            if (fault == 9) link.status.stationary = false;
+            if (fault == 10) std::strcpy(link.status.activeExecutionId, executionA);
+            d.poll(nowMs);
+            CHECK(d.busy() && !d.resultPending() && net.acks.empty());
+            CHECK(!link.cancellations && !link.queryCancellations && link.commands.size() == 1);
+            link.board = link.telemetry = link.telemetryFresh = true;
+            link.status.motionBusy = false; link.status.stationary = true; link.status.activeExecutionId[0] = 0;
+            link.telemetryReceivedAt = nowMs; d.poll(nowMs);
+            CHECK(!d.busy() && !d.resultPending() && net.acks.empty());
+            CHECK(link.cancellations == 1 && link.queryCancellations == 1 && link.commands.size() == 1);
+        });
+    for (uint32_t age : {0u, 1499u}) scenario("postexpiry receipt valid age / " + std::to_string(age), [=] {
+        Rig r; const auto c = command(); r.query(c);
+        r.link.telemetryReceivedAt = 7000 - age; r.link.status.sampleUptimeMs = 0;
+        r.poll(7000); CHECK(!r.d.busy() && !r.d.resultPending() && r.net.acks.empty());
+        CHECK(r.link.commands.size() == 1 && r.link.queryCancellations == 1);
+    });
+    for (unsigned status = 1; status <= 4; ++status) for (bool forgedAccepted : {false, true})
+        scenario("expired uncertain exits RAM without ACK / " + std::to_string(status) +
+                 (forgedAccepted ? " forged accepted" : " rejected bit"), [=] {
+            Rig r; const auto c = command(); r.query(c); auto q = known(c.request, forgedAccepted);
+            q.status = ResultQueryStatus(status); q.requestDigestHex[0] = 0;
+            const char* reasons[] = {"known", "unknown", "result_expired", "request_conflict", "storage_fault"};
+            std::strcpy(q.reason, reasons[status]); r.link.completeQuery(q, !forgedAccepted);
+            r.link.telemetryReceivedAt = 6000; r.poll(6000);
+            CHECK(!r.d.busy() && !r.d.resultPending() && r.net.acks.empty());
+            CHECK(r.link.commands.size() == 1 && r.link.cancellations == 1 && r.link.queryCancellations == 1);
+            r.poll(10000); CHECK(r.net.acks.empty() && r.link.queries.size() == 1);
+        });
+    for (bool queried : {false, true}) for (bool accepted : {false, true})
+        scenario(std::string("expired exact Known precedes release / ") + (queried ? "query / " : "direct / ") +
+                 (accepted ? "accepted" : "rejected"), [=] {
+            Rig r; const auto c = command();
+            if (queried) { r.query(c); r.link.completeQuery(known(c.request, accepted)); }
+            else { r.start(c); r.link.complete(result(c.request, accepted)); }
+            r.link.telemetryReceivedAt = 6000; r.poll(6000);
+            CHECK(!r.d.busy() && r.d.resultPending() && r.net.acks.empty() && !r.link.cancellations);
+            r.poll(6001); CHECK(r.net.acks.size() == 1);
+            ack(r.net.acks[0], c, accepted, accepted ? "accepted" : "not_ready");
+            // Definitive results are not retired-ID conflicts; Motion owns deduplication.
+            auto sameId = c; sameId.request.sequence = 2; sameId.sampledAtMs = nowMs;
+            r.start(sameId); CHECK(r.link.commands.size() == 2 && r.net.acks.size() == 1);
+        });
+    for (bool maximumId : {false, true}) scenario(maximumId ? "retired full 128-byte ID retained" : "retired ID and seq never replay", [=] {
+        Rig r; auto c = command();
+        if (maximumId) { std::memset(c.request.commandId, 'x', 128); c.request.commandId[128] = 0; }
+        r.query(c); r.link.telemetryReceivedAt = 6000; r.poll(6000);
+        CHECK(!r.d.busy() && r.net.acks.empty());
+        auto replay = c; replay.sampledAtMs = nowMs; r.start(replay);
+        std::strcpy(replay.request.commandId, "different-id-same-seq"); r.start(replay);
+        CHECK(r.link.commands.size() == 1 && r.net.acks.empty());
+        auto conflict = c; conflict.sampledAtMs = nowMs; conflict.request.sequence = 2;
+        r.start(conflict); CHECK(r.net.acks.size() == 1 && r.link.commands.size() == 1);
+        ack(r.net.acks[0], conflict, false, "request_conflict");
+        r.start(conflict); CHECK(r.net.acks.size() == 1);
+        const auto next = command(ProductCommand::Clean, 3, nowMs);
+        r.start(next); r.start(next); r.poll(6001);
+        CHECK(r.d.busy() && r.link.commands.size() == 2 && r.net.acks.size() == 1);
+        CHECK(sameProductRequest(r.link.commands.back().request, next.request));
+        r.resolve(next.request); CHECK(r.net.acks.size() == 2);
+        ack(r.net.acks.back(), next, true, "accepted");
+        r.start(c); r.start(next); CHECK(r.link.commands.size() == 2 && r.net.acks.size() == 2);
+    });
+    for (bool queryReply : {false, true}) scenario(queryReply ? "late retired Known cannot ACK new query" : "late retired result cannot ACK new command", [=] {
+        Rig r; const auto old = command(); r.query(old);
+        r.link.telemetryReceivedAt = 6000; r.poll(6000); CHECK(!r.d.busy());
+        const auto next = command(ProductCommand::Clean, 2, nowMs); r.start(next);
+        if (queryReply) {
+            r.link.send = CommandSendState::TimedOut; r.poll(6001); r.poll(7001);
+            CHECK(r.link.queries.size() == 2); r.link.completeQuery(known(old.request));
+        } else r.link.complete(result(old.request));
+        r.poll(7002); CHECK(r.d.busy() && !r.d.resultPending() && r.net.acks.empty());
+        r.poll(8002); CHECK(r.link.queries.size() == (queryReply ? 3u : 2u));
+        CHECK(r.link.queries.back().sequence == next.request.sequence);
+        r.link.completeQuery(known(next.request)); r.poll(8003); r.poll(8004);
+        CHECK(r.net.acks.size() == 1 && r.link.commands.size() == 2);
+        ack(r.net.acks[0], next, true, "accepted");
+    });
+    scenario("offline Cloud can release RAM but new Cloud still needs current session", [] {
+        Rig r; const auto old = command(); r.start(old);
+        r.net.session.close(); r.net.publishAvailable = false; r.poll(101);
+        CHECK(r.d.busy() && r.link.cancellations == 1);
+        r.link.telemetryReceivedAt = 6000; r.poll(6000);
+        CHECK(!r.d.busy() && !r.d.resultPending() && r.net.acks.empty() && r.link.commands.size() == 1);
+        const auto next = command(ProductCommand::Clean, 2, nowMs); r.start(next);
+        CHECK(r.link.commands.size() == 1 && r.net.acks.empty());
+        CHECK(r.net.session.open(sessionB, 8, nowMs)); r.start(next);
+        auto current = next; std::strcpy(current.session, sessionB); r.d.command(current, 7, nowMs);
+        CHECK(r.link.commands.size() == 1 && r.net.acks.empty());
+        r.d.command(current, 8, nowMs); r.d.command(current, 8, nowMs);
+        CHECK(r.link.commands.size() == 2 && r.d.busy() && r.net.acks.empty());
+    });
+    scenario("expired release never gates independent Product Stop on business admission", [] {
+        Rig r; const auto c = command(); r.query(c);
+        r.link.telemetryReceivedAt = 6000; r.poll(6000); CHECK(!r.d.busy());
+        std::strcpy(r.link.status.activeExecutionId, executionB);
+        r.link.status.motionBusy = true; r.link.status.stationary = false;
+        blocked = "storage_fault"; const auto calls = admissionCalls; const auto s = stop(2, nowMs);
+        r.d.stop(s, 7, nowMs);
+        CHECK(r.link.stops.size() == 1 && admissionCalls == calls && r.link.stops[0].scope == v4::StopScope::Product);
+        for (auto byte : r.link.stops[0].executionId) CHECK(byte == 0x22);
+        r.link.stopState = StopSendState::Received; r.poll(6001);
+        CHECK(r.net.acks.size() == 1); stopAck(r.net.acks[0], s, true, "accepted");
+        CHECK(r.link.commands.size() == 1 && !r.d.busy());
+    });
+}
+
+void replyRetries() {
+    for (bool queried : {false, true}) for (bool accepted : {false, true})
+        scenario(std::string("failed ACK retains original session / ") + (queried ? "query" : "direct") + (accepted ? " accept" : " reject"), [=] {
+            Rig r; const auto c = command();
+            if (queried) { r.query(c); r.link.completeQuery(known(c.request, accepted)); }
+            else { r.start(c); r.link.complete(result(c.request, accepted)); }
+            r.net.publishAvailable = false; r.poll(nowMs);
+            CHECK(!r.d.busy() && r.d.resultPending());
+            for (unsigned i = 0; i < 3; ++i) r.poll(++nowMs);
+            CHECK(r.d.resultPending() && r.net.acks.size() == 3);
+            r.net.session.close(); CHECK(r.net.session.open(sessionB, 8, nowMs));
+            r.net.publishAvailable = true; r.poll(++nowMs); CHECK(!r.d.resultPending());
+            for (const auto& a : r.net.acks) ack(a, c, accepted, accepted ? "accepted" : "not_ready");
+            CHECK(r.net.acks.back().sent && r.link.commands.size() == 1);
+            r.poll(++nowMs); CHECK(r.net.acks.size() == 4);
+        });
+    // Keep these assertions even if current production loses local rejections.
+    for (const char* reason : {"busy", "storage_fault", "maintenance", "link_lost"})
+        scenario(std::string("COUNTEREXAMPLE failed local rejection ACK must retry / ") + reason, [=] {
+            Rig r; const auto c = command(); r.net.publishAvailable = false;
+            if (!std::strcmp(reason, "link_lost")) r.link.board = false; else blocked = reason;
+            r.start(c); CHECK(r.net.acks.size() == 1 && !r.net.acks[0].sent);
+            blocked = nullptr; r.link.board = true; r.net.publishAvailable = true;
+            r.net.session.close(); CHECK(r.net.session.open(sessionB, 8, nowMs));
+            r.poll(101); CHECK(r.net.acks.size() == 2 && r.net.acks.back().sent);
+            ack(r.net.acks.back(), c, false, reason); CHECK(r.link.commands.empty());
+        });
+    for (bool resultAlreadyKnown : {false, true})
+        scenario(resultAlreadyKnown ? "busy rejection cannot overwrite pending original known ACK" : "busy rejection cannot overwrite original in-flight identity", [=] {
+            Rig r; const auto original = command(); r.start(original); r.net.publishAvailable = false;
+            if (resultAlreadyKnown) { r.link.complete(result(original.request)); r.poll(101); r.poll(102); }
+            const auto newer = command(ProductCommand::Clean, 2); r.start(newer);
+            CHECK(r.net.acks.back().id == newer.request.commandId && !r.net.acks.back().sent);
+            CHECK(r.link.commands.size() == 1);
+            if (!resultAlreadyKnown) { r.link.complete(result(original.request)); r.poll(103); }
+            CHECK(r.d.resultPending()); r.net.publishAvailable = true; r.poll(104);
+            CHECK(r.net.acks.back().sent); ack(r.net.acks.back(), original, true, "accepted");
+            r.start(newer); CHECK(r.link.commands.size() == 1);
+        });
+    scenario("failed new Expired rejection retains original session for retry without execution", [] {
+        Rig r; const auto c = command(); nowMs = 5101; r.net.publishAvailable = false; r.start(c);
+        CHECK(r.d.resultPending() && !r.d.busy() && r.link.commands.empty());
+        r.net.session.close(); CHECK(r.net.session.open(sessionB, 8, nowMs));
+        r.net.publishAvailable = true; r.poll(5102);
+        CHECK(r.net.acks.size() == 2 && r.net.acks.back().sent && !r.d.resultPending());
+        ack(r.net.acks.back(), c, false, "request_expired"); CHECK(r.link.commands.empty());
+    });
+}
+
+void stops() {
+    for (unsigned ordinaryState = 0; ordinaryState < 4; ++ordinaryState)
+        scenario("Stop seq19 remains valid after ordinary seq20 / " + std::to_string(ordinaryState), [=] {
+            Rig r; const auto c = command(ProductCommand::Prepare, 20);
+            if (ordinaryState == 0) blocked = "busy";
+            r.start(c); blocked = nullptr;
+            if (ordinaryState == 1 || ordinaryState == 2) r.resolve(c.request, ordinaryState == 2);
+            std::strcpy(r.link.status.activeExecutionId, executionA);
+            r.link.status.motionBusy = true; r.link.status.stationary = false;
+            const auto s = stop(19); const auto admissions = admissionCalls;
+            r.d.stop(s, 7, nowMs);
+            CHECK(r.link.stops.size() == 1 && admissionCalls == admissions);
+            CHECK(r.link.stops[0].sequence == 19 && r.link.stops[0].scope == v4::StopScope::Product);
+            for (auto byte : r.link.stops[0].executionId) CHECK(byte == 0x11);
+            r.link.stopState = StopSendState::Received; r.poll(101);
+            std::strcpy(r.link.status.activeExecutionId, executionB);
+            const auto acks = r.net.acks.size(); r.d.stop(s, 7, nowMs); r.poll(102);
+            CHECK(r.link.stops.size() == 1 && r.net.acks.size() == acks);
+            r.start(c); CHECK(r.link.commands.size() == (ordinaryState ? 1u : 0u));
+        });
+    scenario("larger Stop seq raises only the ordinary cancellation barrier", [] {
+        Rig r; r.d.stop(stop(30), 7, nowMs); r.link.stopState = StopSendState::Received; r.poll(101);
+        r.start(command(ProductCommand::Clean, 29)); CHECK(r.link.commands.empty());
+        r.start(command(ProductCommand::Clean, 31)); CHECK(r.link.commands.size() == 1);
+    });
+    for (bool received : {false, true}) scenario(received ? "Expired duplicate of received Stop never false-ACKs" : "new Expired Stop consumed without rebind", [=] {
+        Rig r; const auto s = stop();
+        if (received) { r.d.stop(s, 7, nowMs); r.link.stopState = StopSendState::Received; r.poll(101); }
+        nowMs = 5101; r.d.stop(s, 7, nowMs);
+        CHECK(r.net.checks.back().result == cloud::Freshness::Expired);
+        CHECK(r.net.acks.size() == 1);
+        stopAck(r.net.acks[0], s, received, received ? "already_idle" : "request_expired");
+        nowMs = 100; std::strcpy(r.link.status.activeExecutionId, executionB); r.d.stop(s, 7, nowMs);
+        CHECK(r.link.stops.size() == (received ? 1u : 0u) && r.net.acks.size() == 1);
+    });
+    for (bool idle : {false, true}) for (bool received : {false, true})
+        scenario(std::string("Stop matched target / ") + (idle ? "idle" : "execution") + (received ? " received" : " rejected"), [=] {
+            Rig r; const auto s = stop(); blocked = "storage_fault";
+            if (!idle) { std::strcpy(r.link.status.activeExecutionId, executionA); r.link.status.motionBusy = true; r.link.status.stationary = false; }
+            r.d.stop(s, 7, nowMs); CHECK(r.link.stops.size() == 1 && !admissionCalls && !crypto::calls);
+            const auto& target = r.link.stops[0]; CHECK(target.scope == (idle ? v4::StopScope::Idle : v4::StopScope::Product));
+            CHECK(target.source == v4::Source::CloudCommand && target.sequence == s.sequence);
+            CHECK(!std::strcmp(target.commandId, s.commandId));
+            for (auto byte : target.executionId) CHECK(byte == (idle ? 0 : 0x11));
+            CHECK(r.net.acks.empty()); r.poll(101); CHECK(r.net.acks.empty());
+            r.link.stopState = received ? StopSendState::Received : StopSendState::Rejected; r.poll(102);
+            CHECK(r.net.acks.size() == 1);
+            stopAck(r.net.acks[0], s, received, received ? (idle ? "already_idle" : "accepted") : "stop_rejected");
+            if (!idle) CHECK(r.link.status.motionBusy && !r.link.status.stationary); // Receipt is not stopped.
+            r.d.stop(s, 7, nowMs); r.poll(103); CHECK(r.link.stops.size() == 1 && r.net.acks.size() == 1);
+        });
+    for (unsigned shape = 0; shape < 6; ++shape) scenario("Stop unavailable target / " + std::to_string(shape), [=] {
+        Rig r;
+        if (shape == 0) r.link.telemetry = false;
+        if (shape == 1) r.link.telemetryFresh = false;
+        if (shape == 2) r.link.status.motionBusy = true;
+        if (shape == 3) r.link.status.stationary = false;
+        if (shape == 4) std::strcpy(r.link.status.activeExecutionId, "invalid");
+        if (shape == 5) r.link.board = false;
+        r.d.stop(stop(), 7, nowMs); CHECK(r.link.stops.empty() && !admissionCalls && !crypto::calls);
+        CHECK(r.net.acks.size() == 1); stopAck(r.net.acks[0], stop(), false, "motion_state_unavailable");
+    });
+    scenario("Stop cancels ordinary; uncertain original is only queried", [] {
+        Rig r; const auto c = command(); r.start(c); blocked = "maintenance";
+        std::strcpy(r.link.status.activeExecutionId, executionA);
+        r.link.status.motionBusy = true; r.link.status.stationary = false;
+        r.d.stop(stop(), 7, nowMs); CHECK(r.link.stops.size() == 1 && r.link.cancellations == 1 && r.d.busy());
+        CHECK(admissionCalls == 1); r.link.stopState = StopSendState::Received; r.poll(101); r.poll(1101);
+        CHECK(r.link.commands.size() == 1 && r.link.queries.size() == 1 && r.net.acks.size() == 1);
+        r.link.completeQuery(known(c.request)); r.poll(1102); r.poll(1103);
+        CHECK(r.net.acks.size() == 2); ack(r.net.acks[1], c, true, "accepted");
+    });
+    scenario("unpublished ordinary acceptance never blocks independent Stop", [] {
+        Rig r; const auto c = command(); r.start(c); r.link.complete(result(c.request)); r.poll(101);
+        r.net.publishAvailable = false; r.poll(102); CHECK(r.d.resultPending());
+        const auto admissions = admissionCalls; blocked = "maintenance_active";
+        r.d.stop(stop(), 7, nowMs);
+        CHECK(r.link.stops.size() == 1 && admissionCalls == admissions && r.d.resultPending());
+    });
+    scenario("late Stop never rebinds from A to newer execution B", [] {
+        Rig r; const auto s = stop(); std::strcpy(r.link.status.activeExecutionId, executionA);
+        r.d.stop(s, 7, nowMs); std::strcpy(r.link.status.activeExecutionId, executionB);
+        r.poll(101); r.link.stopState = StopSendState::Received; r.poll(102); r.d.stop(s, 7, nowMs);
+        CHECK(r.link.stops.size() == 1); for (auto byte : r.link.stops[0].executionId) CHECK(byte == 0x11);
+        CHECK(!std::strcmp(r.link.status.activeExecutionId, executionB));
+    });
+    for (auto state : {StopSendState::Idle, StopSendState::TimedOut, StopSendState::Unavailable})
+        scenario("uncertain Stop receipt is not an acceptance or rejection / " + std::to_string(unsigned(state)), [=] {
+            Rig r; const auto s = stop(); r.d.stop(s, 7, nowMs); r.link.stopState = state;
+            r.poll(101); r.poll(10000); r.d.stop(s, 7, nowMs);
+            CHECK(r.net.acks.empty() && r.link.stops.size() == 1);
+        });
+    scenario("failed Stop receipt ACK retries original session without resending Stop", [] {
+        Rig r; const auto s = stop(); r.d.stop(s, 7, nowMs); r.net.publishAvailable = false;
+        r.link.stopState = StopSendState::Received; r.poll(101); r.poll(102);
+        CHECK(r.net.acks.size() == 2 && !r.net.acks.back().sent);
+        r.net.session.close(); CHECK(r.net.session.open(sessionB, 8, 102));
+        r.net.publishAvailable = true; r.poll(103); r.poll(104);
+        CHECK(r.net.acks.size() == 3 && r.net.acks.back().sent && r.link.stops.size() == 1);
+        for (const auto& a : r.net.acks) stopAck(a, s, true, "already_idle");
+    });
+    for (unsigned oldAck = 0; oldAck < 5; ++oldAck)
+        scenario("ACK waiting for network never gates new explicit Stop / " + std::to_string(oldAck), [=] {
+            Rig r; const auto old = stop(1); r.net.publishAvailable = false;
+            if (oldAck == 1) {
+                std::strcpy(r.link.status.activeExecutionId, executionA);
+                r.link.status.motionBusy = true; r.link.status.stationary = false;
+            }
+            if (oldAck == 2) r.link.telemetry = false;
+            if (oldAck == 3) r.link.allowStop = false;
+            if (oldAck == 4) nowMs = 5101;
+            r.d.stop(old, 7, nowMs);
+            if (oldAck < 2) { r.link.stopState = StopSendState::Received; r.poll(101); }
+            CHECK(r.net.acks.size() == 1 && !r.net.acks[0].sent);
+            const auto actionsBefore = r.link.stops.size();
+            r.link.telemetry = true; r.link.allowStop = true;
+            std::strcpy(r.link.status.activeExecutionId, executionB);
+            r.link.status.motionBusy = true; r.link.status.stationary = false;
+            blocked = "storage_fault"; const auto admissions = admissionCalls;
+            r.net.session.close(); CHECK(r.net.session.open(sessionB, 8, nowMs));
+            auto next = stop(2, nowMs); std::strcpy(next.session, sessionB);
+            r.d.stop(next, 8, nowMs);
+            CHECK(r.link.stops.size() == actionsBefore + 1 && admissionCalls == admissions);
+            for (auto byte : r.link.stops.back().executionId) CHECK(byte == 0x22);
+            r.net.publishAvailable = true; r.poll(++nowMs);
+            CHECK(r.net.acks.size() == 1); // Replaced informational ACK must not masquerade as new receipt.
+            r.link.stopState = StopSendState::Received; r.poll(++nowMs);
+            CHECK(r.net.acks.size() == 2 && r.net.acks.back().sent);
+            stopAck(r.net.acks.back(), next, true, "accepted");
+            r.d.stop(old, 7, nowMs); CHECK(r.link.stops.size() == actionsBefore + 1);
+        });
+    scenario("Stop busy rejection also consumes seq", [] {
+        Rig r; const auto first = stop(1); const auto busy = stop(2);
+        r.d.stop(first, 7, nowMs); r.d.stop(busy, 7, nowMs);
+        CHECK(r.link.stops.size() == 1 && r.net.acks.size() == 1); stopAck(r.net.acks[0], busy, false, "busy");
+        r.link.stopState = StopSendState::Received; r.poll(101); r.d.stop(busy, 7, nowMs);
+        CHECK(r.link.stops.size() == 1); r.d.stop(stop(3), 7, nowMs); CHECK(r.link.stops.size() == 2);
+    });
+    scenario("Stop recheck before request blocks elapsed original deadline", [] {
+        Rig r; clockHook = [] { nowMs = 5101; }; r.d.stop(stop(), 7, 100);
+        CHECK(r.link.stops.empty());
+    });
+    for (bool wrap : {false, true}) for (uint32_t age : {4999u, 5000u, 5001u})
+        scenario(std::string("Stop original TTL boundary / ") + (wrap ? "wrap / " : "linear / ") + std::to_string(age), [=] {
+            Rig r;
+            const uint32_t sampled = wrap ? UINT32_MAX - 100u : 100u;
+            auto s = stop(2, sampled);
+            if (wrap) {
+                CHECK(r.net.session.open(sessionB, 7, sampled - 100u));
+                std::strcpy(s.session, sessionB);
+            }
+            nowMs = sampled + age;
+            r.d.stop(s, 7, nowMs);
+            CHECK(r.link.stops.size() == (age <= 5000 ? 1u : 0u));
+            CHECK(admissionCalls == 0 && crypto::calls == 0);
+            if (age <= 5000) {
+                CHECK(r.net.acks.empty()); r.link.stopState = StopSendState::Received;
+                r.poll(nowMs + 1u); CHECK(r.net.acks.size() == 1);
+                stopAck(r.net.acks[0], s, true, "already_idle");
+            } else {
+                CHECK(r.net.acks.size() == 1);
+                stopAck(r.net.acks[0], s, false, "request_expired");
+            }
+        });
+    scenario("COUNTEREXAMPLE Stop clock expires between freshness and requestStop", [] {
+        Rig r; clockHook = [] { if (clockCalls >= 2) nowMs = 5101; };
+        r.d.stop(stop(), 7, 100); CHECK(r.link.stops.empty());
+    });
+    for (unsigned fault = 0; fault < 2; ++fault)
+        scenario("COUNTEREXAMPLE failed Stop local rejection ACK must retry / " + std::to_string(fault), [=] {
+            Rig r; const auto s = stop(); r.net.publishAvailable = false;
+            const char* reason = fault == 0 ? "motion_state_unavailable" : "busy";
+            if (fault == 0) r.link.telemetry = false;
+            if (fault == 1) r.link.allowStop = false;
+            r.d.stop(s, 7, nowMs); CHECK(r.net.acks.size() == 1);
+            r.net.publishAvailable = true; r.poll(101);
+            CHECK(r.net.acks.size() == 2 && r.net.acks.back().sent);
+            stopAck(r.net.acks.back(), s, false, reason);
+            CHECK(r.link.stops.empty());
+        });
+    scenario("Stop transmission owns single slot; failed newer busy reply cannot overwrite it", [] {
+        Rig r; const auto original = stop(1); const auto newer = stop(2);
+        r.net.publishAvailable = false; r.d.stop(original, 7, nowMs); r.d.stop(newer, 7, nowMs);
+        CHECK(r.link.stops.size() == 1 && r.net.acks.size() == 1 && !r.net.acks[0].sent);
+        stopAck(r.net.acks[0], newer, false, "busy");
+        r.net.publishAvailable = true; r.poll(101); CHECK(r.net.acks.size() == 1);
+        r.link.stopState = StopSendState::Received; r.poll(102);
+        CHECK(r.net.acks.size() == 2 && r.net.acks.back().sent);
+        stopAck(r.net.acks.back(), original, true, "already_idle");
+        r.d.stop(newer, 7, nowMs); CHECK(r.link.stops.size() == 1);
+    });
+}
+
+// Test-only telemetry view over the real UART core, not ControllerLink/main or
+// a synthetic result/state setter. No BrainNetwork worker/broker is involved.
+struct TelemetryLink : ReadOnlyLink {
+    const Status* lastTelemetry() const { return freshStatus(nowMs) ? &peerStatus() : nullptr; }
+    uint32_t lastTelemetryReceivedAtMs() const { return peerStatusReceivedAtMs(); }
+};
+v4::Pairing pairing(v4::Role role) {
+    v4::Pairing p; p.role = role; std::strcpy(p.deviceId, device); std::strcpy(p.epoch, sessionA);
+    std::strcpy(p.localPhysicalId, role == v4::Role::Brain ? "112233445566" : "aabbccddeeff");
+    std::strcpy(p.peerPhysicalId, role == v4::Role::Brain ? "aabbccddeeff" : "112233445566");
+    return p;
+}
+ProductContext context() {
+    ProductContext c; std::strcpy(c.deviceId, device); c.profileVersion = 10;
+    std::strcpy(c.babyId, "original-baby"); std::strcpy(c.babyName, "Original baby");
+    std::strcpy(c.formulaBrand, "Original formula"); c.waterMl = 120; c.temperatureC = 40; c.powderGPer100Ml = 13.5f;
+    CHECK(validProductContext(c)); return c;
+}
+MotionStateStore* motionStore = nullptr;
+bool motionAccepts = true;
+unsigned commandCalls = 0, queryCalls = 0, stopCalls = 0, unknownQueryCalls = 0;
+CommandMessage receivedCommand;
+v4::StopRequest receivedStop;
+bool commandHandler(const CommandMessage& c, uint32_t, CommandResult& output) {
+    ++commandCalls; receivedCommand = c; CHECK(motionStore);
+    CHECK(motionStore->recordDecision(c.request, motionAccepts, motionAccepts ? "accepted" : "not_ready",
+                                     motionAccepts ? executionA : nullptr) == MotionWrite::Stored);
+    output = result(c.request, motionAccepts); return true;
+}
+bool queryHandler(const ResultQuery& q, QueriedResult& output) {
+    ++queryCalls; CHECK(motionStore);
+    const bool answered = queryMotionResult(*motionStore, q, output);
+    if (answered && output.status == ResultQueryStatus::Unknown) ++unknownQueryCalls;
+    return answered;
+}
+bool stopHandler(const v4::StopRequest& s, uint32_t) { ++stopCalls; receivedStop = s; return true; }
+struct ShortWire : v4::ByteSink {
+    std::vector<uint8_t> bytes;
+    v4::Parser observer;
+    unsigned writes = 0, shorts = 0, zeros = 0, commands = 0, results = 0, queries = 0, stops = 0;
+    bool idle() const override { return bytes.empty(); }
+    size_t available() const override { return 128 - bytes.size(); }
+    size_t write(const uint8_t* data, size_t length) override {
+        CHECK(length <= available()); const size_t take = (++writes % 5) ? std::min(length, size_t(17)) : 0;
+        if (take < length) ++shorts;
+        if (!take) ++zeros;
+        bytes.insert(bytes.end(), data, data + take); return take;
+    }
+    void deliver(ReadOnlyLink& peer, bool drop = false) {
+        for (const auto byte : bytes) {
+            v4::Frame f;
+            if (observer.push(byte, nowMs, f) && !f.offset) {
+                if (f.kind == v4::Kind::Command) ++commands;
+                if (f.kind == v4::Kind::CommandResult || f.kind == v4::Kind::Result) ++results;
+                if (f.kind == v4::Kind::ResultQuery) ++queries;
+                if (f.kind == v4::Kind::Stop) ++stops;
+            }
+            if (!drop) peer.receive(byte, nowMs);
+        }
+        bytes.clear();
+    }
+};
+void production() {
+    scenario("production default unbegun noBoard cannot send commands or Stop", [] {
+        TelemetryLink brain; FakeNetwork net; ShortWire wire;
+        babytech::brain::BrainCloudDispatcher<TelemetryLink, FakeNetwork> d(brain, net, clockNow, admission);
+        d.command(command(), 7, nowMs); d.stop(stop(), 7, nowMs); d.poll(nowMs); brain.poll(nowMs, wire);
+        CHECK(!brain.configured() && !brain.connected(nowMs) && !brain.lastTelemetry());
+        CHECK(brain.commandSendState() == CommandSendState::Idle && brain.stopSendState() == StopSendState::Idle);
+        CHECK(!wire.writes && !d.busy() && net.acks.size() == 2);
+        ack(net.acks[0], command(), false, "link_lost");
+        stopAck(net.acks[1], stop(), false, "motion_state_unavailable");
+    });
+    for (unsigned mode = 0; mode < 5; ++mode)
+        scenario("production dual-peer codec/short UART + real Store / " + std::to_string(mode), [=] {
+            motionAccepts = mode != 1; commandCalls = queryCalls = stopCalls = unknownQueryCalls = 0;
+            MotionStateStore store; const auto c = context();
+            CHECK(store.installInitial(pairing(v4::Role::Motion), &c) == MotionWrite::Stored);
+            nvs::reboot(); MotionStateStore loaded;
+            CHECK(loaded.load(pairing(v4::Role::Motion)) == MotionLoad::Ready); motionStore = &loaded;
+            BrainStateStore brainStore;
+            if (mode == 3) {
+                // Seed durable evidence independently of the canceled Cloud request.
+                const auto historical = command(ProductCommand::ResetError, 5);
+                CHECK(loaded.recordDecision(historical.request, false, "not_ready") == MotionWrite::Stored);
+                CHECK(brainStore.installInitial(pairing(v4::Role::Brain), &c) == BrainWrite::Stored);
+                auto local = command(ProductCommand::Clean).request;
+                local.source = v4::Source::LocalTouch;
+                CHECK(makeLocalCommandId(pairing(v4::Role::Brain), local.sequence, local.commandId));
+                CHECK(brainStore.reserveLocal(local) == BrainWrite::Stored);
+                CHECK(brainStore.state().pending && loaded.state().cloudSequence == 5);
+            }
+            const auto durableBrain = brainStore.state(); const auto durableMotion = loaded.state();
+            TelemetryLink brain; ReadOnlyLink motion; ShortWire toMotion, toBrain; Status status;
+            status.stationary = true;
+            CHECK(brain.begin(pairing(v4::Role::Brain), 101) && motion.begin(pairing(v4::Role::Motion), 202));
+            CHECK(motion.setCommandHandler(commandHandler) && motion.setResultQueryHandler(queryHandler));
+            CHECK(motion.setStopHandler(stopHandler));
+            auto step = [&](bool publishStatus = false, bool dropReply = false) {
+                status.sampleUptimeMs = nowMs;
+                brain.poll(nowMs, toMotion); motion.poll(nowMs, toBrain, publishStatus ? &status : nullptr);
+                toMotion.deliver(motion); toBrain.deliver(brain, dropReply); ++nowMs;
+            };
+            for (unsigned tick = 0; tick < 400; ++tick) step(mode >= 3);
+            CHECK(brain.connected(nowMs) && motion.connected(nowMs));
+            if (mode < 3) CHECK(!brain.lastTelemetry());
+            else CHECK(brain.lastTelemetry());
+            FakeNetwork net; babytech::brain::BrainCloudDispatcher<TelemetryLink, FakeNetwork> d(brain, net, clockNow, admission);
+            const auto request = command(ProductCommand::Prepare, mode == 3 ? 11 : 1, nowMs - 123);
+            const uint32_t issued = nowMs;
+            const auto callsBefore = nvs::io.calls.size();
+            const auto diskBefore = nvs::io.disk;
+            const auto setsBefore = nvs::count(nvs::Op::Set), commitsBefore = nvs::count(nvs::Op::Commit);
+            if (mode != 4) { d.command(request, 7, nowMs); CHECK(d.busy()); }
+            if (mode >= 3) {
+                const auto s = stop(mode == 3 ? 12 : 2, nowMs); blocked = "storage_fault"; const auto beforeAdmission = admissionCalls;
+                d.stop(s, 7, nowMs); CHECK(admissionCalls == beforeAdmission);
+                for (unsigned tick = 0; tick < 300 && !stopCalls; ++tick) { step(true); d.poll(nowMs); }
+                CHECK(stopCalls == 1 && toMotion.stops == 1 && receivedStop.scope == v4::StopScope::Idle);
+                for (unsigned tick = 0; tick < 300 && net.acks.empty(); ++tick) { step(true); d.poll(nowMs); }
+                CHECK(net.acks.size() == 1); stopAck(net.acks[0], s, true, "already_idle");
+                CHECK(commandCalls == 0 && nvs::io.calls.size() == callsBefore);
+                if (mode == 3) {
+                    for (unsigned tick = 0; tick < 2400; ++tick) { step(true); d.poll(nowMs); }
+                    CHECK(d.busy() && queryCalls >= 1 && unknownQueryCalls == queryCalls);
+                    CHECK(commandCalls == 0 && toMotion.commands == 0 && net.acks.size() == 1);
+                    CHECK(uint32_t(nowMs - request.sampledAtMs) <= request.ttlMs);
+                    for (unsigned tick = 0; tick < 8000 && d.busy(); ++tick) {
+                        step(true); d.poll(nowMs);
+                        if (uint32_t(nowMs - request.sampledAtMs) <= request.ttlMs) CHECK(d.busy());
+                    }
+                    CHECK(!d.busy() && !d.resultPending() && net.acks.size() == 1);
+                    CHECK(brain.connected(nowMs) && brain.lastTelemetry());
+                    CHECK(uint32_t(brain.lastTelemetryReceivedAtMs() - request.sampledAtMs) > request.ttlMs);
+                    CHECK(uint32_t(nowMs - brain.lastTelemetryReceivedAtMs()) < 1500);
+                    CHECK(commandCalls == 0 && toMotion.commands == 0 && unknownQueryCalls == queryCalls);
+                    CHECK(nvs::io.calls.size() == callsBefore && nvs::io.disk == diskBefore);
+                    CHECK(nvs::count(nvs::Op::Set) == setsBefore && nvs::count(nvs::Op::Commit) == commitsBefore);
+                    CHECK(sameBrainState(brainStore.state(), durableBrain) && brainStore.state().pending);
+                    CHECK(sameMotionState(loaded.state(), durableMotion) && loaded.state().cloudSequence == 5);
+                    auto replay = request; replay.sampledAtMs = nowMs;
+                    d.command(replay, 7, nowMs); CHECK(!d.busy() && net.acks.size() == 1);
+                    auto conflict = replay; conflict.request.sequence = 13;
+                    d.command(conflict, 7, nowMs);
+                    CHECK(net.acks.size() == 2); ack(net.acks[1], conflict, false, "request_conflict");
+                    CHECK(nvs::io.calls.size() == callsBefore && nvs::io.disk == diskBefore);
+                    blocked = nullptr;
+                    const auto next = command(ProductCommand::Prepare, 14, nowMs);
+                    d.command(next, 7, nowMs); d.command(next, 7, nowMs);
+                    CHECK(d.busy() && commandCalls == 0 && nvs::io.calls.size() == callsBefore);
+                    for (unsigned tick = 0; tick < 4500 && (d.busy() || d.resultPending()); ++tick) {
+                        step(true); d.poll(nowMs);
+                    }
+                    CHECK(!d.busy() && !d.resultPending() && commandCalls == 1 && toMotion.commands == 1);
+                    CHECK(net.acks.size() == 3); ack(net.acks[2], next, true, "accepted");
+                    CHECK(sameProductRequest(receivedCommand.request, next.request));
+                    CHECK(loaded.state().cloudSequence == 14 && loaded.state().slot.kind == MotionSlotKind::Intent);
+                    CHECK(nvs::count(nvs::Op::Set) == setsBefore + 1 && nvs::count(nvs::Op::Commit) == commitsBefore + 1);
+                    CHECK(nvs::io.disk != diskBefore && sameBrainState(brainStore.state(), durableBrain));
+                    const auto afterNew = nvs::io.disk; const auto afterCalls = nvs::io.calls.size();
+                    d.command(next, 7, nowMs); d.command(request, 7, nowMs);
+                    for (unsigned tick = 0; tick < 400; ++tick) { step(true); d.poll(nowMs); }
+                    CHECK(commandCalls == 1 && toMotion.commands == 1 && net.acks.size() == 3);
+                    CHECK(nvs::io.disk == afterNew && nvs::io.calls.size() == afterCalls);
+                }
+            } else {
+                for (unsigned tick = 0; tick < 4500 && (d.busy() || d.resultPending()); ++tick) {
+                    const bool drop = mode == 2 && uint32_t(nowMs - issued) < 900;
+                    step(false, drop); d.poll(nowMs);
+                    if (mode == 2 && commandCalls) net.session.close();
+                }
+                CHECK(commandCalls == 1 && toMotion.commands == 1 && !d.busy() && !d.resultPending());
+                CHECK(net.acks.size() == 1); ack(net.acks[0], request, motionAccepts, motionAccepts ? "accepted" : "not_ready");
+                CHECK(sameProductRequest(receivedCommand.request, request.request));
+                CHECK(receivedCommand.remainingTtlMs > 0 && receivedCommand.remainingTtlMs <= 5000 - 123 - 50);
+                CHECK(queryCalls == (mode == 2 ? 1u : 0u));
+                CHECK(toMotion.queries == queryCalls);
+                const auto disk = nvs::io.disk; const auto calls = nvs::io.calls.size();
+                for (unsigned tick = 0; tick < 400; ++tick) { step(); d.poll(nowMs); }
+                CHECK(commandCalls == 1 && nvs::io.disk == disk && nvs::io.calls.size() == calls);
+                // Result lookup must be read-only even after serialized reboot.
+                nvs::reboot(); MotionStateStore rebooted;
+                CHECK(rebooted.load(pairing(v4::Role::Motion)) == MotionLoad::Ready);
+                const auto q = known(request.request); QueriedResult answer;
+                CHECK(queryMotionResult(rebooted, q.query, answer) && answer.status == ResultQueryStatus::Known);
+                CHECK(answer.accepted == motionAccepts && !std::strcmp(answer.requestDigestHex, q.requestDigestHex));
+            }
+            CHECK(toMotion.shorts && toBrain.shorts && toMotion.zeros && toBrain.zeros);
+            std::printf("  UART commands=%u queries=%u results=%u stops=%u handlers=%u/%u/%u\n",
+                        toMotion.commands, toMotion.queries, toBrain.results, toMotion.stops, commandCalls, queryCalls, stopCalls);
+            motionStore = nullptr;
+        }, true);
+}
+} // namespace
+
+int main(int argc, char** argv) {
+    const std::string selected = argc == 2 ? argv[1] : "all";
+    const struct { const char* name; void (*run)(); } groups[] = {
+        {"basics", basics}, {"freshness", freshness}, {"admission", admissionAndReplay},
+        {"results", results}, {"expired", expiredUnknown}, {"replies", replyRetries},
+        {"stops", stops}, {"production", production}};
+    bool found = selected == "all";
+    for (const auto& g : groups) if (selected == "all" || selected == g.name) { found = true; g.run(); }
+    if (!found || argc > 2) { std::fprintf(stderr, "Unknown test group\n"); return 2; }
+    std::printf("Brain cloud dispatcher: %u scenarios, %u passed, %u failed; mbedTLS SHA major %d\n",
+                scenarios, scenarios - failures, failures, MBEDTLS_VERSION_MAJOR);
+    std::puts("LIMIT: component tests only; not real main/broker/Network worker/Flash/CAN or stationary proof");
+    return failures ? 1 : 0;
+}

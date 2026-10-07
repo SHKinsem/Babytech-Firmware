@@ -83,7 +83,7 @@ class SourceArchiveTest(unittest.TestCase):
                          "test_pairing_record.py", "test_board_arduino.py", "test_board_discovery.py",
                          "test_motion_export_snapshot.py", "test_board_export_transfer.py",
                          "test_board_maintenance.py",
-                         "test_board_install.py", "test_motion_install.py", "test_brain_installer.py", "test_brain_pending_recovery.py",
+                         "test_board_install.py", "test_motion_install.py", "test_brain_installer.py", "test_brain_pending_recovery.py", "test_brain_cloud_dispatcher.py",
                          "test_cloud_contract.py", "test_cloud_session.py", "test_cloud_link.py",
                          "test_brain_network.py", "test_brain_station.py", "test_brain_controller.py",
                          "prepare_board_pairing.py", "test_pairing_store.py",
@@ -94,6 +94,7 @@ class SourceArchiveTest(unittest.TestCase):
                          "test_brain_network_console.py", "configure_brain_network.py"):
                 self.assertTrue((extracted / "tools" / name).is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ReadOnlyBoardLink.cpp").is_file())
+            self.assertTrue((extracted / "main-controller/src/brain_cloud_dispatcher.h").is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ProductResultQuery.cpp").is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ProductResultQuery.h").is_file())
             self.assertTrue((extracted / "shared/BabytechDisplayCore/src/generated/feeding_flow_ui.h").is_file())

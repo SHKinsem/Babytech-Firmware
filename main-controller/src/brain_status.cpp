@@ -42,42 +42,43 @@ bool encodeStatusJson(const JsonDocument& document, char* output, size_t capacit
 
 void writeStatus(JsonObject out, const char* deviceId, const char* firmwareVersion,
                  const boardlink::Status* last, bool connected,
-                 const cloud::SessionSnapshot& session, const char* challenge) {
+                 const cloud::SessionSnapshot& session, const char* challenge,
+                 bool commandsEnabled, bool canStart) {
     connected = connected && last;
+    commandsEnabled = commandsEnabled && connected;
+    canStart = canStart && commandsEnabled;
     const bool knownError = last && std::strcmp(last->productError, "NONE") != 0;
     const char* progress = connected ? last->productProgress : knownError ? "error" : "noready";
-    // This integration stage is read-only; do not advertise Ready to old App
-    // versions that do not yet consume can_start/commands_enabled.
-    if (!std::strcmp(progress, "ready")) progress = "noready";
+    // Old App versions also use progress, so Ready needs explicit start permission.
+    if (!canStart && !std::strcmp(progress, "ready")) progress = "noready";
     out["device_id"] = deviceId;
     out["firmware_mode"] = "cloud";
     out["firmware_version"] = firmwareVersion;
     out["hardware_profile"] = "real";
     out["topic_mode"] = "namespaced";
     out["command_protocol"] = 4;
-    out["commands_enabled"] = false;
+    out["commands_enabled"] = commandsEnabled;
     out["command_session"] = session.id;
     out["device_uptime_ms"] = session.uptimeMs;
     if (challenge) out["command_session_challenge"] = challenge;
     out["motion_connected"] = connected;
     out["motion_status_stale"] = !connected;
     out["progress"] = progress;
-    out["can_start"] = false;
+    out["can_start"] = canStart;
     out["is_preparing"] = last && last->isPreparing;
     out["error_code"] = knownError ? last->productError : "NONE";
     out["error_message"] = knownError ? "Motion requires inspection or initialization" : "";
     out["powder_recipe_version"] = 2;
     out["thermal_simulated"] = !last || last->snapshot.thermalSimulated;
     out["measured_water_temp"] = nullptr;
+    out["water_temp"] = nullptr;
     out["is_water_ready"] = false;
     out["is_heating"] = false;
     out["is_cooling"] = false;
     if (connected) {
         out["target_temp"] = last->snapshot.temperatureC;
-        out["water_temp"] = last->snapshot.temperatureC;
     } else {
         out["target_temp"] = nullptr;
-        out["water_temp"] = nullptr;
     }
     const bool waterValid = connected && last->lowWaterValid;
     out["water_status"] = waterValid ? (last->lowWater ? "low" : "normal") : "unknown";
@@ -102,7 +103,7 @@ void writeStatus(JsonObject out, const char* deviceId, const char* firmwareVersi
     out["actuator_dosing_stub"] = true;
     out["actuator_schema_version"] = 0;
     out["actuator_profile_revision"] = 0;
-    out["actuator_issue"] = connected ? "read_only_integration" : "motion_link_lost";
+    out["actuator_issue"] = connected ? (commandsEnabled ? "" : "read_only_integration") : "motion_link_lost";
     out["feeding_context_configured"] = connected && last->feedingContextConfigured;
     out["feeding_context_baby_id"] = last ? last->babyId : "";
     out["feeding_context_baby_name"] = last ? last->snapshot.babyName.data() : "";

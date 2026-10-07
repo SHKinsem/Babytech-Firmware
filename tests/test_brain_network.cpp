@@ -59,17 +59,18 @@ void begin(BrainNetwork& network, const char* id = kId) {
     check(fake::io.preferenceOpens == std::vector<std::pair<std::string, bool>>{{"cloudcfg", true}},
           "CloudLink did not read cloudcfg read-only");
 }
-void pollAt(BrainNetwork& network, const Status* motion, bool fresh, uint32_t receivedAt) {
+void pollAt(BrainNetwork& network, const Status* motion, bool fresh, uint32_t receivedAt,
+            bool commandsEnabled = false, bool canStart = false) {
     // vTaskDelay yields to a simulated UI loop, not a second worker invocation.
     const bool worker = fake::io.inWorker;
     fake::io.inWorker = false;
-    network.poll(motion, fresh, millis(), receivedAt);
+    network.poll(motion, fresh, millis(), receivedAt, commandsEnabled, canStart);
     fake::io.inWorker = worker;
 }
 void poll(BrainNetwork& network, const Status* motion = nullptr, bool fresh = false) {
     pollAt(network, motion, fresh, millis());
 }
-DynamicJsonDocument packet(size_t index) {
+DynamicJsonDocument packet(size_t index, bool commandsEnabled = false, bool canStart = false) {
     check(index < fake::io.published.size(), "missing status packet");
     const auto& value = fake::io.published[index];
     check(value.topic == kPrefix + "status" && !value.retained, "unexpected publish route/retained flag");
@@ -77,8 +78,8 @@ DynamicJsonDocument packet(size_t index) {
     DynamicJsonDocument doc(8192);
     check(!deserializeJson(doc, value.payload), "status payload is not JSON");
     check(doc["device_id"] == kId && doc["command_protocol"] == 4, "status identity/protocol mismatch");
-    check(doc["can_start"] == false && doc["commands_enabled"] == false,
-          "read-only status advertised command authorization");
+    check(doc["can_start"] == canStart && doc["commands_enabled"] == commandsEnabled,
+          "status command/start authorization flags incorrect");
     return doc;
 }
 std::string token(size_t index = 0) {
@@ -460,7 +461,7 @@ std::vector<size_t> ackPackets() {
 }
 void commandAck(size_t index, const std::string& action, const std::string& session,
                 const char* reason = "integration_not_ready", const std::string& sequence = "42",
-                const std::string& id = "cloud-test") {
+                const std::string& id = "cloud-test", bool accepted = false) {
     check(index < fake::io.published.size(), "missing command ACK");
     const auto& value = fake::io.published[index];
     check(value.topic == kPrefix + "ack" && !value.retained, "ACK route/retained flag incorrect");
@@ -472,7 +473,117 @@ void commandAck(size_t index, const std::string& action, const std::string& sess
     check(doc["command_seq"].is<JsonString>() && doc["command_seq"] == sequence,
           "ACK sequence is not the exact decimal string");
     check(doc["command_session"] == session && doc["accepted"].is<bool>() &&
-          doc["accepted"] == false && doc["reason"] == reason, "ACK session/result/reason incorrect");
+          doc["accepted"] == accepted && doc["reason"] == reason, "ACK session/result/reason incorrect");
+}
+
+struct HandlerCapture {
+    BrainNetwork* network;
+    std::vector<babytech::boardlink::CloudCommand> commands;
+    std::vector<babytech::boardlink::CloudStop> stops;
+    std::vector<uint32_t> generations;
+    std::vector<uint32_t> times;
+    bool expireInsideHandler = false;
+    babytech::cloud::Freshness finalFreshness = babytech::cloud::Freshness::Disconnected;
+
+    explicit HandlerCapture(BrainNetwork& owner) : network(&owner) {}
+    void checkEntry(const char* session, uint32_t generation, uint32_t sampledAt, uint16_t ttl, uint32_t now) {
+        check(!fake::io.inWorker, "product handler ran on MQTT worker instead of UI caller");
+        check(now == millis(), "handler did not receive poll clock");
+        const auto freshness = network->checkFreshness(session, generation, sampledAt, ttl);
+        check(freshness == babytech::cloud::Freshness::Current || freshness == babytech::cloud::Freshness::Expired,
+              "product handler received untrusted session/generation");
+        generations.push_back(generation);
+        times.push_back(now);
+        if (expireInsideHandler) fake::io.now = sampledAt + 5001u;
+        finalFreshness = network->checkFreshness(session, generation, sampledAt, ttl);
+    }
+    static void command(void* context, const babytech::boardlink::CloudCommand& value,
+                        uint32_t generation, uint32_t now) {
+        auto& self = *static_cast<HandlerCapture*>(context);
+        self.checkEntry(value.session, generation, value.sampledAtMs, value.ttlMs, now);
+        self.commands.push_back(value);
+    }
+    static void stopCommand(void* context, const babytech::boardlink::CloudStop& value,
+                            uint32_t generation, uint32_t now) {
+        auto& self = *static_cast<HandlerCapture*>(context);
+        self.checkEntry(value.session, generation, value.sampledAtMs, value.ttlMs, now);
+        self.stops.push_back(value);
+    }
+    size_t count() const { return commands.size() + stops.size(); }
+    void install() { network->setProductHandlers(command, stopCommand, this); }
+};
+
+void productHandler(const std::string& fixture) {
+    const size_t split = fixture.find('-');
+    const std::string action = fixture.substr(0, split);
+    const std::string mode = fixture.substr(split + 1);
+    const bool isStop = action == "stop";
+    const bool dispatch = mode == "current" || mode == "age5000" || mode == "deadline" || mode == "expired";
+    BrainNetwork network;
+    HandlerCapture capture(network);
+    capture.install();
+    if (mode == "missing") network.setProductHandlers(isStop ? HandlerCapture::command : nullptr,
+                                                      isStop ? nullptr : HandlerCapture::stopCommand, &capture);
+    if (mode == "unregister") network.setProductHandlers(nullptr, nullptr, nullptr);
+    capture.expireInsideHandler = mode == "deadline";
+    begin(network);
+    const std::string id = std::string(125, 'x') + "\"\\\n";
+    const std::string sequence = "9223372036854775807";
+    std::string session, input;
+    uint32_t sample = 0;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            session = token();
+            sample = millis();
+            input = cloudCommand(action, mode == "wrong" ? kChallenge : session, sample, sequence, id);
+            fake::io.incoming.push_back({kPrefix + "command", input});
+        } else if (tick == 3) {
+            check(capture.count() == 0 && ackPackets().empty(), "MQTT callback invoked handler or published early ACK");
+            if (mode == "age5000") fake::io.now = sample + 5000u;
+            if (mode == "expired") fake::io.now = sample + 5001u;
+            const auto sends = fake::io.queueSendCalls;
+            poll(network);
+            const bool rejected = mode == "missing" || mode == "unregister";
+            check(fake::io.queueSendCalls == sends + (rejected ? 1u : 0u),
+                  "handler path emitted premature ACK or lost read-only rejection");
+            check(capture.count() == (dispatch ? 1u : 0u), "wrong handler dispatch count");
+            if (dispatch) {
+                check(capture.generations.size() == 1 && capture.generations[0] != 0,
+                      "handler generation missing");
+                if (isStop) {
+                    const auto& stop = capture.stops.front();
+                    check(stop.deviceId == std::string(kId) && stop.commandId == id &&
+                          stop.sequence == babytech::v4::kMaxSequence && stop.session == session &&
+                          stop.sampledAtMs == sample && stop.ttlMs == 5000, "Stop handler input lost original envelope");
+                } else {
+                    babytech::boardlink::CloudCommand expected;
+                    check(babytech::boardlink::decodeCloudCommand(reinterpret_cast<const uint8_t*>(input.data()),
+                              input.size(), kId, expected), "handler fixture was not production-decodable");
+                    const auto& command = capture.commands.front();
+                    check(babytech::boardlink::sameProductRequest(command.request, expected.request) &&
+                          command.session == session && command.sampledAtMs == sample && command.ttlMs == 5000,
+                          "ordinary handler lost original identity/frozen recipe");
+                }
+                check(capture.finalFreshness == (mode == "deadline" || mode == "expired" ? babytech::cloud::Freshness::Expired :
+                      babytech::cloud::Freshness::Current), "runtime deadline recheck did not use production clock");
+                check(network.checkFreshness(session.c_str(), capture.generations[0], sample, 4999) ==
+                      babytech::cloud::Freshness::InvalidTtl, "runtime freshness wrapper ignored invalid TTL");
+            }
+            const auto after = fake::io.queueSendCalls;
+            poll(network);
+            check(capture.count() == (dispatch ? 1u : 0u) && fake::io.queueSendCalls == after,
+                  "drained handler request dispatched/ACKed twice");
+        } else {
+            const auto acks = ackPackets();
+            const bool rejected = mode == "missing" || mode == "unregister";
+            check(acks.size() == (rejected ? 1u : 0u), "handler produced fabricated or duplicate ACK");
+            if (rejected) commandAck(acks.front(), action, session,
+                mode == "expired" ? "request_expired" : "integration_not_ready", sequence, id);
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
 }
 
 void commandAccepted(const std::string& action, bool maximum) {
@@ -608,8 +719,10 @@ std::vector<std::string> invalidCommands(const std::string& action, const std::s
     return rejected;
 }
 
-void commandRejected(const std::string& action) {
+void commandRejected(const std::string& action, bool handlers = false) {
     BrainNetwork network;
+    HandlerCapture capture(network);
+    if (handlers) capture.install();
     begin(network);
     std::string session;
     fake::io.onDelay = [&](unsigned tick) {
@@ -632,8 +745,10 @@ void commandRejected(const std::string& action) {
             poll(network);
         } else {
             const auto acks = ackPackets();
-            check(acks.size() == 1 && fake::io.published.size() == 2, "invalid commands leaked ACK/output");
-            commandAck(acks.front(), action, session);
+            check(acks.size() == (handlers ? 0u : 1u) && fake::io.published.size() == (handlers ? 1u : 2u),
+                  "invalid commands leaked ACK/output");
+            check(capture.count() == (handlers ? 1u : 0u), "invalid commands reached product handler");
+            if (!handlers) commandAck(acks.front(), action, session);
             noSideEffects(); workerOnly(); stop();
         }
     };
@@ -709,6 +824,181 @@ void commandGeneration(const std::string& fixture) {
             const auto acks = ackPackets();
             check(acks.size() == 1 && fake::io.published.size() == 3, "new session failed to recover command ACKs");
             commandAck(acks.front(), action, current);
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void handlerGeneration(const std::string& fixture) {
+    const bool isStop = fixture.compare(0, 5, "stop-") == 0;
+    const std::string action = isStop ? "stop" : "clean";
+    const bool deferred = fixture.substr(isStop ? 5 : 6) == "deferred";
+    BrainNetwork network;
+    HandlerCapture capture(network);
+    capture.install();
+    begin(network);
+    std::string previous, current;
+    uint32_t sample = 0;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            previous = token();
+            sample = millis();
+            receive("command", cloudCommand(action, previous, sample));
+            poll(network);
+            check(capture.count() == 1, "initial handler generation not observed");
+            if (deferred) fake::io.deferNextQueueSend = true;
+            receive("command", cloudCommand(action, previous, sample, "43", "old-queued"));
+            fake::io.clients.front()->dropConnection();
+            fake::io.now += 5000u;
+        } else if (tick == 3) {
+            check(network.connected() && fake::io.connectCalls == 2, "handler generation test did not reconnect");
+            if (deferred) fake::completeDeferredSends();
+            poll(network);
+            check(capture.count() == 1, "old-generation queued command reached handler");
+        } else if (tick == 4) {
+            current = token(1);
+            check(current != previous && ackPackets().empty(), "old-generation command leaked ACK/reused session");
+            check(network.checkFreshness(previous.c_str(), capture.generations[0], sample, 5000) ==
+                  babytech::cloud::Freshness::WrongSession, "runtime old-generation freshness incorrectly Current");
+            receive("command", cloudCommand(action, previous, millis()));
+            poll(network);
+            check(capture.count() == 1, "old session with current inbound generation dispatched");
+            receive("command", cloudCommand(action, current, millis(), "44", "new-current"));
+            poll(network);
+            check(capture.count() == 2 && capture.generations[0] != capture.generations[1],
+                  "new-generation handler did not recover/pass original generation");
+            poll(network);
+        } else {
+            check(capture.count() == 2 && ackPackets().empty(), "handler generation produced duplicate dispatch/early ACK");
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void runtimeAck(const std::string& mode) {
+    BrainNetwork network;
+    HandlerCapture capture(network);
+    capture.install();
+    check(!network.publishAck("original", "clean", 42, kChallenge, true, "accepted"),
+          "unstarted runtime ACK accepted");
+    begin(network);
+    std::string session;
+    const std::string id = std::string(125, 'x') + "\"\\\n";
+    const char* reason = mode == "rejected" ? "busy" : mode == "boolean" ? "ack_timeout" : "accepted";
+    const bool accepted = mode != "rejected";
+    const bool reconnect = mode == "reconnect" || mode == "offline" || mode == "deferred";
+    bool retry = false;
+    const auto publish = [&] {
+        const bool worker = fake::io.inWorker;
+        fake::io.inWorker = false;
+        const bool result = network.publishAck(id.c_str(), "clean", babytech::v4::kMaxSequence,
+                                               session.c_str(), accepted, reason);
+        fake::io.inWorker = worker;
+        return result;
+    };
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            session = token();
+            receive("command", cloudCommand("clean", session, millis(), "9223372036854775807", id));
+            poll(network);
+            check(capture.count() == 1 && ackPackets().empty(), "runtime result preceded real handler receipt");
+            if (reconnect) {
+                if (mode == "deferred") {
+                    fake::io.deferNextQueueSend = true;
+                    check(publish(), "deferred original ACK did not enqueue");
+                }
+                if (mode == "offline") {
+                    WiFi.state = 0;
+                    return;
+                }
+                fake::io.clients.front()->dropConnection();
+                fake::io.now += 5000u;
+            } else if (mode == "full") {
+                for (unsigned i = 0; i < 8; ++i) { receive("config", probe(session)); poll(network); }
+                check(!publish(), "full real outbound queue accepted original result ACK");
+                retry = true;
+            } else {
+                fake::io.now += 5001u;
+                check(network.checkFreshness(session.c_str(), capture.generations[0],
+                      capture.commands[0].sampledAtMs, 5000) == babytech::cloud::Freshness::Expired,
+                      "runtime result test did not exceed original deadline");
+                check(publish(), "determined result rejected by new-action TTL");
+            }
+        } else if (tick == 3 && mode == "offline") {
+            check(!network.connected() && !publish(), "offline ACK not reported false to retaining caller");
+            check(ackPackets().empty(), "offline runtime ACK leaked");
+            connectedWifi();
+        } else if (tick == (mode == "offline" ? 4u : 3u) && reconnect) {
+            check(network.connected() && fake::io.connectCalls == 2, "runtime result test did not reconnect");
+            if (mode == "deferred") fake::completeDeferredSends();
+            poll(network);
+            check(network.checkFreshness(session.c_str(), capture.generations[0],
+                  capture.commands[0].sampledAtMs, 5000) == babytech::cloud::Freshness::WrongSession,
+                  "old runtime result still qualifies as new action");
+            check(publish(), "original result cannot publish on current transport generation");
+        } else if (tick == 3 && mode == "full") {
+            check(retry && ackPackets().empty() && publish(), "retained ACK could not retry after queue drain");
+        } else if ((mode != "full" && tick >= (mode == "offline" || mode == "deferred" ? 5u : reconnect ? 4u : 3u)) ||
+                   (mode == "full" && tick == 8)) {
+            const auto acks = ackPackets();
+            check(acks.size() == 1, "runtime original result ACK lost/duplicated");
+            commandAck(acks.front(), "clean", session, reason, "9223372036854775807", id, accepted);
+            if (reconnect) check(token(1) != session, "reconnect ACK changed old session into new one");
+            check(capture.count() == 1, "retained original result replayed action");
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void ackValidation() {
+    BrainNetwork network;
+    begin(network);
+    std::string session;
+    const std::string maxReason(64, 'R');
+    const std::string maxId(128, '\x01');
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            session = token();
+            const auto invalid = [&](const char* id, const char* command, uint64_t seq, const char* original,
+                                      const char* reason) {
+                const auto sends = fake::io.queueSendCalls;
+                check(!network.publishAck(id, command, seq, original, false, reason) &&
+                      fake::io.queueSendCalls == sends, "invalid runtime ACK enqueued/truncated fields");
+            };
+            std::array<char, 129> unterminatedId; unterminatedId.fill('x');
+            std::array<char, 65> unterminatedReason; unterminatedReason.fill('r');
+            for (const char* id : {static_cast<const char*>(nullptr), "", static_cast<const char*>(unterminatedId.data()), "\xc0\xaf"})
+                invalid(id, "clean", 42, session.c_str(), "busy");
+            for (const char* name : {static_cast<const char*>(nullptr), "", "initialize", "reset", "Clean", "stop ",
+                                     "check_firmware_update_extra"})
+                invalid("id", name, 42, session.c_str(), "busy");
+            for (uint64_t sequence : {uint64_t(0), babytech::v4::kMaxSequence + 1, UINT64_MAX})
+                invalid("id", "clean", sequence, session.c_str(), "busy");
+            for (const char* original : {static_cast<const char*>(nullptr), "", "abc", "00000000000000000000000000000000",
+                                         "ABCDEF1234567890abcdef1234567890", "gggggggggggggggggggggggggggggggg",
+                                         "1234567890abcdef1234567890abcdefx"})
+                invalid("id", "clean", 42, original, "busy");
+            for (const char* reason : {static_cast<const char*>(nullptr), "", "bad reason", "bad\nreason",
+                                      "bad-reason", "\xc0\xaf", static_cast<const char*>(unterminatedReason.data())})
+                invalid("id", "clean", 42, session.c_str(), reason);
+            for (const char* action : {"prepare", "clean", "set_target_temp", "reset_error", "check_firmware_update", "stop"})
+                check(network.publishAck(maxId.c_str(), action, babytech::v4::kMaxSequence,
+                      session.c_str(), false, maxReason.c_str()), "maximum valid original ACK fields rejected");
+        } else if (tick == 5) {
+            const auto acks = ackPackets();
+            check(acks.size() == 6, "ACK validation lost valid messages/leaked invalid messages");
+            const char* actions[] = {"prepare", "clean", "set_target_temp", "reset_error", "check_firmware_update", "stop"};
+            for (size_t i = 0; i < 6; ++i) {
+                commandAck(acks[i], actions[i], session, maxReason.c_str(), "9223372036854775807", maxId);
+                for (unsigned char c : fake::io.published[acks[i]].payload)
+                    check(c >= 0x20, "ACK escaped identity emitted raw JSON control byte");
+            }
             noSideEffects(); workerOnly(); stop();
         }
     };
@@ -1002,6 +1292,100 @@ void statusSafety() {
         check(doc["measured_water_temp"].isNull() && doc["is_water_ready"] == false, "simulated heat became measured readiness");
     }
 }
+
+void statusFlags() {
+    babytech::cloud::SessionSnapshot session;
+    std::strcpy(session.id, kChallenge);
+    for (unsigned bits = 0; bits < 64; ++bits) {
+        Status motion = readyMotion();
+        const bool present = bits & 1;
+        const bool fresh = bits & 2;
+        const bool enabled = bits & 4;
+        const bool start = bits & 8;
+        motion.snapshot.thermalSimulated = bits & 16;
+        motion.powderValid = !(bits & 32);
+        // These observations must not globally disable Stop/low-frequency operations.
+        motion.motionBusy = motion.eventPending = true;
+        motion.executionAuthorized = false;
+        const bool expectedEnabled = present && fresh && enabled;
+        const bool expectedStart = expectedEnabled && start;
+        StaticJsonDocument<4096> doc;
+        babytech::brain::writeStatus(doc.to<JsonObject>(), kId, "host-test", present ? &motion : nullptr,
+                                    fresh, session, kChallenge, enabled, start);
+        check(!doc.overflowed() && doc["commands_enabled"] == expectedEnabled && doc["can_start"] == expectedStart,
+              "explicit status flags were inferred from busy/storage/telemetry or bypassed stale gate");
+        check(doc["progress"] == (expectedStart ? "ready" : "noready"), "legacy progress bypassed explicit start gate");
+        check(doc["thermal_simulated"] == (!present || motion.snapshot.thermalSimulated),
+              "status invented/suppressed original thermal flag");
+        check(doc["water_temp"].isNull() && doc["measured_water_temp"].isNull() &&
+              doc["is_water_ready"] == false && doc["is_heating"] == false && doc["is_cooling"] == false,
+              "target temperature was fabricated into measured water temperature/readiness");
+        if (present && fresh) check(doc["target_temp"] == 42, "valid target temperature lost");
+        else check(doc["target_temp"].isNull(), "stale target temperature advertised as fresh");
+        if (!present || !fresh || !motion.powderValid)
+            check(doc["powder_status"] == "unknown" && doc["powder_remained"].isNull(), "unknown powder became known");
+        else check(doc["powder_remained"] == 500, "real known powder not forwarded");
+    }
+}
+
+void networkStatusFlags(const std::string& mode) {
+    if (mode == "wrap") fake::io.now = UINT32_MAX - 9u;
+    BrainNetwork network;
+    begin(network);
+    Status motion = readyMotion();
+    motion.motionBusy = motion.eventPending = true;
+    motion.powderValid = false;
+    motion.snapshot.thermalSimulated = true;
+    const bool enable = mode != "disabled";
+    const bool start = mode != "operations";
+    const bool absent = mode == "absent";
+    const bool stale = mode == "stale";
+    uint32_t receipt = 0;
+    std::string session;
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) {
+            receipt = millis();
+            if (mode == "age1499") receipt -= 1499u;
+            if (mode == "age1500") receipt -= 1500u;
+            pollAt(network, absent ? nullptr : &motion, !stale, receipt, enable, start);
+            if (mode == "send-expiry") fake::io.onLoop = [&] { fake::io.now = receipt + 1500u; };
+        } else if (tick == 2) {
+            if (mode == "age1500" || mode == "send-expiry") {
+                check(fake::io.published.empty(), "expired Motion sample advertised commands_enabled/start");
+                fake::io.onLoop = nullptr;
+                fake::io.now = receipt + 2500u;
+                pollAt(network, &motion, false, receipt, true, true);
+            } else {
+                const bool expectedEnable = enable && !absent && !stale;
+                auto doc = packet(0, expectedEnable, expectedEnable && start);
+                check(doc["powder_status"] == "unknown" && doc["thermal_simulated"] == true && doc["water_temp"].isNull(),
+                      "enabled status fabricated resource/thermal measurement");
+                session = doc["command_session"].as<std::string>();
+                receive("config", probe(session));
+                pollAt(network, absent ? nullptr : &motion, !stale, millis(), enable, start);
+            }
+        } else if (tick == 3) {
+            if (mode == "age1500" || mode == "send-expiry") {
+                check(fake::io.published.size() == 1, "stale conservative flags did not recover after expired sample");
+                packet(0);
+                noSideEffects(); workerOnly(); stop();
+            }
+            const bool expectedEnable = enable && !absent && !stale;
+            check(packet(1, expectedEnable, expectedEnable && start)["command_session_challenge"] == kChallenge,
+                  "probe did not forward explicit capability/start flags");
+            fake::io.now += 2000u;
+            pollAt(network, &motion, false, millis(), true, true);
+        } else {
+            check(fake::io.published.size() == 3, "stale projection missing/duplicated after enabled status");
+            auto doc = packet(2);
+            check(doc["motion_status_stale"] == true && doc["progress"] == "noready",
+                  "stale Motion retained explicit commands/start permissions");
+            noSideEffects(); workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
 Status maximumMotion(char identityByte, char nameByte) {
     Status motion = readyMotion();
     std::memset(motion.babyId, identityByte, sizeof(motion.babyId) - 1);
@@ -1308,6 +1692,11 @@ int main(int argc, char** argv) {
         else if (name == "send-expiry") sendExpiry();
         else if (name == "probe" || name == "probe-reject" || name == "probe-budget") probes(name);
         else if (name == "readonly") readonlyMessages();
+        else if (name.compare(0, 19, "handler-generation-") == 0) handlerGeneration(name.substr(19));
+        else if (name.compare(0, 15, "handler-reject-") == 0) commandRejected(name.substr(15), true);
+        else if (name.compare(0, 8, "handler-") == 0) productHandler(name.substr(8));
+        else if (name == "ack-validation") ackValidation();
+        else if (name.compare(0, 12, "ack-runtime-") == 0) runtimeAck(name.substr(12));
         else if (name == "command-topics") commandTopics();
         else if (name.compare(0, 13, "command-size-") == 0) commandSizeBoundary(name.substr(13));
         else if (name == "command-budget" || name == "command-stop-priority") commandBudget(name == "command-stop-priority");
@@ -1321,6 +1710,8 @@ int main(int argc, char** argv) {
         else if (name == "failure-throttle" || name == "failure-throttle-rollover") failureThrottle(name == "failure-throttle-rollover");
         else if (name == "publish-failure") publishFailure();
         else if (name == "status-safety") statusSafety();
+        else if (name == "status-flags") statusFlags();
+        else if (name.compare(0, 13, "status-flags-") == 0) networkStatusFlags(name.substr(13));
         else if (name == "status-size") statusSize();
         else if (name == "status-control-characters") statusSize(true);
         else if (name == "encoder-boundary") encoderBoundary();

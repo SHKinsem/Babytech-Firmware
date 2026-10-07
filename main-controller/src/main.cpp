@@ -11,6 +11,7 @@
 #include "brain_installer.h"
 #include "brain_install_console.h"
 #include "brain_pending_recovery.h"
+#include "brain_cloud_dispatcher.h"
 #include <esp_system.h>
 #endif
 
@@ -28,6 +29,22 @@ babytech::brain::BrainPendingRecovery<babytech::display::ControllerLink> pending
   controllerLink, productState);
 bool locallyInstalling() { return commissioningSession.active() && !controllerLink.intentPending(); }
 uint32_t installNowMs() { return uint32_t(millis()); }
+const char* cloudAdmission() {
+  if (commissioningSession.active()) return "maintenance_active";
+  if (!productState.ready()) return "storage_fault";
+  if (productState.state().pending) return "busy";
+  return nullptr; // Motion remains the final mechanical/resource authority.
+}
+babytech::brain::BrainCloudDispatcher<babytech::display::ControllerLink,
+  babytech::brain::BrainNetwork> cloudDispatcher(controllerLink, network, installNowMs, cloudAdmission);
+void dispatchCloudCommand(void*, const babytech::boardlink::CloudCommand& command,
+                          uint32_t generation, uint32_t nowMs) {
+  cloudDispatcher.command(command, generation, nowMs);
+}
+void dispatchCloudStop(void*, const babytech::boardlink::CloudStop& stop,
+                       uint32_t generation, uint32_t nowMs) {
+  cloudDispatcher.stop(stop, generation, nowMs);
+}
 bool newPairingEpoch(char (&epoch)[33]) {
   constexpr char hex[] = "0123456789abcdef";
   bool nonzero = false;
@@ -92,6 +109,7 @@ void setup() {
   if (!network.begin(controllerLink.deviceId())) {
     Serial.println("[Brain] Network unavailable; check pairing and resources");
   }
+  network.setProductHandlers(dispatchCloudCommand, dispatchCloudStop, nullptr);
 #endif
 }
 
@@ -99,12 +117,15 @@ void loop() {
   const uint32_t nowMs = millis();
   controllerLink.poll(nowMs);
 #if BABYTECH_BOARD_LINK_V4
-  pollCommissioningConsole();
-  installer.poll(nowMs);
-  pendingRecovery.poll(nowMs, commissioningSession.active());
-  if (!commissioningSession.active()) controllerLink.releaseMaintenance(nowMs);
+  cloudDispatcher.poll(nowMs);
   network.poll(controllerLink.lastTelemetry(), controllerLink.connected(nowMs), nowMs,
-               controllerLink.lastTelemetryReceivedAtMs());
+               controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false);
+  // Drain a queued urgent Stop before installer/recovery may perform Flash I/O.
+  controllerLink.poll(uint32_t(millis()));
+  pollCommissioningConsole();
+  installer.poll(uint32_t(millis()));
+  pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy());
+  if (!commissioningSession.active()) controllerLink.releaseMaintenance(uint32_t(millis()));
 #endif
   if (!displayReady) {
     delay(10);

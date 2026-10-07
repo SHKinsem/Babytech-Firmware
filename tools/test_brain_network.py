@@ -43,6 +43,17 @@ CASES = [
     "command-topics", "command-budget", "command-stop-priority",
     "command-size-clean", "command-size-stop",
     "command-disconnected-clean", "command-disconnected-stop",
+    *(f"handler-{action}-current" for action in (
+        "prepare", "clean", "set_target_temp", "reset_error", "check_firmware_update", "stop")),
+    *(f"handler-{action}-{kind}" for action in ("clean", "stop") for kind in (
+        "age5000", "expired", "wrong", "missing", "unregister", "deadline")),
+    *(f"handler-reject-{action}" for action in ("prepare", "clean", "set_target_temp", "stop")),
+    *(f"handler-generation-{action}-{kind}" for action in ("clean", "stop") for kind in ("queued", "deferred")),
+    "ack-validation",
+    *(f"ack-runtime-{kind}" for kind in ("accepted", "rejected", "boolean", "reconnect", "offline", "full", "deferred")),
+    "status-flags",
+    *(f"status-flags-{kind}" for kind in (
+        "enabled", "operations", "disabled", "stale", "absent", "age1499", "age1500", "wrap", "send-expiry")),
 ]
 
 

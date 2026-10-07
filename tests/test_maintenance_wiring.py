@@ -93,7 +93,7 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(loop.index("serviceBrainLink()"), loop.index("pollCommissioningConsole()"))
         self.assertLess(loop.index("serviceBrainLink()"), loop.index("server.handleClient()"))
         brain_loop = function_body(self.brain, "void loop()")
-        self.assertIn("if (!commissioningSession.active()) controllerLink.releaseMaintenance(nowMs)", brain_loop)
+        self.assertIn("if (!commissioningSession.active()) controllerLink.releaseMaintenance(uint32_t(millis()))", brain_loop)
         for source in (self.motion, self.brain):
             self.assertNotIn("requestMaintenance(", function_body(source, "void setup()"))
 
@@ -140,8 +140,8 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertNotIn("installer.start(", setup)
         self.assertNotIn("importBrain(", setup)
         polling = function_body(self.brain, "void loop()")
-        self.assertLess(polling.index("controllerLink.poll(nowMs)"), polling.index("installer.poll(nowMs)"))
-        self.assertLess(polling.index("pollCommissioningConsole()"), polling.index("installer.poll(nowMs)"))
+        self.assertLess(polling.index("controllerLink.poll(nowMs)"), polling.index("installer.poll(uint32_t(millis()))"))
+        self.assertLess(polling.index("pollCommissioningConsole()"), polling.index("installer.poll(uint32_t(millis()))"))
         self.assertIn("installer.busy()", function_body(self.brain, "void pollCommissioningConsole()"))
 
     def test_motion_install_uses_runtime_store_without_boot_or_console_writes(self):
@@ -171,9 +171,9 @@ class MaintenanceWiringTest(unittest.TestCase):
     def test_pending_query_owner_reuses_stores_without_action_or_network_gate(self):
         self.assertIn("controllerLink, productState);", self.brain)
         loop = function_body(self.brain, "void loop()")
-        self.assertIn("pendingRecovery.poll(nowMs, commissioningSession.active())", loop)
+        self.assertIn("pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy())", loop)
         self.assertLess(loop.index("controllerLink.poll(nowMs)"), loop.index("pendingRecovery.poll("))
-        self.assertLess(loop.index("pendingRecovery.poll("), loop.index("network.poll("))
+        self.assertLess(loop.index("network.poll("), loop.index("pendingRecovery.poll("))
         setup = function_body(self.motion, "void setup()")
         self.assertIn("productBoardLink.setResultQueryHandler(queryProductResult)", setup)
         self.assertLess(setup.index("productRecovery.begin("), setup.index("setResultQueryHandler("))
@@ -181,6 +181,26 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertIn("queryMotionResult(productState, query, result)", handler)
         for forbidden in ("supervisedStop", "startLocal", "installInitial", "reserveLocal"):
             self.assertNotIn(forbidden, handler)
+
+    def test_brain_cloud_owner_is_wired_without_worker_motor_or_boot_replay(self):
+        setup = function_body(self.brain, "void setup()")
+        self.assertIn("network.setProductHandlers(dispatchCloudCommand, dispatchCloudStop, nullptr)", setup)
+        self.assertNotIn("cloudDispatcher.command(", setup)
+        self.assertNotIn("cloudDispatcher.stop(", setup)
+        loop = function_body(self.brain, "void loop()")
+        self.assertLess(loop.index("controllerLink.poll(nowMs)"), loop.index("cloudDispatcher.poll(nowMs)"))
+        self.assertLess(loop.index("cloudDispatcher.poll(nowMs)"), loop.index("pendingRecovery.poll("))
+        self.assertLess(loop.index("network.poll("), loop.index("controllerLink.poll(uint32_t(millis()))"))
+        self.assertLess(loop.index("controllerLink.poll(uint32_t(millis()))"), loop.index("installer.poll("))
+        self.assertLess(loop.index("controllerLink.poll(uint32_t(millis()))"), loop.index("pendingRecovery.poll("))
+        self.assertIn("controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false", loop)
+        ordinary = function_body(self.brain, "const char* cloudAdmission()")
+        self.assertIn("productState.ready()", ordinary)
+        self.assertIn("productState.state().pending", ordinary)
+        stop = function_body(self.brain, "void dispatchCloudStop(")
+        self.assertIn("cloudDispatcher.stop(stop, generation, nowMs)", stop)
+        for forbidden in ("productState", "commissioningSession", "pendingRecovery", "network.connected"):
+            self.assertNotIn(forbidden, stop)
 
     def test_v4_recovery_is_wired_to_boot_and_existing_stop_supervision(self):
         setup = function_body(self.motion, "void setup()")

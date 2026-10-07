@@ -17,6 +17,35 @@ const char* text(JsonVariantConst value, size_t maximum) {
     if (!str.size() || str.size() > maximum || std::strlen(str.c_str()) != str.size()) return nullptr;
     return str.c_str();
 }
+bool boundedText(const char* value, size_t maximum) {
+    if (!value || !value[0]) return false;
+    size_t length = 0;
+    while (length <= maximum && value[length]) ++length;
+    return length <= maximum && v4::validUtf8(reinterpret_cast<const uint8_t*>(value), length);
+}
+bool validSession(const char* session) {
+    if (!boundedText(session, 32) || std::strlen(session) != 32) return false;
+    bool nonzero = false;
+    for (size_t i = 0; i < 32; ++i) {
+        if (!((session[i] >= '0' && session[i] <= '9') ||
+              (session[i] >= 'a' && session[i] <= 'f'))) return false;
+        nonzero |= session[i] != '0';
+    }
+    return nonzero;
+}
+bool cloudCommandName(const char* command) {
+    if (!boundedText(command, 21)) return false;
+    return !std::strcmp(command, "prepare") || !std::strcmp(command, "clean") ||
+        !std::strcmp(command, "set_target_temp") || !std::strcmp(command, "reset_error") ||
+        !std::strcmp(command, "check_firmware_update") || !std::strcmp(command, "stop");
+}
+bool validReason(const char* reason) {
+    if (!boundedText(reason, 64)) return false;
+    for (const char* at = reason; *at; ++at)
+        if (!((*at >= 'a' && *at <= 'z') || (*at >= 'A' && *at <= 'Z') ||
+              (*at >= '0' && *at <= '9') || *at == '_')) return false;
+    return true;
+}
 }
 
 bool BrainNetwork::begin(const char* pairedDeviceId) {
@@ -25,12 +54,26 @@ bool BrainNetwork::begin(const char* pairedDeviceId) {
     return started_;
 }
 
+void BrainNetwork::setProductHandlers(CommandHandler command, StopHandler stop, void* context) {
+    commandHandler_ = command;
+    stopHandler_ = stop;
+    productContext_ = context;
+}
+
+cloud::Freshness BrainNetwork::checkFreshness(const char* session, uint32_t generation,
+                                             uint32_t sampledAtMs, uint16_t ttlMs) {
+    return cloud_.checkFreshness(session, generation, sampledAtMs, ttlMs);
+}
+
 bool BrainNetwork::publishStatus(const boardlink::Status* lastMotion, bool motionConnected,
                                 const cloud::SessionSnapshot& session, uint32_t motionReceivedAtMs,
-                                const char* challenge) {
+                                const char* challenge, bool commandsEnabled, bool canStart) {
+    // CloudLink also checks this original receipt again at actual publish entry.
+    const bool freshMotion = motionConnected && lastMotion &&
+        uint32_t(session.uptimeMs - motionReceivedAtMs) < 1500;
     status_.clear();
     writeStatus(status_.to<JsonObject>(), cloud_.deviceId(), FIRMWARE_VERSION,
-                lastMotion, motionConnected, session, challenge);
+                lastMotion, freshMotion, session, challenge, commandsEnabled, canStart);
     if (!encodeStatusJson(status_, payload_, sizeof(payload_))) return false;
     CloudLink::StatusPublishOptions options;
     options.probeReply = challenge != nullptr;
@@ -39,34 +82,56 @@ bool BrainNetwork::publishStatus(const boardlink::Status* lastMotion, bool motio
     return cloud_.publishStatusForSession(String(payload_), session.generation, options);
 }
 
-void BrainNetwork::rejectCommand(const char* commandId, const char* command, uint64_t sequence,
-                                 const char* session, uint32_t sampledAtMs, uint16_t ttlMs) {
-    const auto freshness = cloud_.checkFreshness(session, inbound_.generation, sampledAtMs, ttlMs);
-    if (freshness != cloud::Freshness::Current && freshness != cloud::Freshness::Expired) return;
+bool BrainNetwork::publishAckForGeneration(const char* commandId, const char* command, uint64_t sequence,
+                                           const char* session, bool accepted, const char* reason,
+                                           uint32_t generation) {
+    if (!started_ || !motion::validCloudDeviceId(cloud_.deviceId(), std::strlen(cloud_.deviceId())) ||
+        !boundedText(commandId, 128) || !cloudCommandName(command) ||
+        !sequence || sequence > v4::kMaxSequence || !validSession(session) || !validReason(reason)) return false;
     char sequenceText[20]{};
     const int length = std::snprintf(sequenceText, sizeof(sequenceText), "%llu",
                                     static_cast<unsigned long long>(sequence));
-    if (length <= 0 || size_t(length) >= sizeof(sequenceText)) return;
+    if (length <= 0 || size_t(length) >= sizeof(sequenceText)) return false;
     status_.clear();
     status_["device_id"] = cloud_.deviceId();
     status_["command_id"] = commandId;
     status_["command"] = command;
     status_["command_seq"] = static_cast<const char*>(sequenceText);
     status_["command_session"] = session;
-    status_["accepted"] = false;
-    status_["reason"] = freshness == cloud::Freshness::Expired
-        ? "request_expired" : "integration_not_ready";
-    if (!encodeStatusJson(status_, payload_, sizeof(payload_))) return;
-    // This is an explicit local rejection, never a fabricated Motion acceptance.
-    // A reconnect drops this reply instead of publishing it in another generation.
-    cloud_.publishForSession("ack", String(payload_), inbound_.generation);
+    status_["accepted"] = accepted;
+    status_["reason"] = reason;
+    if (!encodeStatusJson(status_, payload_, sizeof(payload_))) return false;
+    return cloud_.publishForSession("ack", String(payload_), generation);
 }
 
-void BrainNetwork::receiveCommand() {
+bool BrainNetwork::publishAck(const char* commandId, const char* command, uint64_t sequence,
+                              const char* originalSession, bool accepted, const char* reason) {
+    cloud::SessionSnapshot current;
+    if (!cloud_.sessionSnapshot(current)) return false;
+    return publishAckForGeneration(commandId, command, sequence, originalSession, accepted, reason,
+                                   current.generation);
+}
+
+void BrainNetwork::rejectCommand(const char* commandId, const char* command, uint64_t sequence,
+                                 const char* session, cloud::Freshness freshness) {
+    if (freshness != cloud::Freshness::Current && freshness != cloud::Freshness::Expired) return;
+    // This is an explicit local rejection, never a fabricated Motion acceptance.
+    // A reconnect drops this reply instead of publishing it in another generation.
+    publishAckForGeneration(commandId, command, sequence, session, false,
+        freshness == cloud::Freshness::Expired ? "request_expired" : "integration_not_ready",
+        inbound_.generation);
+}
+
+void BrainNetwork::receiveCommand(uint32_t nowMs) {
     const auto* bytes = reinterpret_cast<const uint8_t*>(inbound_.payload);
     const size_t length = std::strlen(inbound_.payload);
     boardlink::CloudCommand command;
     if (boardlink::decodeCloudCommand(bytes, length, cloud_.deviceId(), command)) {
+        const auto freshness = checkFreshness(command.session, inbound_.generation, command.sampledAtMs, command.ttlMs);
+        if (commandHandler_ && (freshness == cloud::Freshness::Current || freshness == cloud::Freshness::Expired)) {
+            commandHandler_(productContext_, command, inbound_.generation, nowMs);
+            return;
+        }
         const char* name = nullptr;
         switch (command.request.command) {
             case boardlink::ProductCommand::Prepare: name = "prepare"; break;
@@ -77,16 +142,22 @@ void BrainNetwork::receiveCommand() {
             default: return;
         }
         rejectCommand(command.request.commandId, name, command.request.sequence,
-                      command.session, command.sampledAtMs, command.ttlMs);
+                      command.session, freshness);
         return;
     }
     boardlink::CloudStop stop;
-    if (boardlink::decodeCloudStop(bytes, length, cloud_.deviceId(), stop))
-        rejectCommand(stop.commandId, "stop", stop.sequence, stop.session, stop.sampledAtMs, stop.ttlMs);
+    if (boardlink::decodeCloudStop(bytes, length, cloud_.deviceId(), stop)) {
+        const auto freshness = checkFreshness(stop.session, inbound_.generation, stop.sampledAtMs, stop.ttlMs);
+        if (stopHandler_ && (freshness == cloud::Freshness::Current || freshness == cloud::Freshness::Expired)) {
+            stopHandler_(productContext_, stop, inbound_.generation, nowMs);
+            return;
+        }
+        rejectCommand(stop.commandId, "stop", stop.sequence, stop.session, freshness);
+    }
 }
 
 void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnected, uint32_t nowMs,
-                        uint32_t motionReceivedAtMs) {
+                        uint32_t motionReceivedAtMs, bool commandsEnabled, bool canStart) {
     if (!started_) return;
     cloud::SessionSnapshot current;
     if (!cloud_.sessionSnapshot(current)) {
@@ -106,7 +177,7 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
             std::strncmp(inbound_.topic + 8, device, deviceLength)) continue;
         const char* suffix = inbound_.topic + 8 + deviceLength;
         if (!std::strcmp(suffix, "/command")) {
-            receiveCommand();
+            receiveCommand(nowMs);
             continue;
         }
         if (std::strcmp(suffix, "/config")) continue;
@@ -121,16 +192,17 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
             std::strcmp(targetDevice, cloud_.deviceId()) || !target || !challenge) continue;
         cloud::ProbeReply reply;
         if (cloud_.probeReply(target, challenge, inbound_.generation, reply))
-            publishStatus(lastMotion, motionConnected, reply.session, motionReceivedAtMs, reply.challenge);
-        // Other messages deliberately cannot dispatch actions or mutate NVS
-        // during the read-only integration stage.
+            publishStatus(lastMotion, motionConnected, reply.session, motionReceivedAtMs, reply.challenge,
+                          commandsEnabled, canStart);
+        // Other config messages cannot dispatch actions or mutate NVS here.
     }
     if ((!published_ || uint32_t(nowMs - lastPublishedAtMs_) >= 2000) &&
         (!attempted_ || uint32_t(nowMs - lastAttemptAtMs_) >= 250)) {
         attempted_ = true;
         lastAttemptAtMs_ = nowMs;
         if (cloud_.sessionSnapshot(current) &&
-            publishStatus(lastMotion, motionConnected, current, motionReceivedAtMs)) {
+            publishStatus(lastMotion, motionConnected, current, motionReceivedAtMs, nullptr,
+                          commandsEnabled, canStart)) {
             lastPublishedAtMs_ = nowMs;
             published_ = true;
         }

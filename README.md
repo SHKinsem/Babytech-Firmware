@@ -4,7 +4,7 @@
 
 两块板固件统一在本仓库管理：`main-controller` 已迁入父项目 DisplayController 的屏幕/触摸/UART v3 基线、显示库与 N16R8 板型，`device-controller` 继续作为 Motion。Brain 已通过本地及不含父项目的临时副本构建、LVGL host UI 测试，尚未烧录或验证真实触摸。原 DisplayController 的源码/构建入口已退役，仅保留迁移说明；旧 Brain 网页及其专属配置/页面测试也已移除，历史实现从 Git 获取。
 
-默认 Brain 仍是 UART v3 屏幕角色；成对选择 v4 后已接入 Wi-Fi/MQTT 运行时和机械状态投影，Brain 的 App/触控发送与双板记录桥接尚未完成。Motion v4 产品命令接收/持久执行和监督 Stop 已接入验证路径，默认非食用产品开关仍为0，屏幕 Start 保持关闭。Motion 默认路径仍直连 Cloud，v4 不启动产品 MQTT，独立调试网页保留。完整迁移按父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md` B1–B3 推进，不把构建成功写成产品迁移完成。
+默认 Brain 仍是 UART v3 屏幕角色；成对选择 v4 后已接入 Wi-Fi/MQTT、状态投影、Cloud命令单次UART派发及优先Stop。Cloud派发软件子项已通过本地组件验证，触控本地发送和双板记录桥接未完成。Motion v4 产品命令接收/持久执行和监督 Stop 已接入验证路径，默认非食用产品开关仍为0，`can_start=false`及屏幕Start/Initialize保持关闭。Motion 默认路径仍直连 Cloud，v4 不启动产品 MQTT，独立调试网页保留。完整迁移按父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md` B1–B3 推进，不把构建成功写成产品迁移完成。
 
 App/屏幕文案唯一手写来源仍在父项目 `Shared/feeding_flow_ui/feeding_flow_ui.json`。父项目 `python3 Tools/generate_feeding_flow_ui.py` 自动更新本仓库生成 header，`--check` 检查内容及源哈希；生成物须随固件 commit 提交。独立 clone 编译锁定的 header，不读取父项目或下载文案，禁止手改 generated 文件。
 
@@ -18,15 +18,15 @@ Brain v4 已接本地USB Wi-Fi/MQTT配置，见下方“Brain USB网络配置”
 
 `shared/BoardProtocol/src/BoardProtocolV4.*` 已提供 v4 帧/CRC、固定容量分片重组和 Stop 编解码，`python3 tools/test_protocol.py` 同时运行 v1/v2/v4 回归。v4 的帧最大196 bytes、逻辑消息最大2047 bytes；Stop/心跳可在普通重组期间单独交付，未完成/错误输入不污染结果。接收完成只说明 bytes 齐全，仍须由后续 endpoint 核验 boot、身份、JSON、持久序号及执行门禁。
 
-`BoardSessionV4` 核对配对身份及本次 HELLO 的关联应答，分别管理心跳与机械状态的新鲜度；`BoardTransmitV4` 提供固定容量队列和逐帧高优先级调度，支持短写/背压。`shared/ProductBoardLink` 提供严格的 HELLO/STATUS JSON 编解码及共用链路，假串口覆盖两板握手、单/双向断线、重启和旧包重放。Motion显式注册产品回调后才处理动作，未注册入口仍拒绝；Brain仍关闭Start、不发送COMMAND，传输ACK不是业务接受。
+`BoardSessionV4` 核对配对身份及本次 HELLO 的关联应答，分别管理心跳与机械状态的新鲜度；`BoardTransmitV4` 提供固定容量队列和逐帧高优先级调度，支持短写/背压。`shared/ProductBoardLink` 提供严格的 HELLO/STATUS JSON 编解码及共用链路，假串口覆盖两板握手、单/双向断线、重启和旧包重放。Motion显式注册产品回调后才处理动作，未注册入口仍拒绝；Brain现发送Cloud COMMAND但仍关闭触屏Start，传输ACK不是业务接受。
 
 同一模块另有普通COMMAND/COMMAND_RESULT与Cloud v4命令编解码，复用`ProductRequest`并保留序号、宝宝/版本和float32配方身份。Motion现接执行协调器，只有持久接受后才启动；codec本身不授予运动权限。`tools/test_board_commands.py --sanitize`及`test_product_command_result.py`检查边界，Stop使用独立二进制通道，不加入普通动作枚举。
 
 `ReadOnlyLink` 为单 owner、非重入对象，约 8 KiB，不能放在 MCU loop 局部栈中；共享完整消息 scratch，短回执用紧凑帧。35 字段 STATUS 的 GCC8.4/14.2 静态接收调用链（receive/handle/decodeStatus）约 4 KiB，尚未包含外层适配器和 JSON 库调用余量；接入设备后仍须检查实际任务栈高水位，不能让网络回调并发操作链路。
 
-当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1：Brain 使用 `BABYTECH_BOARD_LINK_V4=1`，Motion 使用 `MOTION_UART_PEER=4`。Brain仍不派发动作，Motion已注册产品接收/Stop回调。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC；缺失或损坏不能进入正常握手、联网或产品操作，但可选v4入口允许仅打开UART诊断发现。不自动认领陌生对端。受控配对写入和旧配置导入已接单Brain持久安装，首次激活采用下文已批准的整机手动重新上电一次；完整产品动作/结果闭环仍未完成，不能靠烧录这两个镜像直接完成迁移。
+当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1：Brain 使用 `BABYTECH_BOARD_LINK_V4=1`，Motion 使用 `MOTION_UART_PEER=4`。Brain已接Cloud派发owner，Motion已注册产品接收/Stop回调，触屏动作未开放。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC；缺失或损坏不能进入正常握手、联网或产品操作，但可选v4入口允许仅打开UART诊断发现。不自动认领陌生对端。受控配对写入和旧配置导入已接单Brain持久安装，首次激活采用下文已批准的整机手动重新上电一次；完整产品动作/结果闭环仍未完成，不能靠烧录这两个镜像直接完成迁移。
 
-v4不启动Motion产品MQTT，也不开放屏幕Initialize/Start；Motion独立Wi-Fi、HTTP调试网页及本地OTA保留。旧`formulaevt/payload`仅只读检查，有记录或读取异常时保留数据、标记待处理并监督停机，不调用旧Outbox初始化。新记录开机恢复、Motion动作接收已接入，Brain发送和两板补传仍未接通；遥测本身不授予运动权限。默认v3行为不变。
+v4不启动Motion产品MQTT，也不开放屏幕Initialize/Start；Motion独立Wi-Fi、HTTP调试网页及本地OTA保留。旧`formulaevt/payload`仅只读检查，有记录或读取异常时保留数据、标记待处理并监督停机，不调用旧Outbox初始化。新记录开机恢复、Motion动作接收及Brain Cloud派发已接源码，两板补传仍未接通；遥测本身不授予运动权限。默认v3行为不变。
 
 在本子仓库根目录编译验证（不含烧录）：
 
@@ -46,7 +46,7 @@ pio run -d device-controller -e motion
 
 `CloudSession` 是网络新鲜度门禁，不是持久去重或动作授权。Brain v4 在有效配对后调用 `beginV4()`；网络 worker 只读既有 `wifi-cfg` 和 `cloudcfg`，进行有界等待/退避的 Wi-Fi 重连及 MQTT 服务，UI loop 不调用网络 I/O。坏凭据不自动擦除，没有配对记录则不启动。受控凭据配置入口仍属 B1.3，不应手工猜写 Flash。
 
-`brain_network` 每次 MQTT 新会话立即、其后每 2 秒尝试发布状态；回复 config topic 中匹配本机和当前 session 的只读 probe。命令入口已解码并明确拒绝未完成的集成请求，不派发动作或写业务 NVS。UI 仅由原任务更新。Motion STATUS 增加产品阶段、故障、资源有效性与完整宝宝 ID；Brain 固定禁止启动，过期机械状态显示 unknown，保留已知故障。Cloud 配套处理 `motion_status_stale=true` 时不解除已有设备错误，只有新鲜恢复状态才解除。父仓库已实现 Cloud 探测、SQLite14 持久发行/回执账本；完整安装、动作和结果转发尚未接通，源码实现不代表生产部署已验证。
+`brain_network` 每次 MQTT 新会话立即、其后每2秒尝试发布状态；回复 config topic 中匹配本机和当前session的只读probe。可选产品handler现交付Cloud派发owner，未注册时仍明确拒绝集成未就绪；不在网络回调写业务NVS或更新UI。Motion STATUS包含产品阶段、故障、资源有效性和完整宝宝ID；Brain只在新鲜链路开放命令入口，`can_start=false`仍保留。过期状态显示unknown并保留已知故障，Cloud仅新鲜恢复状态才解除错误。父仓库已实现Cloud探测、SQLite14持久发行/回执；完整触控、配置和结果转发未接通，源码实现不代表生产部署已验证。
 
 网络依赖现已随实际 v4 入口加入 Brain ini；即使默认不运行网络，SDK 依赖也会增加镜像和静态 RAM。最终队列、显示 DMA、任务栈和内部堆需实板测量。正常状态只保留最新值，探测保持独立队列；实际发送前核对会话及原始机械采样有效期。JSON 完整转义后超过 2047 bytes 则整条拒绝，绝不截断身份；极端转义字段组合可能超限。只读代码不能用于替换现场产品固件。
 
@@ -155,7 +155,17 @@ Brain主循环的`BrainPendingRecovery`用开机已读入的同一个Store自动
 
 Brain的共享UART core、Arduino适配器和Controller现提供单次`requestCommand`/精确COMMAND_RESULT及优先`requestStop`接口。发送排入不等于Motion接受，LINK_ACK不完成普通请求；1000ms超时、断链、换boot或取消仅保留未知，随后查询原身份，不自动重发。首帧/调度预算集中为`kCommandFirstFrameBudgetMs=50`，从编码TTL扣除并约束本地写入；过期残帧只改坏尚未写出的CRC后排空，保留Stop/心跳且不交织字节，不宣称已发帧可撤回或实板时限已验收。local Stop由唯一owner生成既有transient ID、seq0，不等待NVS；Received不是停稳。
 
-业务owner仍须在调用前完成local持久占号、Cloud会话/原截止核验和Stop新鲜目标绑定。BrainNetwork/main的App/触控入口尚未调用这些新接口，Start/Initialize仍关闭，故本子项不是完整派发或产品已启用。测试`tools/test_protocol.py --sanitize`、`test_board_link.py`、`test_board_arduino.py`、`test_brain_controller.py`及`test_motion_product_runtime.py --sanitize`覆盖对应生产组件/SDK边界替身，不替代真实Flash/CAN/RTOS或完整App验证。
+业务owner在调用前负责local持久占号、Cloud会话/原截止核验和Stop新鲜目标绑定。BrainNetwork/main现已调用Cloud派发owner，local触控尚未接入，Start/Initialize仍关闭；配置和终态桥接待完成，故不是完整产品已启用。测试`tools/test_protocol.py --sanitize`、`test_board_link.py`、`test_board_arduino.py`、`test_brain_controller.py`及`test_motion_product_runtime.py --sanitize`覆盖对应生产组件/SDK边界替身，不替代真实Flash/CAN/RTOS或完整App验证。
+
+### Brain Cloud派发owner（2026-10-07，软件子项）
+
+`BrainCloudDispatcher`是UI loop唯一Cloud请求owner，不是网络worker或动作队列。原会话/代次/5秒TTL核对含SHA耗时，单次COMMAND后只用精确业务结果ACK；未知只查询原身份及摘要，Expired重复不伪造拒绝。Cloud负责永久发行，Motion负责持久接受，不新增Brain Cloud账本或修改local pending。
+
+Stop绑定新鲜product执行ID或明确静止idle，独立序号不受更高普通水位误挡；不等待Store/普通结果/旧信息ACK。main在可能Flash路径前再次服务UART，短写/FIFO忙时不保证已完整发送。Received不是停稳。`publishAck=true`仅入队，入队失败的已有回复槽保留重试，busy额外回复best-effort，新Stop可替换旧信息ACK；不保证wire/broker/Cloud落库。测温未知保持null，不以目标温度冒充实测；`commands_enabled`仅新鲜链路开放，`can_start=false`保留。
+
+`python3 tools/test_brain_cloud_dispatcher.py --sanitize`双SHA各205场景，含各5项真实UART core/codec/Store组合；Network150及静态接线21另测，不合称生产main/Network/runtime/broker动态闭环。Stop原TTL边界/回绕、Unknown放行反例、ID保护、Known优先及持久证据保留已覆盖，真实Flash/CAN/RTOS/Stop时限仍待台架。production mode3保留local pending只证明退出不清证据，不代表main允许此时新Cloud命令（仍由原admission拒绝）；生产Controller连接仍需新鲜STATUS，FakeLink无STATUS不代表实际main允许。
+
+Cloud Unknown最小放行已获用户2026-10-07确认：原TTL耗尽，过期后收到的新鲜Motion状态无活动/无busy且已停稳时，仅退出RAM执行在途；不同ID/更高序号的新请求可进入。原结果仍Unknown、无伪造ACK、不重发/清持久证据；已到达精确Known优先处理，旧/未来/失联状态不放行。最后retired ID仅有界RAM guard，所有历史ID由Cloud永久账本防复用；local NVS pending不因此清除。触控、工作台UART目标化、版本配置和终态/Cloud回执仍待接；仅本地软件验证交付，未推送、烧录或部署。
 
 ### Brain USB网络配置
 
@@ -323,7 +333,7 @@ pio run -d main-controller -t upload --upload-port COM_BRAIN
 
 `COM_MOTION` / `COM_BRAIN` 是占位符，替换为实际端口。
 
-默认配套为屏幕 Brain + Motion UART v3。屏幕查看机械状态；断开 UART 后不得仍显示可启动，恢复后应以 Motion 最新状态为准。迁移 v4 是上文单独列出的验证路径，Brain仍不派发动作，不与默认镜像混用。
+默认配套为屏幕 Brain + Motion UART v3。屏幕查看机械状态；断开 UART 后不得仍显示可启动，恢复后应以 Motion 最新状态为准。迁移v4是上文单独列出的验证路径，已接Cloud派发但完整产品链路未完成，不与默认镜像混用。
 
 电机调试连接 Motion 的 `Babytech-Motion` 热点（开发密码 `babytech-demo`），访问 `http://192.168.4.1/`。先读取反馈，再在受控无负载条件下显式使能和试动；HTTP 202 只表示提交，不表示已执行或已停稳。旧 Brain 的 `Babytech-Debug` 网页入口已经退役，不再作为当前操作步骤。实际操作前仍须确认接线、安全条件和固件版本。
 
@@ -336,7 +346,7 @@ pio run -d main-controller -t upload --upload-port COM_BRAIN
 - 原项目：`hellowenshenghui/Babytech_Formula_Device`，参考本地 `V1-device` 的 `2ffcde2`。
 - 网页交互参考：`SHKinsem/Project-Tenny`。
 - CAN 传输库和 HX711 称重核心分别从旧工程 BabytechActuatorHal、BabytechSensorHal 按需迁入 `device-controller/lib/`；新工程不依赖旧仓库路径，旧仓库未修改。
-- 当前默认显示协议为 v3，迁移验证协议为 v4（Brain仍不派发动作）；两板按对应版本配套，不能混装。UART v2 四指令协议只保留兼容回归，不是当前屏幕入口。
+- 当前默认显示协议为v3，迁移验证协议为v4（Cloud派发已接，触屏动作及结果桥接未完成）；两板按对应版本配套，不能混装。UART v2四指令协议只保留兼容回归，不是当前屏幕入口。
 
 Wi-Fi OTA 的设计与操作见 [实施计划](docs/wifi-ota-plan.md) 和 [使用说明](docs/wifi-ota-implementation.md)。
 
