@@ -199,7 +199,9 @@ Brain v4现从既有MQTT配置槽解析完整档案/墓碑，回调只暂存最�
 
 共享`ProductEventMessages`实现已确认kind12/13的纯编解码。终态从持久执行快照提取原宝宝、配方、event ID和冻结uptime；Cloud来源附原`command_seq`，local_touch不附云序号。float32数值以9位有效数字往返，JSON转义后最多2047 bytes；失败不修改输出。收到新配置、重连或补报不能改写原终态；Brain转发应保留原JSON字节，不重新编码。回执严格为既有type/device_id/event_id/status=stored四字段，不把LINK_ACK、MQTT发送成功或命令接受当落库证明。
 
-`python3 tools/test_product_event_messages.py --sanitize`测试生产codec；父仓库`python3 Test/brain_event_contract_check.py --sanitize`将生产编码事件交给隔离Cloud数据库，再把实际Cloud回执交给固件解析器。无真实MQTT/UART、Flash或电机，不代表板间交付。终态UART收发、Brain MQTT转发、Motion匹配回执清队列和main接线尚未完成，公开can_start仍false；默认v3及旧单槽事件路径不变。
+共享UART core、Arduino适配器及Brain Controller现有显式`publishTerminal`/`forwardCloudReceipt`和按角色验证的回调，复用kind12/13及唯一普通分片槽；同一已配对会话即可补历史终态，不等当前宝宝、Ready或新鲜STATUS。回调只在同一loop交付，原JSON不改写；没有NVS清槽、自动重新投递或新动作。Stop/心跳走原优先通道，可发送的业务回复优先于终态，尚未准备好的延后回复不挡历史终态。普通槽释放后优先预约到期回复和已有STATUS，避免连续补传挤掉遥测；没有样本时仍可补传，不增加队列或准入门禁。
+
+`python3 tools/test_board_link.py --sanitize`测真实两端core的有界字节传输与上述接口；`python3 tools/test_product_event_messages.py --sanitize`测试生产codec；父仓库`python3 Test/brain_event_contract_check.py --sanitize`把编码事件交给隔离Cloud数据库，再把实际Cloud回执交给固件解析器。没有真实UART、Flash或电机，不代表完整板间交付。Motion持久队列重传/匹配清除owner、Brain真实终态MQTT转发及main接线仍待完成，公开真实模式can_start仍false；默认v3及旧单槽事件路径不变。
 
 ### Brain-only 仿真（Brain v4 USB入口）
 

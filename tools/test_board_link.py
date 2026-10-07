@@ -27,14 +27,17 @@ with tempfile.TemporaryDirectory(prefix="babytech-board-link-") as temporary:
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources.extend(root / "shared/ProductBoardLink/src" / name for name in
                    ("ProductContext.cpp", "ProductDigest.cpp", "ProductContextMessages.cpp",
-                    "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ProductCommandResult.cpp", "ReadOnlyBoardLink.cpp"))
+                    "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ProductCommandResult.cpp",
+                    "ProductEventMessages.cpp", "MotionStateRecord.cpp", "BoardPairingRecord.cpp",
+                    "ReadOnlyBoardLink.cpp"))
     sources.append(root / "tests/fakes/product_crypto/FakeProductCrypto.cpp")
     sources.append(root / "shared/ProductBoardLink/test/test_readonly_link.cpp")
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror"]
     if sys.platform == "darwin":
         command += ["-Wno-deprecated-declarations"]
     if args.sanitize:
-        command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
+        command += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                    "-fno-omit-frame-pointer", "-g"]
     for include in includes:
         command.extend(["-I", str(include)])
     subprocess.run(command + [str(source) for source in sources] +

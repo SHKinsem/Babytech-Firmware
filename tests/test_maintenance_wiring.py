@@ -366,7 +366,13 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertEqual(callback.strip(), "return productRuntime.resultReady(result);")
         link = (ROOT / "shared/ProductBoardLink/src/ReadOnlyBoardLink.cpp").read_text()
         polling = function_body(link, "void ReadOnlyLink::poll(")
-        self.assertRegex(polling, r"if\s*\(\(!commandReadyHandler_\s*\|\|\s*"
+        scheduling = function_body(link, "void ReadOnlyLink::queueMotionOutput(")
+        schedule = "queueMotionOutput(nowMs, localStatus);"
+        pump = "tx_.pump(nowMs, sink);"
+        self.assertEqual(polling.count(schedule), 2)
+        self.assertLess(polling.index(schedule), polling.rindex(pump))
+        self.assertLess(polling.rindex(pump), polling.rindex(schedule))
+        self.assertRegex(scheduling, r"if\s*\(\(!commandReadyHandler_\s*\|\|\s*"
                          r"commandReadyHandler_\(commandResult_\)\)\s*&&\s*"
                          r"encodeCommandResult\(commandResult_,\s*scratch_\)\s*&&\s*queue\(scratch_\)\)")
         runtime = (ROOT / "device-controller/src/MotionProductRuntime.cpp").read_text()

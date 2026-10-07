@@ -37,7 +37,8 @@ def main():
     sources += [root / "shared/ProductBoardLink/src" / name for name in
                 ("ProductContext.cpp", "ProductRequest.cpp", "ProductDigest.cpp",
                  "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ProductContextMessages.cpp", "ProductResultQuery.cpp",
-                 "MotionStateRecord.cpp", "BoardPairingRecord.cpp", "MotionStateStore.cpp", "ReadOnlyBoardLink.cpp")]
+                 "MotionStateRecord.cpp", "BrainStateRecord.cpp", "BoardPairingRecord.cpp", "MotionStateStore.cpp",
+                 "ProductEventMessages.cpp", "ReadOnlyBoardLink.cpp")]
     sources += [root / "device-controller/src" / name for name in
                 ("MotionProductRuntime.cpp", "ProductSession.cpp", "DemoFlowController.cpp")]
     sources += [root / "tests/fakes/brain_state_store/FakeBrainNvs.cpp",

@@ -4,6 +4,7 @@
 #include "ProductResultQuery.h"
 #include "ProductCommandResult.h"
 #include "ProductContextMessages.h"
+#include "ProductEventMessages.h"
 #include "BoardTransmitV4.h"
 
 namespace babytech { namespace boardlink {
@@ -34,6 +35,14 @@ public:
     bool setCommandReadyHandler(CommandReadyHandler handler);
     using ContextHandler = bool (*)(const ProductContext&, uint32_t, ContextResult&);
     bool setContextHandler(ContextHandler handler);
+    using TerminalHandler = bool (*)(const v4::Message&, const TerminalEvent&, uint32_t);
+    using CloudReceiptHandler = bool (*)(const CloudReceipt&, uint32_t);
+    bool setTerminalHandler(TerminalHandler handler);
+    bool setCloudReceiptHandler(CloudReceiptHandler handler);
+    // Delivery is idempotent and independent of new-command/telemetry gates.
+    // Queueing or LinkAck is never permission to delete a durable result.
+    bool publishTerminal(const TerminalEvent& event, uint32_t nowMs);
+    bool forwardCloudReceipt(const CloudReceipt& receipt, uint32_t nowMs);
     // Idempotent configuration, not a motion command. Completion requires the
     // exact application reply; LinkAck and equal STATUS versions are not proof.
     bool requestContext(const ProductContext& context, uint32_t nowMs);
@@ -80,6 +89,7 @@ private:
     void expireCommand(uint32_t nowMs);
     void expireStop(uint32_t nowMs);
     void expireContext(uint32_t nowMs);
+    void queueMotionOutput(uint32_t nowMs, const Status* localStatus);
     v4::Parser parser_{};
     v4::Assembler assembler_{};
     v4::Session session_{};
@@ -92,6 +102,9 @@ private:
     StopHandler stopHandler_ = nullptr;
     CommandReadyHandler commandReadyHandler_ = nullptr;
     ContextHandler contextHandler_ = nullptr;
+    TerminalHandler terminalHandler_ = nullptr;
+    CloudReceiptHandler cloudReceiptHandler_ = nullptr;
+    v4::Pairing pairing_{};
     ContextResult contextResult_{}, sentContext_{};
     ContextSendState contextState_ = ContextSendState::Idle;
     uint32_t contextId_ = 0, contextAt_ = 0;

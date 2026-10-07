@@ -1,8 +1,10 @@
 #include "ReadOnlyBoardLink.h"
 
+#include <ArduinoJson.h>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using namespace babytech::boardlink;
@@ -1139,6 +1141,654 @@ void senderSameBootHelloCannotGateStop() {
         assert(f.brain.connected(f.now) && f.motion.connected(f.now));
     }
 }
+
+static_assert(uint8_t(Kind::Terminal) == 12 && uint8_t(Kind::CloudReceipt) == 13,
+              "Approved terminal/receipt wire kinds");
+unsigned eventScenarios = 0;
+std::vector<Message> observedTerminals;
+std::vector<TerminalEvent> observedEvents;
+std::vector<CloudReceipt> observedReceipts;
+std::vector<uint32_t> terminalTimes, receiptTimes;
+bool terminalAccepted = true, receiptAccepted = true;
+std::string expectedReceiptEventId;
+
+bool handleTerminal(const Message& raw, const TerminalEvent& event, uint32_t now) {
+    observedTerminals.push_back(raw);
+    observedEvents.push_back(event);
+    terminalTimes.push_back(now);
+    return terminalAccepted;
+}
+bool handleReceipt(const CloudReceipt& receipt, uint32_t now) {
+    observedReceipts.push_back(receipt);
+    receiptTimes.push_back(now);
+    return receiptAccepted && (expectedReceiptEventId.empty() || expectedReceiptEventId == receipt.eventId);
+}
+void eventSetup(Fixture& f) {
+    ++eventScenarios;
+    observedTerminals.clear(); observedEvents.clear(); observedReceipts.clear();
+    terminalTimes.clear(); receiptTimes.clear();
+    expectedReceiptEventId.clear();
+    terminalAccepted = receiptAccepted = stopAccepted = finalCommandReady = true;
+    stopCalls = commandCalls = 0;
+    assert(f.brain.setTerminalHandler(handleTerminal));
+    assert(f.motion.setCloudReceiptHandler(handleReceipt));
+    assert(f.motion.setStopHandler(handleStop));
+    f.run(3000, false);
+    assert(f.brain.connected(f.now) && f.motion.connected(f.now));
+    assert(!f.brain.freshStatus(f.now));
+    f.toBrain.history.clear(); f.toMotion.history.clear();
+}
+TerminalEvent terminal(Source source = Source::CloudCommand, bool completed = true) {
+    TerminalEvent event;
+    event.request = senderCommand(987654, 500, source).request;
+    event.request.profileVersion = 123456;
+    event.request.waterMl = 237;
+    event.request.temperatureC = 47;
+    event.request.powderGPer100Ml = 13.123456f;
+    std::strcpy(event.request.babyId, "frozen baby \"name\"\\recipe\n\t\x01");
+    if (source == Source::CloudCommand)
+        std::strcpy(event.request.commandId, "original cloud \"command\"\\id\n");
+    assert(makeProductEventId(pairing(Role::Motion), source, event.request.sequence, event.eventId));
+    event.targetPowderG = productTargetPowderG(event.request);
+    event.completed = completed;
+    event.uptimeMs = UINT32_MAX - 17;
+    if (!completed) {
+        std::strcpy(event.reason, "stopped_by_user");
+        std::strcpy(event.errorCode, "STOP_REQUESTED");
+    }
+    return event;
+}
+CloudReceipt cloudReceipt(const TerminalEvent& event) {
+    CloudReceipt receipt;
+    std::strcpy(receipt.deviceId, event.request.deviceId);
+    std::strcpy(receipt.eventId, event.eventId);
+    return receipt;
+}
+void assertEvent(const TerminalEvent& actual, const TerminalEvent& expected) {
+    assert(sameProductRequest(actual.request, expected.request));
+    assert(!std::strcmp(actual.eventId, expected.eventId));
+    assert(actual.targetPowderG == expected.targetPowderG && actual.completed == expected.completed);
+    assert(actual.uptimeMs == expected.uptimeMs);
+    assert(!std::strcmp(actual.reason, expected.reason) && !std::strcmp(actual.errorCode, expected.errorCode));
+}
+void assertPayload(const Message& actual, const Message& expected) {
+    assert(actual.kind == expected.kind && actual.length == expected.length);
+    assert(!std::memcmp(actual.payload, expected.payload, actual.length));
+}
+Message eventMessage(const TerminalEvent& event, uint32_t id = 90000) {
+    Message result;
+    assert(encodeTerminalEvent(pairing(Role::Motion), event, result));
+    result.senderBoot = 22; result.receiverBoot = 11; result.messageId = id;
+    return result;
+}
+Message receiptMessage(const TerminalEvent& event, uint32_t id = 90001) {
+    Message result;
+    assert(encodeCloudReceipt(cloudReceipt(event), result));
+    result.senderBoot = 11; result.receiverBoot = 22; result.messageId = id;
+    return result;
+}
+void assertLinkReceipt(const Wire& wire, uint32_t id, Kind kind) {
+    unsigned matching = 0;
+    for (Kind candidate : {Kind::LinkAck, Kind::LinkReject})
+        for (const auto& message : messages(wire.history, candidate)) {
+            StaticJsonDocument<96> doc;
+            assert(!deserializeJson(doc, message.payload, message.length));
+            if (doc["message_id"].as<uint32_t>() == id) {
+                assert(candidate == kind);
+                ++matching;
+            }
+        }
+    assert(matching == 1);
+}
+
+void terminalReceiptRoundtrip() {
+    for (Source source : {Source::CloudCommand, Source::LocalTouch})
+        for (bool completed : {false, true}) {
+            Fixture f;
+            eventSetup(f);
+            const auto event = terminal(source, completed);
+            const auto original = eventMessage(event);
+            assert(original.length > kMaxFragment);
+            // Live UI/context deliberately disagrees with the historical snapshot.
+            f.status.snapshot.startEnabled = false;
+            f.status.feedingContextConfigured = false;
+            assert(f.motion.publishTerminal(event, f.now));
+            assert(!f.motion.publishTerminal(event, f.now));
+            f.run(500, false);
+            assert(observedEvents.size() == 1 && observedReceipts.empty());
+            assertEvent(observedEvents.front(), event);
+            const auto sent = messages(f.toBrain.history, Kind::Terminal);
+            assert(sent.size() == 1 && sent.front().senderBoot == 22 && sent.front().receiverBoot == 11);
+            assertPayload(sent.front(), original);
+            assertPayload(observedTerminals.front(), sent.front());
+            assert(observedTerminals.front().messageId == sent.front().messageId);
+            assert(terminalTimes.front() >= 3000 && terminalTimes.front() < f.now);
+            assertLinkReceipt(f.toMotion, sent.front().messageId, Kind::LinkAck);
+            StaticJsonDocument<2048> doc;
+            assert(!deserializeJson(doc, sent.front().payload, sent.front().length));
+            assert(doc.containsKey("command_seq") == (source == Source::CloudCommand));
+            assert(doc["dispensed_water_ml"].isNull() && !doc.containsKey("execution_mode"));
+
+            const auto receipt = cloudReceipt(event);
+            assert(f.brain.forwardCloudReceipt(receipt, f.now));
+            assert(!f.brain.forwardCloudReceipt(receipt, f.now));
+            f.run(500, false);
+            assert(observedReceipts.size() == 1);
+            assert(!std::strcmp(observedReceipts.front().deviceId, receipt.deviceId));
+            assert(!std::strcmp(observedReceipts.front().eventId, receipt.eventId));
+            assert(receiptTimes.front() >= 3500 && receiptTimes.front() < f.now);
+            const auto stored = messages(f.toMotion.history, Kind::CloudReceipt);
+            assert(stored.size() == 1 && stored.front().senderBoot == 11 && stored.front().receiverBoot == 22);
+            assertPayload(stored.front(), receiptMessage(event));
+            assertLinkReceipt(f.toBrain, stored.front().messageId, Kind::LinkAck);
+            f.run(3000, false);
+            assert(observedEvents.size() == 1 && observedReceipts.size() == 1);
+            assert(messages(f.toBrain.history, Kind::Terminal).size() == 1);
+            assert(messages(f.toMotion.history, Kind::CloudReceipt).size() == 1);
+            assert(f.brain.connected(f.now) && f.motion.connected(f.now) && !f.brain.freshStatus(f.now));
+        }
+}
+
+void terminalOriginalJsonAndDurableEvidence() {
+    Fixture f;
+    eventSetup(f);
+    const auto event = terminal(Source::LocalTouch, false);
+    MotionState durable;
+    durable.pairing = pairing(Role::Motion);
+    durable.localSequence = event.request.sequence;
+    durable.localResult.kind = MotionResultKind::Ordinary;
+    durable.localResult.request = event.request;
+    durable.localResult.accepted = true;
+    std::strcpy(durable.localResult.reason, "accepted");
+    assert(requestDigest(event.request, durable.localResult.digest));
+    durable.context.present = true;
+    durable.context.profileVersion = event.request.profileVersion + 1;
+    durable.context.cleared = true; // New/tombstoned context must not gate old results.
+    std::memset(durable.context.digest, 1, sizeof(durable.context.digest));
+    durable.pendingResultCount = 1;
+    auto& slot = durable.pendingResults[0];
+    slot.kind = MotionSlotKind::Terminal;
+    slot.request = event.request;
+    std::memcpy(slot.digest, durable.localResult.digest, sizeof(slot.digest));
+    std::strcpy(slot.executionId, "abcdef0123456789abcdef0123456789");
+    std::strcpy(slot.eventId, event.eventId);
+    slot.targetPowderG = event.targetPowderG;
+    slot.completed = event.completed; slot.uptimeMs = event.uptimeMs;
+    std::strcpy(slot.reason, event.reason); std::strcpy(slot.errorCode, event.errorCode);
+    uint8_t before[kMotionStateMaxSize], after[kMotionStateMaxSize];
+    const auto size = encodeMotionState(durable, before, sizeof(before));
+    assert(size);
+    TerminalEvent fromSlot;
+    assert(terminalEventFromSlot(durable.pairing, slot, fromSlot));
+    assertEvent(fromSlot, event);
+    assert(f.motion.publishTerminal(fromSlot, f.now));
+    f.run(500, false);
+    assert(observedReceipts.empty()); // Transport ACK cannot manufacture Cloud stored.
+    assert(f.brain.forwardCloudReceipt(cloudReceipt(fromSlot), f.now));
+    f.run(500, false);
+    assert(observedReceipts.size() == 1);
+    // This transport has no Store/NVS adapter: an owner must explicitly apply a receipt.
+    assert(durable.pendingResultCount == 1 && slot.kind == MotionSlotKind::Terminal);
+    assert(encodeMotionState(durable, after, sizeof(after)) == size);
+    assert(!std::memcmp(before, after, size));
+    assert(f.motion.publishTerminal(fromSlot, f.now)); // Still publishable, not auto-cleared.
+    f.run(500, false);
+    assert(observedEvents.size() == 2);
+
+    auto original = eventMessage(event);
+    const std::string whitespace = " \n\t" + std::string(
+        reinterpret_cast<const char*>(original.payload), original.length) + "\r\n ";
+    assert(whitespace.size() <= kMaxMessage);
+    original.length = uint16_t(whitespace.size());
+    std::memcpy(original.payload, whitespace.data(), original.length);
+    const auto at = f.now;
+    deliver(original, f.brain, at);
+    assert(observedEvents.size() == 3 && terminalTimes.back() == at);
+    assertEvent(observedEvents.back(), event);
+    assertPayload(observedTerminals.back(), original); // No parse/re-encode normalization.
+    assert(observedTerminals.back().senderBoot == original.senderBoot);
+    assert(observedTerminals.back().receiverBoot == original.receiverBoot);
+    assert(observedTerminals.back().messageId == original.messageId);
+}
+
+void eventRoleDeviceAndPairing() {
+    Fixture f;
+    eventSetup(f);
+    ReadOnlyLink unconfigured;
+    assert(!unconfigured.setTerminalHandler(handleTerminal));
+    assert(!unconfigured.setCloudReceiptHandler(handleReceipt));
+    assert(!unconfigured.publishTerminal(terminal(), f.now));
+    assert(!unconfigured.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+    assert(!f.motion.setTerminalHandler(handleTerminal));
+    assert(!f.brain.setCloudReceiptHandler(handleReceipt));
+    assert(!f.brain.publishTerminal(terminal(), f.now));
+    assert(!f.motion.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+    auto foreign = terminal();
+    std::strcpy(foreign.request.deviceId, "bt-other");
+    assert(!f.motion.publishTerminal(foreign, f.now));
+    assert(!f.brain.forwardCloudReceipt(cloudReceipt(foreign), f.now));
+    foreign = terminal(); foreign.eventId[4] = '1';
+    assert(!f.motion.publishTerminal(foreign, f.now));
+    foreign = terminal(Source::LocalTouch);
+    std::strcpy(foreign.request.commandId, "local-wrong-epoch-987654");
+    assert(!f.motion.publishTerminal(foreign, f.now));
+    assert(messages(f.toBrain.history, Kind::Terminal).empty());
+    assert(messages(f.toMotion.history, Kind::CloudReceipt).empty());
+
+    for (unsigned mismatch = 0; mismatch < 4; ++mismatch) {
+        Fixture wrong;
+        ++eventScenarios;
+        auto identity = pairing(Role::Motion);
+        if (mismatch == 0) identity.role = Role::Brain;
+        if (mismatch == 1) std::strcpy(identity.deviceId, "bt-other");
+        if (mismatch == 2) identity.epoch[0] = '1';
+        if (mismatch == 3) std::strcpy(identity.localPhysicalId, "123456789abc");
+        assert(wrong.motion.begin(identity, 22));
+        wrong.run(3000, false);
+        assert(!wrong.brain.connected(wrong.now) && !wrong.motion.connected(wrong.now));
+        assert(!wrong.motion.publishTerminal(terminal(), wrong.now));
+        assert(!wrong.brain.forwardCloudReceipt(cloudReceipt(terminal()), wrong.now));
+    }
+}
+
+void eventStrictReceiveRejections() {
+    for (bool receipt : {false, true})
+        for (unsigned bad = 0; bad < (receipt ? 7u : 10u); ++bad) {
+            Fixture f;
+            eventSetup(f);
+            auto message = receipt ? receiptMessage(terminal()) : eventMessage(terminal());
+            StaticJsonDocument<4096> doc;
+            assert(!deserializeJson(doc, static_cast<const uint8_t*>(message.payload), message.length));
+            if (bad == 0) doc["device_id"] = "bt-other";
+            if (bad == 1) doc["unexpected"] = true;
+            if (bad == 2) doc[receipt ? "status" : "event"] = "invalid";
+            if (bad == 3) doc["event_id"] = "evt-1123456789abcdef0123456789abcdef-c-987654";
+            if (bad == 4) doc.remove(receipt ? "status" : "command_seq");
+            if (bad == 5) doc[receipt ? "status" : "command_seq"] = 987654;
+            if (bad == 6) {
+                if (receipt) doc["event_id"] = "evt-0123456789abcdef0123456789abcdef-c-987655";
+                else doc["execution_mode"] = "brain_simulation";
+            }
+            if (bad == 7) doc["target_powder_g"] = 1;
+            if (bad == 8) doc["dispensed_water_ml"] = 237;
+            if (bad == 9) doc["reason"] = "success_must_not_have_reason";
+            message.length = uint16_t(serializeJson(doc, message.payload, sizeof(message.payload)));
+            // Receipt identity includes an epoch but the receipt codec only checks
+            // canonical ID/device. Non-current epochs belong to the durable owner.
+            const bool ownerValidatedReceipt = receipt && (bad == 3 || bad == 6);
+            if (ownerValidatedReceipt) expectedReceiptEventId = terminal().eventId;
+            auto& receiver = receipt ? f.motion : f.brain;
+            deliver(message, receiver, f.now);
+            f.run(100, false);
+            assert(observedEvents.empty());
+            assert(observedReceipts.size() == (ownerValidatedReceipt ? 1u : 0u));
+            assertLinkReceipt(receipt ? f.toBrain : f.toMotion, message.messageId, Kind::LinkReject);
+        }
+    for (bool receipt : {false, true}) {
+        Fixture f;
+        eventSetup(f);
+        auto message = receipt ? receiptMessage(terminal()) : eventMessage(terminal());
+        --message.length; // Truncated JSON must not reach any application callback.
+        deliver(message, receipt ? f.motion : f.brain, f.now);
+        f.run(100, false);
+        assert(observedEvents.empty() && observedReceipts.empty());
+        assertLinkReceipt(receipt ? f.toBrain : f.toMotion, message.messageId, Kind::LinkReject);
+
+        message = receipt ? receiptMessage(terminal()) : eventMessage(terminal());
+        message.senderBoot = receipt ? 22 : 11;
+        message.receiverBoot = receipt ? 11 : 22; // Valid session, wrong role direction.
+        f.toBrain.history.clear(); f.toMotion.history.clear();
+        deliver(message, receipt ? f.brain : f.motion, f.now);
+        f.run(100, false);
+        assert(observedEvents.empty() && observedReceipts.empty());
+        assertLinkReceipt(receipt ? f.toMotion : f.toBrain, message.messageId, Kind::LinkReject);
+    }
+    Fixture f;
+    eventSetup(f);
+    Message simulation;
+    assert(encodeBrainSimulationEvent(pairing(Role::Brain), terminal(), simulation));
+    simulation.senderBoot = 22; simulation.receiverBoot = 11; simulation.messageId = 99000;
+    deliver(simulation, f.brain, f.now);
+    f.run(100, false);
+    assert(observedEvents.empty());
+    assertLinkReceipt(f.toMotion, simulation.messageId, Kind::LinkReject);
+
+    for (bool receipt : {false, true})
+        for (unsigned bad = 0; bad < 2; ++bad) {
+            Fixture malformed;
+            eventSetup(malformed);
+            auto message = receipt ? receiptMessage(terminal()) : eventMessage(terminal());
+            std::string json(reinterpret_cast<const char*>(message.payload), message.length);
+            if (bad == 0) json.insert(1, "\"device_id\":\"bt-test-device\",");
+            else json[0] = char(0xff);
+            assert(json.size() <= kMaxMessage);
+            message.length = uint16_t(json.size());
+            std::memcpy(message.payload, json.data(), message.length);
+            deliver(message, receipt ? malformed.motion : malformed.brain, malformed.now);
+            malformed.run(100, false);
+            assert(observedEvents.empty() && observedReceipts.empty());
+            assertLinkReceipt(receipt ? malformed.toBrain : malformed.toMotion,
+                              message.messageId, Kind::LinkReject);
+        }
+}
+
+void eventMissingBusyHandlersAndNoRetry() {
+    for (bool receipt : {false, true})
+        for (bool missing : {false, true}) {
+            Fixture f;
+            eventSetup(f);
+            if (receipt) {
+                if (missing) assert(f.motion.setCloudReceiptHandler(nullptr));
+                else receiptAccepted = false;
+                assert(f.brain.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+            } else {
+                if (missing) assert(f.brain.setTerminalHandler(nullptr));
+                else terminalAccepted = false;
+                assert(f.motion.publishTerminal(terminal(), f.now));
+            }
+            f.run(500, false);
+            const auto sent = messages(receipt ? f.toMotion.history : f.toBrain.history,
+                                       receipt ? Kind::CloudReceipt : Kind::Terminal);
+            assert(sent.size() == 1);
+            assertLinkReceipt(receipt ? f.toBrain : f.toMotion, sent.front().messageId, Kind::LinkReject);
+            assert(observedEvents.size() == (!receipt && !missing ? 1u : 0u));
+            assert(observedReceipts.size() == (receipt && !missing ? 1u : 0u));
+            assert(f.brain.setTerminalHandler(handleTerminal));
+            assert(f.motion.setCloudReceiptHandler(handleReceipt));
+            terminalAccepted = receiptAccepted = true;
+            f.run(3000, false);
+            assert(messages(receipt ? f.toMotion.history : f.toBrain.history,
+                            receipt ? Kind::CloudReceipt : Kind::Terminal).size() == 1);
+            // Only the application can explicitly try again after transport refusal.
+            if (receipt) assert(f.brain.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+            else assert(f.motion.publishTerminal(terminal(), f.now));
+            f.run(500, false);
+            assert(observedEvents.size() == (!receipt ? (missing ? 1u : 2u) : 0u));
+            assert(observedReceipts.size() == (receipt ? (missing ? 1u : 2u) : 0u));
+        }
+    for (bool receipt : {false, true}) {
+        Fixture f;
+        eventSetup(f);
+        if (receipt) assert(f.brain.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+        else assert(f.motion.publishTerminal(terminal(), f.now));
+        // Drop every application fragment, but keep the reverse path running.
+        f.run(500, false, receipt, !receipt);
+        assert(observedEvents.empty() && observedReceipts.empty());
+        f.run(3500, false);
+        assert(observedEvents.empty() && observedReceipts.empty());
+        assert(messages(receipt ? f.toMotion.history : f.toBrain.history,
+                        receipt ? Kind::CloudReceipt : Kind::Terminal).size() == 1);
+    }
+}
+
+void eventStaleBootsAndSessions() {
+    for (bool receipt : {false, true}) {
+        Fixture f;
+        eventSetup(f);
+        const auto original = receipt ? receiptMessage(terminal()) : eventMessage(terminal());
+        for (unsigned bad = 0; bad < 2; ++bad) {
+            ++eventScenarios;
+            auto message = original;
+            if (bad == 0) ++message.senderBoot;
+            else ++message.receiverBoot;
+            deliver(message, receipt ? f.motion : f.brain, f.now);
+        }
+        assert(observedEvents.empty() && observedReceipts.empty());
+        f.run(100, false);
+        assert(messages(f.toBrain.history, Kind::LinkAck).empty());
+        assert(messages(f.toMotion.history, Kind::LinkAck).empty());
+        f.run(2200, false, true, true);
+        assert(!f.brain.connected(f.now) && !f.motion.connected(f.now));
+        assert(!f.motion.publishTerminal(terminal(), f.now));
+        assert(!f.brain.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+        deliver(original, receipt ? f.motion : f.brain, f.now);
+        assert(observedEvents.empty() && observedReceipts.empty());
+        f.run(3000, false);
+        assert(f.brain.connected(f.now) && f.motion.connected(f.now));
+        assert(f.brain.begin(pairing(Role::Brain), 33));
+        assert(f.motion.begin(pairing(Role::Motion), 44));
+        assert(f.brain.setTerminalHandler(handleTerminal));
+        assert(f.motion.setCloudReceiptHandler(handleReceipt));
+        f.toBrain.bytes.clear(); f.toMotion.bytes.clear();
+        f.run(3000, false);
+        assert(f.brain.connected(f.now) && f.motion.connected(f.now));
+        deliver(original, receipt ? f.motion : f.brain, f.now);
+        assert(observedEvents.empty() && observedReceipts.empty());
+        if (receipt) assert(f.brain.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+        else assert(f.motion.publishTerminal(terminal(), f.now));
+        f.run(500, false);
+        assert(observedEvents.size() == (receipt ? 0u : 1u));
+        assert(observedReceipts.size() == (receipt ? 1u : 0u));
+    }
+}
+
+void eventBackpressureShortWritesAndControls() {
+    for (bool receipt : {false, true})
+        for (size_t limit : {size_t(1), size_t(7), size_t(64)}) {
+            Fixture f;
+            eventSetup(f);
+            auto& sink = receipt ? f.toMotion : f.toBrain;
+            sink.capacity = 0;
+            if (receipt) assert(f.brain.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+            else assert(f.motion.publishTerminal(terminal(), f.now));
+            f.run(100, false);
+            assert(observedEvents.empty() && observedReceipts.empty() && sink.history.empty());
+            if (receipt) assert(!f.brain.forwardCloudReceipt(cloudReceipt(terminal()), f.now));
+            else assert(!f.motion.publishTerminal(terminal(), f.now));
+            sink.capacity = 64; sink.zeroWrite = true;
+            f.run(50, false);
+            assert(sink.history.empty());
+            sink.zeroWrite = false; sink.writeLimit = limit;
+            // Tight clock steps model a short-write UART without manufacturing
+            // a 5-ms pause per byte (which would exceed the assembler timeout).
+            for (unsigned step = 0; step < 2000; ++step) {
+                f.brain.poll(f.now, f.toMotion);
+                f.motion.poll(f.now, f.toBrain);
+                f.toMotion.deliver(f.motion, f.now, false);
+                f.toBrain.deliver(f.brain, f.now, false);
+                if (step % 8 == 7) ++f.now;
+            }
+            assert(observedEvents.size() == (receipt ? 0u : 1u));
+            assert(observedReceipts.size() == (receipt ? 1u : 0u));
+            const auto sent = messages(sink.history, receipt ? Kind::CloudReceipt : Kind::Terminal);
+            assert(sent.size() == 1);
+            assertPayload(sent.front(), receipt ? receiptMessage(terminal()) : eventMessage(terminal()));
+            assertLinkReceipt(receipt ? f.toBrain : f.toMotion, sent.front().messageId, Kind::LinkAck);
+            assert(f.brain.connected(f.now) && f.motion.connected(f.now));
+        }
+    for (bool receipt : {false, true}) {
+        Fixture f;
+        auto historical = terminal();
+        if (receipt) {
+            auto brainPair = pairing(Role::Brain), motionPair = pairing(Role::Motion);
+            std::memset(brainPair.deviceId, 'd', sizeof(brainPair.deviceId) - 1);
+            std::strcpy(motionPair.deviceId, brainPair.deviceId);
+            std::strcpy(historical.request.deviceId, brainPair.deviceId);
+            assert(f.brain.begin(brainPair, 11));
+            assert(f.motion.begin(motionPair, 22));
+            Message fragmentedReceipt;
+            assert(encodeCloudReceipt(cloudReceipt(historical), fragmentedReceipt));
+            assert(fragmentedReceipt.length > kMaxFragment);
+        }
+        eventSetup(f);
+        if (receipt) assert(f.brain.forwardCloudReceipt(cloudReceipt(historical), f.now));
+        else assert(f.motion.publishTerminal(historical, f.now));
+        auto& sink = receipt ? f.toMotion : f.toBrain;
+        sink.writeLimit = 7;
+        f.step(false); // A partial ordinary frame is already on the wire.
+        assert(observedEvents.empty() && observedReceipts.empty());
+        assert(f.brain.requestStop(StopRequest{}, f.now));
+        f.run(900, false);
+        assert(stopCalls == 1 && f.brain.stopSendState() == StopSendState::Received);
+        assert(observedEvents.size() == (receipt ? 0u : 1u));
+        assert(observedReceipts.size() == (receipt ? 1u : 0u));
+        if (receipt) {
+            Parser parser;
+            Frame frame;
+            unsigned receiptFragments = 0;
+            bool stopSeen = false;
+            for (uint8_t byte : sink.history)
+                if (parser.push(byte, f.now, frame)) {
+                    if (frame.kind == Kind::Stop) {
+                        assert(receiptFragments == 1); // Finish first frame, then urgent control.
+                        stopSeen = true;
+                    }
+                    if (frame.kind == Kind::CloudReceipt) {
+                        if (receiptFragments) assert(stopSeen);
+                        ++receiptFragments;
+                    }
+                }
+            assert(stopSeen && receiptFragments > 1);
+        }
+        f.run(2000, false);
+        assert(f.brain.connected(f.now) && f.motion.connected(f.now));
+        assert(!messages(f.toBrain.history, Kind::Heartbeat).empty());
+        assert(!messages(f.toMotion.history, Kind::Heartbeat).empty());
+        assert(observedEvents.size() == (receipt ? 0u : 1u));
+        assert(observedReceipts.size() == (receipt ? 1u : 0u));
+    }
+}
+
+bool answerEventContext(const ProductContext& context, uint32_t, ContextResult& result) {
+    result = ContextResult{};
+    std::strcpy(result.deviceId, context.deviceId);
+    result.profileVersion = context.profileVersion;
+    result.cleared = context.cleared;
+    result.status = ContextStatus::Stored;
+    return contextDigest(context, result.digest);
+}
+
+void eventPendingMotionReplyPriority() {
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        const Kind kind = mode < 2 ? Kind::Command : mode == 2 ? Kind::ResultQuery : Kind::Context;
+        Fixture f;
+        eventSetup(f);
+        Message incoming;
+        if (kind == Kind::Command) {
+            assert(f.motion.setCommandHandler(handleCommand));
+            if (mode == 1) assert(f.motion.setCommandReadyHandler(commandReady));
+            incoming = commandMessage(90000);
+        } else if (kind == Kind::ResultQuery) {
+            assert(f.motion.setResultQueryHandler(answerQuery));
+            assert(encodeResultQuery(query(), incoming));
+        } else {
+            assert(f.motion.setContextHandler(answerEventContext));
+            ProductContext context;
+            std::strcpy(context.deviceId, "bt-test-device");
+            context.profileVersion = 123457;
+            context.cleared = true;
+            assert(encodeContextMessage(context, incoming));
+        }
+        incoming.senderBoot = 11; incoming.receiverBoot = 22; incoming.messageId = 90000;
+        deliver(incoming, f.motion, f.now);
+        assert(!f.motion.publishTerminal(terminal(), f.now));
+        const Kind reply = kind == Kind::Command ? Kind::CommandResult :
+                           kind == Kind::ResultQuery ? Kind::Result : Kind::ContextResult;
+        const auto historical = terminal();
+        unsigned publications = 0;
+        for (unsigned n = 0; n < 1000; n += 5) {
+            // Actual owner scheduling: the historical publisher runs before poll
+            // every loop. A ready reply must not lose the single ordinary slot.
+            if (f.motion.publishTerminal(historical, f.now)) {
+                ++publications;
+                assert(messages(f.toBrain.history, reply).size() == 1);
+            }
+            f.step(false);
+        }
+        assert(messages(f.toBrain.history, reply).size() == 1);
+        assert(publications > 0 && !observedEvents.empty());
+        assert(f.brain.connected(f.now) && f.motion.connected(f.now));
+    }
+
+    Fixture f;
+    eventSetup(f);
+    assert(f.motion.setCommandHandler(handleCommand));
+    assert(f.motion.setCommandReadyHandler(commandReady));
+    finalCommandReady = false;
+    deliver(commandMessage(90000), f.motion, f.now);
+    assert(f.motion.publishTerminal(terminal(), f.now));
+    f.run(500, false);
+    assert(observedEvents.size() == 1);
+    assert(messages(f.toBrain.history, Kind::CommandResult).empty());
+    assert(f.motion.publishTerminal(terminal(), f.now));
+    f.run(500, false);
+    assert(observedEvents.size() == 2);
+    assert(messages(f.toBrain.history, Kind::CommandResult).empty());
+    finalCommandReady = true;
+    assert(!f.motion.publishTerminal(terminal(), f.now));
+    for (unsigned n = 0; n < 1000; n += 5) {
+        if (f.motion.publishTerminal(terminal(), f.now))
+            assert(messages(f.toBrain.history, Kind::CommandResult).size() == 1);
+        f.step(false);
+    }
+    assert(messages(f.toBrain.history, Kind::CommandResult).size() == 1);
+    assert(observedEvents.size() > 2);
+}
+
+void sustainedTerminalPublisherKeepsStatusFresh() {
+    for (bool beforePoll : {false, true})
+        for (size_t writeLimit : {size_t(17), size_t(64)}) {
+            Fixture f;
+            eventSetup(f);
+            f.toBrain.writeLimit = writeLimit;
+            f.run(1000);
+            assert(f.brain.freshStatus(f.now));
+            f.toBrain.history.clear(); f.toMotion.history.clear();
+            const auto historical = terminal();
+            const uint32_t startedAt = f.now;
+            uint32_t previousSample = f.brain.peerStatus().sampleUptimeMs;
+            size_t previousEvents = observedEvents.size();
+            unsigned publications = 0;
+            bool stopRequested = false;
+            uint32_t stopAt = 0;
+            Parser outbound;
+            Frame frame;
+            size_t parsedBytes = 0;
+            for (unsigned elapsed = 0; elapsed < 6000; elapsed += 5) {
+                f.status.sampleUptimeMs = f.now;
+                if (beforePoll && f.motion.publishTerminal(historical, f.now)) ++publications;
+                f.brain.poll(f.now, f.toMotion);
+                f.motion.poll(f.now, f.toBrain, &f.status);
+                if (!beforePoll && f.motion.publishTerminal(historical, f.now)) ++publications;
+                f.toMotion.deliver(f.motion, f.now, false);
+                f.toBrain.deliver(f.brain, f.now, false);
+                // Trigger Stop while the real Motion peer is partway through
+                // a multi-frame terminal, not after a synthetic idle interval.
+                while (parsedBytes < f.toBrain.history.size())
+                    if (outbound.push(f.toBrain.history[parsedBytes++], f.now, frame) &&
+                        !stopRequested && elapsed >= 2000 &&
+                        frame.kind == Kind::Terminal && frame.offset == 0) {
+                        assert(frame.total > frame.length);
+                        assert(f.brain.requestStop(StopRequest{}, f.now));
+                        stopRequested = true;
+                        stopAt = f.now;
+                    }
+                assert(f.brain.connected(f.now) && f.motion.connected(f.now));
+                assert(f.brain.freshStatus(f.now));
+                if (stopRequested) {
+                    // Host scheduling bounds only, not a physical UART guarantee.
+                    assert(stopCalls == 1 || uint32_t(f.now - stopAt) <= 50);
+                    assert(f.brain.stopSendState() == StopSendState::Received ||
+                           uint32_t(f.now - stopAt) <= 100);
+                }
+                f.now += 5;
+                if ((elapsed + 5) % 1000 == 0) {
+                    assert(observedEvents.size() > previousEvents);
+                    assert(f.brain.peerStatus().sampleUptimeMs > previousSample);
+                    previousEvents = observedEvents.size();
+                    previousSample = f.brain.peerStatus().sampleUptimeMs;
+                }
+            }
+            assert(f.now - startedAt > kMessageTimeoutMs && f.now - startedAt > kLinkTimeoutMs);
+            assert(publications >= 6 && observedEvents.size() >= 6);
+            assert(statusCount(f.toBrain.history) >= 4);
+            assert(stopRequested && stopCalls == 1);
+            assert(f.brain.stopSendState() == StopSendState::Received);
+            assert(messages(f.toMotion.history, Kind::Stop).size() == 1);
+            for (const auto& event : observedEvents) assertEvent(event, historical);
+            assert(observedReceipts.empty());
+        }
+}
 } // namespace
 
 int main() {
@@ -1168,6 +1818,16 @@ int main() {
     senderStopReceiptAndTimeout();
     senderControlSlotDoesNotGateOrRenew();
     senderSameBootHelloCannotGateStop();
+    terminalReceiptRoundtrip();
+    terminalOriginalJsonAndDurableEvidence();
+    eventRoleDeviceAndPairing();
+    eventStrictReceiveRejections();
+    eventMissingBusyHandlersAndNoRetry();
+    eventStaleBootsAndSessions();
+    eventBackpressureShortWritesAndControls();
+    eventPendingMotionReplyPriority();
+    sustainedTerminalPublisherKeepsStatusFresh();
     std::printf("%u Brain sender scenarios (existing receive/query/status regressions retained)\n", senderScenarios);
+    std::printf("%u terminal/receipt transport scenarios (no Store/NVS, broker or hardware adapters)\n", eventScenarios);
     std::puts("PASS v4 two-peer link, Motion commands/Stop/TTL, query, stale status, backpressure and restarts");
 }

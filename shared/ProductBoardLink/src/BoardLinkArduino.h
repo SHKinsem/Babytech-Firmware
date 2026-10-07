@@ -41,6 +41,18 @@ public:
     bool setContextHandler(ReadOnlyLink::ContextHandler handler) {
         return started_ && link_.setContextHandler(handler);
     }
+    bool setTerminalHandler(ReadOnlyLink::TerminalHandler handler) {
+        return started_ && link_.setTerminalHandler(handler);
+    }
+    bool setCloudReceiptHandler(ReadOnlyLink::CloudReceiptHandler handler) {
+        return started_ && link_.setCloudReceiptHandler(handler);
+    }
+    bool publishTerminal(const TerminalEvent& event, uint32_t nowMs) {
+        return started_ && link_.publishTerminal(event, nowMs);
+    }
+    bool forwardCloudReceipt(const CloudReceipt& receipt, uint32_t nowMs) {
+        return started_ && link_.forwardCloudReceipt(receipt, nowMs);
+    }
     bool requestContext(const ProductContext& context, uint32_t nowMs) {
         return started_ && link_.requestContext(context, nowMs);
     }

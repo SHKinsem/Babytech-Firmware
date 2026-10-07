@@ -43,7 +43,7 @@ def main():
                  "BrainStateRecord.cpp", "BrainStateStore.cpp", "BoardPairingRecord.cpp",
                  "MotionStateRecord.cpp", "MotionStateStore.cpp", "ProductResultQuery.cpp",
                  "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ProductContextMessages.cpp",
-                 "ReadOnlyBoardLink.cpp")]
+                 "ProductEventMessages.cpp", "ReadOnlyBoardLink.cpp")]
     sources += [root / "device-controller/src" / name for name in
                 ("MotionProductRuntime.cpp", "ProductSession.cpp", "DemoFlowController.cpp")]
     sources += [root / path for path in (

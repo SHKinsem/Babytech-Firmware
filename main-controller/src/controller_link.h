@@ -27,6 +27,12 @@ class ControllerLink {
   // Pairing was checked against the actual MAC during begin. A subsequent
   // UART failure must not hide it from the local read-only recovery owner.
   const babytech::v4::Pairing* verifiedPairing() const { return boardLink_.verifiedPairing(); }
+  bool setTerminalHandler(babytech::boardlink::ReadOnlyLink::TerminalHandler handler) {
+    return ready_ && boardLink_.setTerminalHandler(handler);
+  }
+  bool forwardCloudReceipt(const babytech::boardlink::CloudReceipt& receipt, uint32_t nowMs) {
+    return ready_ && boardLink_.forwardCloudReceipt(receipt, nowMs);
+  }
   bool requestCommand(const babytech::boardlink::CommandMessage& command, uint32_t nowMs) {
     return ready_ && boardLink_.requestCommand(command, nowMs);
   }

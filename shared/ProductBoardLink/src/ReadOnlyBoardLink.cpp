@@ -20,6 +20,9 @@ void ReadOnlyLink::reset() {
     stopHandler_ = nullptr;
     commandReadyHandler_ = nullptr;
     contextHandler_ = nullptr;
+    terminalHandler_ = nullptr;
+    cloudReceiptHandler_ = nullptr;
+    pairing_ = Pairing{};
     contextResult_ = sentContext_ = ContextResult{};
     contextState_ = ContextSendState::Idle;
     contextId_ = contextAt_ = 0;
@@ -53,7 +56,38 @@ bool ReadOnlyLink::begin(const Pairing& pairing, uint64_t boot) {
     reset();
     role_ = pairing.role;
     configured_ = session_.begin(pairing, boot);
+    if (configured_) pairing_ = pairing;
     return configured_;
+}
+
+bool ReadOnlyLink::setTerminalHandler(TerminalHandler handler) {
+    if (!configured_ || role_ != Role::Brain) return false;
+    terminalHandler_ = handler;
+    return true;
+}
+
+bool ReadOnlyLink::setCloudReceiptHandler(CloudReceiptHandler handler) {
+    if (!configured_ || role_ != Role::Motion) return false;
+    cloudReceiptHandler_ = handler;
+    return true;
+}
+
+bool ReadOnlyLink::publishTerminal(const TerminalEvent& event, uint32_t nowMs) {
+    session_.poll(nowMs);
+    if (!healthy() || role_ != Role::Motion || !session_.connected(nowMs) ||
+        helloAckPending_ || tx_.ordinaryPending() || resultReplyPending_ || contextReplyPending_ ||
+        (commandReplyPending_ && (!commandReadyHandler_ || commandReadyHandler_(commandResult_))) ||
+        !encodeTerminalEvent(pairing_, event, scratch_)) return false;
+    return queue(scratch_);
+}
+
+bool ReadOnlyLink::forwardCloudReceipt(const CloudReceipt& receipt, uint32_t nowMs) {
+    session_.poll(nowMs);
+    if (!healthy() || role_ != Role::Brain || !session_.connected(nowMs) ||
+        helloAckPending_ || tx_.ordinaryPending() ||
+        std::strcmp(receipt.deviceId, pairing_.deviceId) ||
+        !encodeCloudReceipt(receipt, scratch_)) return false;
+    return queue(scratch_);
 }
 
 bool ReadOnlyLink::setResultQueryHandler(ResultQueryHandler handler) {
@@ -329,7 +363,17 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
     expireCommand(nowMs);
     expireStop(nowMs);
     expireContext(nowMs);
-    if (message.kind == Kind::Context && role_ == Role::Motion) {
+    if (message.kind == Kind::Terminal && role_ == Role::Brain) {
+        std::unique_ptr<TerminalEvent> event(new (std::nothrow) TerminalEvent);
+        const bool accepted = event && session_.connected(nowMs) && terminalHandler_ &&
+            decodeTerminalEvent(message, pairing_, *event) && terminalHandler_(message, *event, nowMs);
+        receipt(message.messageId, accepted);
+    } else if (message.kind == Kind::CloudReceipt && role_ == Role::Motion) {
+        CloudReceipt stored;
+        const bool accepted = session_.connected(nowMs) && cloudReceiptHandler_ &&
+            decodeCloudReceipt(message, pairing_.deviceId, stored) && cloudReceiptHandler_(stored, nowMs);
+        receipt(message.messageId, accepted);
+    } else if (message.kind == Kind::Context && role_ == Role::Motion) {
         const uint32_t receivedId = message.messageId;
         std::unique_ptr<ProductContext> context(new (std::nothrow) ProductContext);
         if (!context || !session_.connected(nowMs) || contextReplyPending_ || !contextHandler_ ||
@@ -584,6 +628,17 @@ void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatu
     // A lost status ACK cannot hold the sole normal-message slot indefinitely.
     if (awaitingStatusId_ && uint32_t(nowMs - awaitingStatusAt_) >= kMessageTimeoutMs)
         awaitingStatusId_ = 0;
+    queueMotionOutput(nowMs, localStatus);
+    tx_.pump(nowMs, sink);
+    // Reserve newly freed ordinary capacity for due replies/telemetry before
+    // the caller can enqueue another historical terminal. No telemetry gate
+    // is imposed when a local sample is unavailable.
+    queueMotionOutput(nowMs, localStatus);
+    if (commandInTransmitter_ && !tx_.ordinaryPending()) commandInTransmitter_ = false;
+    expireCommand(nowMs);
+}
+
+void ReadOnlyLink::queueMotionOutput(uint32_t nowMs, const Status* localStatus) {
     if (role_ == Role::Motion && resultReplyPending_ && session_.connected(nowMs) &&
         !helloAckPending_ && !tx_.ordinaryPending()) {
         if (encodeQueriedResult(queriedResult_, scratch_) && queue(scratch_))
@@ -610,9 +665,6 @@ void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatu
             statusSent_ = true; statusRequested_ = false;
         }
     }
-    tx_.pump(nowMs, sink);
-    if (commandInTransmitter_ && !tx_.ordinaryPending()) commandInTransmitter_ = false;
-    expireCommand(nowMs);
 }
 
 } }

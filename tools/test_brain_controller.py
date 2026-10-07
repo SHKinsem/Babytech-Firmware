@@ -44,9 +44,9 @@ def main():
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
                 ("BoardDiscovery.cpp", "BoardMaintenance.cpp", "BoardInstall.cpp", "BoardExportTransfer.cpp", "MotionExportSnapshot.cpp",
-                 "MotionStateRecord.cpp", "ProductContext.cpp", "ProductDigest.cpp",
+                 "MotionStateRecord.cpp", "BrainStateRecord.cpp", "ProductContext.cpp", "ProductDigest.cpp",
                  "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ProductCommandResult.cpp", "ReadOnlyBoardLink.cpp",
-                 "ProductContextMessages.cpp", "BoardLinkArduino.cpp")]
+                 "ProductContextMessages.cpp", "ProductEventMessages.cpp", "BoardLinkArduino.cpp")]
     sources += [stubs / "FakeBoardIo.cpp", root / "main-controller/src/controller_link.cpp",
                 root / "test/test_brain_controller.cpp", root / "tests/fakes/product_crypto/FakeProductCrypto.cpp"]
     with tempfile.TemporaryDirectory(prefix="babytech-brain-controller-") as directory:
