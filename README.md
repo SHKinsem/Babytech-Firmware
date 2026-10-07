@@ -81,7 +81,7 @@ python3 tools/prepare_board_pairing.py check --input /tmp/new-pairing.json
 
 Brain 持久状态组件已增加 `BrainStateRecord`/`BrainStateStore`：完整缓存、清除版本、本地发行序号和单个在途请求保存在同一 `brainstate/record`。显式受控安装后才可使用；普通加载不创建、不擦除记录。存储返回 `Stored` 仅代表提交/重新打开/读回核验成功，不是 Motion 已接受。已保存的在途请求重启后只能查询，不自动重新发送；清除请求槽保留序号，新宝宝配置不重写旧请求快照。读取/写入不确定时锁存故障，重复 `load()` 不能把同一运行实例倒退到旧 NVS。
 
-请求/上下文 SHA-256 使用 SDK mbedTLS，对固定字段编码计算，不依赖 JSON 字段顺序，也不是消息认证。Brain记录编码上界1491 bytes、当前最大合法本地记录1421 bytes，包含CRC和配对身份。实际Brain v4 setup现通过已核对本机MAC/角色的配对，只读加载与安装器共用的Store一次，保留完整配置/墓碑、本地序号和pending；UART初始化随后失败仍可读取本地证据，不要求Cloud在线。Missing/损坏/身份不符不创建或擦除记录，pending未知时不报成无请求，不因业务加载失败额外关闭网络诊断。普通loop不反复load，不发送/清除恢复的请求；触控/MQTT持久派发、结果查询和安装后的运行切换仍未接通，不可据此开放动作。测试：`python3 tools/test_product_state.py --sanitize`、`python3 tools/test_brain_state_store.py --sanitize`、`python3 tools/test_brain_controller.py --sanitize`；主机 SHA 使用 macOS CommonCrypto 或 Linux/WSL OpenSSL（`libssl-dev`），只替换SDK调用边界，不自写哈希实现。
+请求/上下文 SHA-256 使用 SDK mbedTLS，对固定字段编码计算，不依赖 JSON 字段顺序，也不是消息认证。Brain记录编码上界1491 bytes、当前最大合法本地记录1421 bytes，包含CRC和配对身份。实际Brain v4 setup现通过已核对本机MAC/角色的配对，只读加载与安装器共用的Store一次，保留完整配置/墓碑、本地序号和pending；UART初始化随后失败仍可读取本地证据，不要求Cloud在线。Missing/损坏/身份不符不创建或擦除记录，pending未知时不报成无请求，不因业务加载失败额外关闭网络诊断。普通loop不反复load，不发送/清除恢复的请求；触控/MQTT持久派发及实际UART结果查询仍未接通，首次安装后整机重新上电联调待验，不可据此开放动作。测试：`python3 tools/test_product_state.py --sanitize`、`python3 tools/test_brain_state_store.py --sanitize`、`python3 tools/test_brain_controller.py --sanitize`；主机 SHA 使用 macOS CommonCrypto 或 Linux/WSL OpenSSL（`libssl-dev`），只替换SDK调用边界，不自写哈希实现。
 
 Motion新增 `MotionStateRecord`/`MotionStateStore`，在单个 `productstate/record` 中保存配置屏障、cloud/local各自消费水位及最近结果、一个执行意图或待确认喂养终态。新拒绝同样消费序号；重复结果不授权再次运动，新配置与新拒绝不改旧执行快照。喂养终态须验证Cloud stored回执和新鲜静止证据才清除，水位保留。initialize/clean记录独立执行结果，不生成喂养事件；重启加载不是继续动作的许可。Cloud Stop先走立即安全停机，静止后再保存序号屏障；存储失败不能阻止Stop。
 
@@ -103,7 +103,7 @@ Motion v4统一读取USB并保留`OTA CODE`，避免两处抢读；默认固件�
 
 ### Brain UART安装前读取
 
-Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`。Motion经同一UART自动返回实际MAC及配对状态，无需第二USB；独立发现请求域、1000ms截止、无NVS写入/动作。`found`不创建配对或授予Start，损坏/读错/冲突不冒充Missing；超时可重试。该入口仅为支持工具及后续单Brain自动安装的基础，不是新的日常验证步骤。完整安装/运行切换仍未完成，旧正常配对使用轻量HELLO自动复用。
+Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`。Motion经同一UART自动返回实际MAC及配对状态，无需第二USB；独立发现请求域、1000ms截止、无NVS写入/动作。`found`不创建配对或授予Start，损坏/读错/冲突不冒充Missing；超时可重试。自动持久安装已内部调用此路径，该支持入口不是额外安装或日常验证步骤。最终工具/实板联调仍未完成，正常配对使用轻量HELLO自动复用。
 
 发现成功后，维护内`PAIR READ <device_id>`使用同一UART逐块拉取既有`MaintenanceExport`完整快照；只读`PAIR RECORDS`报告idle/pending/complete/invalid/unavailable/timed_out，不打印宝宝数据或密码。协议kind18，每块155 bytes、1秒截止，整体5秒；旧查询ID不能推进来源。同一Brain新的显式读取可用新挑战、递增ID和offset0立即替换丢包后的旧捕获，不重试动作。Brain最多临时分配16KiB+NUL字节区、另分配完整快照与codec解析区，失败局部返回，不写NVS或影响Motion调试；实际堆峰值/时序仍须实板测量。完整UTF-8上下文/墓碑、水位和四结果队列保留，读取状态不冒充Missing；complete仍不是安装授权。真实自动安装将内部调用此路径，而不是要求用户执行多条支持命令。
 
@@ -119,7 +119,7 @@ Brain仅为显式预约每500ms续期，响应截止1秒，Motion预约3秒到�
 
 可选v4的kind20安装通道已接同一UART收发owner及Motion实际导入目标，不新增USB诊断写命令。完整配对记录、旧档案/墓碑经有界分片传入；目标复用现有`productState`，每个持久阶段重新核对预约设备/nonce/双方身份与当前静止条件，调用原导入协调器，业务记录先写并读回、配对最后写。旧事件未结清、已使用水位/结果、内容冲突或存储错误不被覆盖，缺失上下文按全零编码。不确定写入错误只锁存导入组件，不借此永久禁用独立调试；超时保留部分写入证据，不自动重试或擦除。
 
-本板Installed不激活运行UART身份、网络或运动；Brain自动持久协调入口见下节，写后双板运行切换仍待实现。一次性交接位是受控入口的操作声明，固件不能据此证明broker账号已经撤销。测试`tools/test_board_install.py --sanitize`、`tools/test_motion_install.py --sanitize`及实际adapter测试使用生产codec/导入器，边界I/O为替身，不是实板Flash或迁移验收。
+本板Installed不在当前boot激活运行UART身份、网络或运动；Brain自动持久协调入口见下节。首次成功后采用整机手动重新上电一次，复用已有握手、不新增完成协调协议；重启联调仍待验。一次性交接位是受控入口的操作声明，固件不能据此证明broker账号已经撤销。测试`tools/test_board_install.py --sanitize`、`tools/test_motion_install.py --sanitize`及实际adapter测试使用生产codec/导入器，边界I/O为替身，不是实板Flash或迁移验收。
 
 ### 单Brain自动持久安装
 
@@ -132,6 +132,12 @@ Brain v4唯一loop已接`BrainInstaller`。本地维护期间，`PAIR INSTALL <d
 **日常开机和保留NVS的重新烧录不需要重新配对或人工双板校验**；换板、记录缺失/损坏或身份冲突仍按既有受控恢复处理，不清空或静默认领。失败/超时不能报安装完成或用重新上电代替核对，先保留证据按同身份恢复。此决定替代原自动运行切换要求，不新增固件重启或运动命令。
 
 当前不能把该流程用于生产迁移；最终单USB工具、重启联调、App动作及结果桥接仍待完成。软件回归`tools/test_brain_installer.py --sanitize`与两套SDK构建不代替真实Flash/UART/机械/堆栈验收；实际烧录/整机断电/生产操作仍需另行授权。
+
+### 只读请求结果查询核心
+
+`ProductResultQuery`实现既有RESULT_QUERY/RESULT的严格JSON codec，按设备/source/seq/command ID读取同一个Motion Store已验证的RAM记录。最近ACK、在途执行槽或四结果队列能返回原接受/拒绝和独立执行结果；水位只区分过期/未知，不能假定接受。身份矛盾返回request_conflict，未加载/存储故障不伪装零水位历史；普通请求返回SHA-256摘要供后续Brain核对，Cloud Stop不借用普通请求摘要。
+
+此组件不load/写NVS、不重放或清除任何请求，不改机械/网络门禁。测试`python3 tools/test_product_result_query.py --sanitize`使用生产Motion Store和codec，SDK/SHA兼容及NVS边界替身；尚未接UART运行转发或Brain pending自动查询，不称重启恢复闭环已完成。
 
 ### Brain USB网络配置
 

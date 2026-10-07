@@ -59,7 +59,7 @@ for name in ['build-wsl.ps1','build-wsl.sh','test_protocol.py','test_motion.py',
              'prepare_board_pairing.py','test_pairing_store.py',
              'test_product_context.py','test_legacy_context_store.py',
              'test_product_state.py','test_brain_state_store.py',
-             'test_motion_state_record.py','test_motion_state_store.py','test_motion_state_recovery.py','test_motion_result_queue.py','test_board_commissioning.py',
+             'test_motion_state_record.py','test_motion_state_store.py','test_product_result_query.py','test_motion_state_recovery.py','test_motion_result_queue.py','test_board_commissioning.py',
              'test_maintenance_console.py','test_maintenance_export.py','capture_board_export.py']:
     sources.add(root / 'tools' / name)
 sources.add(root / 'README.md')
