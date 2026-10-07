@@ -2,6 +2,7 @@
 
 #include "BoardPairingRecord.h"
 #include "MotionStateRecord.h"
+#include "BoardExportSource.h"
 
 namespace babytech { namespace boardlink {
 
@@ -11,16 +12,17 @@ ExportCommand parseMaintenanceExport(const char* line, char (&device)[65], char 
 // Read-only diagnostic capture, NOT an import authorization. Raw validated
 // state preserves watermarks and full context; no credentials are read/exported.
 // Place this object in static storage. Capture scratch is checked heap storage.
-class MaintenanceExport {
+class MaintenanceExport : public BoardExportSource {
 public:
     static constexpr uint32_t kLifetimeMs = 5000;
     bool begin(v4::Role role, const char* device, const char* challenge,
-               uint64_t boot, uint32_t nowMs);
+               uint64_t boot, uint32_t nowMs) override;
     bool active() const { return active_; }
     bool expired(uint32_t nowMs) const { return uint32_t(nowMs - beganAt_) >= kLifetimeMs; }
-    size_t peek(uint8_t* output, size_t capacity) const;
-    void consume(size_t length);
-    void cancel();
+    size_t remaining() const override { return active_ ? total_ - position_ : 0; }
+    size_t peek(uint8_t* output, size_t capacity) const override;
+    void consume(size_t length) override;
+    void cancel() override;
 
 private:
     uint8_t pair_[kPairingRecordMaxSize]{};

@@ -30,6 +30,11 @@ class ControllerLink {
   const babytech::boardlink::DiscoveryResult& discoveryResult() const {
     return boardLink_.discoveryResult();
   }
+  bool requestRecords(const char* device, uint32_t nowMs) {
+    return ready_ && boardLink_.requestRecords(device, nowMs);
+  }
+  babytech::boardlink::ExportTransferState recordsState() const { return boardLink_.recordsState(); }
+  const babytech::boardlink::MotionExportSnapshot* recordsSnapshot() const { return boardLink_.recordsSnapshot(); }
   // Historical telemetry survives link expiry/restart; connected() reports
   // liveness separately. Only a newly accepted sample may replace its values.
   const babytech::boardlink::Status* lastTelemetry() const {

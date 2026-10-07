@@ -32,9 +32,23 @@ public:
                           unsigned(result.pairingState));
             return true;
         }
+        if (!std::strcmp(line, "PAIR RECORDS")) {
+            const char* state = "records_idle";
+            switch (link.recordsState()) {
+                case boardlink::ExportTransferState::Idle: break;
+                case boardlink::ExportTransferState::Pending: state = "records_pending"; break;
+                case boardlink::ExportTransferState::Complete: state = "records_complete"; break;
+                case boardlink::ExportTransferState::Unavailable: state = "records_unavailable"; break;
+                case boardlink::ExportTransferState::Invalid: state = "records_invalid"; break;
+                case boardlink::ExportTransferState::TimedOut: state = "records_timed_out"; break;
+            }
+            return reply(state);
+        }
         if (!maintenance) return reply("maintenance_required");
         if (!std::strncmp(line, "PAIR DISCOVER ", 14))
             return reply(link.requestDiscovery(line + 14, nowMs) ? "discovery_pending" : "discovery_unavailable");
+        if (!std::strncmp(line, "PAIR READ ", 10))
+            return reply(link.requestRecords(line + 10, nowMs) ? "records_pending" : "records_unavailable");
         return reply("unknown_command");
     }
 };

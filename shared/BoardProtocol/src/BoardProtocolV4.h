@@ -19,7 +19,7 @@ constexpr uint64_t kMaxSequence = UINT64_C(9223372036854775807);
 enum class Kind : uint8_t {
     Hello = 1, HelloAck, Heartbeat, StatusQuery, Status, Context, ContextResult,
     Command, CommandResult, ResultQuery, Result, Terminal, CloudReceipt,
-    LinkAck, LinkReject, Stop, Discovery
+    LinkAck, LinkReject, Stop, Discovery, MigrationRead
 };
 
 struct Frame {

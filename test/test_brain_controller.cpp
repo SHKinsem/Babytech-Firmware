@@ -526,6 +526,26 @@ void consoleDiscoveryRoundTrip(DiscoveryPairState brainState, DiscoveryPairState
         assert(!controller.deviceId()[0] && io.tx == query);
         assert(controller.discoveryResult().state == expectedState);
         assert(io.blob == storedBrain && io.opens == opens && io.mutations == 0);
+        assert(console("PAIR RECORDS", false, controller, 33) == "[pair] records_idle\n");
+        assert(console("PAIR READ bt-brain-controller-test", false, controller, 33) ==
+               "[pair] maintenance_required\n");
+        if (unavailable) {
+            assert(console("PAIR READ bt-brain-controller-test", true, controller, 34) ==
+                   "[pair] records_unavailable\n");
+            assert(controller.recordsState() == ExportTransferState::Idle && !controller.recordsSnapshot());
+        } else {
+            io.randomWords = {1, 2, 3, 4};
+            assert(console("PAIR READ bt-brain-controller-test", true, controller, 34) ==
+                   "[pair] records_pending\n");
+            assert(console("PAIR RECORDS", false, controller, 34) == "[pair] records_pending\n");
+            for (unsigned i = 0; i < 32; ++i) controller.poll(34);
+            controller.poll(1034);
+            assert(console("PAIR RECORDS", false, controller, 1034) == "[pair] records_timed_out\n");
+            assert(!controller.recordsSnapshot());
+            discoveryOffline(controller, 1034);
+        }
+        assert(!controller.deviceId()[0] && !controller.sendIntent(display::DisplayIntent::StartFeeding, 1034));
+        assert(io.blob == storedBrain && io.opens == opens && io.mutations == 0);
     });
     std::printf("PASS real PAIR console/ControllerLink UART brain=%u motion=%u -> %s; never paired/ready/action\n",
                 unsigned(brainState), unsigned(motionState),

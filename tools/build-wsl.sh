@@ -85,6 +85,8 @@ for project in "${projects[@]}"; do
         python3 -m unittest discover -s tests -p test_maintenance_wiring.py
         python3 tools/test_board_link.py
         python3 tools/test_board_discovery.py
+        python3 tools/test_motion_export_snapshot.py
+        python3 tools/test_board_export_transfer.py
         python3 tools/test_board_arduino.py
         python3 tools/test_brain_controller.py
         python3 tools/test_brain_network.py

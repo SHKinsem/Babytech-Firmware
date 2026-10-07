@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -29,9 +30,12 @@ def main():
     sources = [root / "shared/BoardProtocol/src" / name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
-                ("BoardDiscovery.cpp", "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
+                ("BoardDiscovery.cpp", "BoardExportTransfer.cpp", "MotionExportSnapshot.cpp",
+                 "MotionStateRecord.cpp", "ProductContext.cpp", "ProductDigest.cpp",
+                 "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
                  "BoardLinkArduino.cpp")]
     sources += [stubs / "FakeBoardIo.cpp", root / "test/test_arduino_link.cpp"]
+    sources += [root / "tests/fakes/product_crypto/FakeProductCrypto.cpp"]
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-DARDUINO=10819"]
     # The production codecs use byte buffers, not Arduino String/Stream/Print
     # or flash strings. Disable only these unused ArduinoJson SDK integrations.
@@ -39,12 +43,16 @@ def main():
         command += [f"-DARDUINOJSON_ENABLE_{feature}=0"]
     if args.sanitize:
         command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
+    if sys.platform == "darwin":
+        command += ["-Wno-deprecated-declarations"]
     for include in (stubs, json_headers, root / "shared/BoardProtocol/src",
-                    root / "shared/ProductBoardLink/src", root / "shared/BabytechDisplayCore/src"):
+                    root / "shared/ProductBoardLink/src", root / "shared/BabytechDisplayCore/src",
+                    root / "tests/fakes/product_crypto"):
         command += ["-I", str(include)]
     with tempfile.TemporaryDirectory(prefix="babytech-board-arduino-") as temporary:
         binary = Path(temporary) / ("board_arduino.exe" if os.name == "nt" else "board_arduino")
-        subprocess.run(command + [str(source) for source in sources] + ["-o", str(binary)], check=True)
+        subprocess.run(command + [str(source) for source in sources] +
+                       (["-lcrypto"] if sys.platform != "darwin" else []) + ["-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
 
 

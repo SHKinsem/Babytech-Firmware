@@ -55,7 +55,7 @@ bool isControl(Kind kind) {
 
 bool validFrame(const Frame& frame) {
     if (uint8_t(frame.kind) < uint8_t(Kind::Hello) ||
-        uint8_t(frame.kind) > uint8_t(Kind::Discovery) || !frame.senderBoot ||
+        uint8_t(frame.kind) > uint8_t(Kind::MigrationRead) || !frame.senderBoot ||
         (!frame.receiverBoot && frame.kind != Kind::Hello && frame.kind != Kind::Discovery) || !frame.messageId ||
         frame.total > kMaxMessage || frame.length > kMaxFragment ||
         frame.offset > frame.total || frame.length > frame.total - frame.offset) return false;

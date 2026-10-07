@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -33,20 +34,25 @@ def main():
         command.append(f"-DARDUINOJSON_ENABLE_{feature}=0")
     if args.sanitize:
         command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
+    if sys.platform == "darwin":
+        command += ["-Wno-deprecated-declarations"]
     for include in (stubs, headers, root / "main-controller/src",
                     root / "shared/BoardProtocol/src", root / "shared/ProductBoardLink/src",
-                    root / "shared/BabytechDisplayCore/src"):
+                    root / "shared/BabytechDisplayCore/src", root / "tests/fakes/product_crypto"):
         command += ["-I", str(include)]
     sources = [root / "shared/BoardProtocol/src" / name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
-                ("BoardDiscovery.cpp", "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
+                ("BoardDiscovery.cpp", "BoardExportTransfer.cpp", "MotionExportSnapshot.cpp",
+                 "MotionStateRecord.cpp", "ProductContext.cpp", "ProductDigest.cpp",
+                 "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
                  "BoardLinkArduino.cpp")]
     sources += [stubs / "FakeBoardIo.cpp", root / "main-controller/src/controller_link.cpp",
-                root / "test/test_brain_controller.cpp"]
+                root / "test/test_brain_controller.cpp", root / "tests/fakes/product_crypto/FakeProductCrypto.cpp"]
     with tempfile.TemporaryDirectory(prefix="babytech-brain-controller-") as directory:
         binary = Path(directory) / ("brain_controller.exe" if os.name == "nt" else "brain_controller")
-        subprocess.run(command + [str(source) for source in sources] + ["-o", str(binary)],
+        subprocess.run(command + [str(source) for source in sources] +
+                       (["-lcrypto"] if sys.platform != "darwin" else []) + ["-o", str(binary)],
                        check=True, timeout=120)
         environment = os.environ.copy()
         if args.sanitize:

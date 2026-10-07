@@ -6,6 +6,7 @@
 #include "ReadOnlyBoardLink.h"
 #include "BoardPairingStore.h"
 #include "BoardDiscovery.h"
+#include "BoardExportTransfer.h"
 
 namespace babytech { namespace boardlink {
 
@@ -24,6 +25,10 @@ public:
         return started_ && discoveryEnabled_ && discovery_.request(deviceId, nowMs);
     }
     const DiscoveryResult& discoveryResult() const { return discovery_.result(); }
+    bool requestRecords(const char* deviceId, uint32_t nowMs);
+    bool setExportSource(BoardExportSource* source) { return records_.setSource(source); }
+    ExportTransferState recordsState() const { return records_.state(); }
+    const MotionExportSnapshot* recordsSnapshot() const { return records_.snapshot(); }
 private:
     class Sink : public v4::ByteSink {
     public:
@@ -39,6 +44,7 @@ private:
     ReadOnlyLink link_{};
     v4::Parser parser_{};
     BoardDiscovery discovery_{};
+    BoardExportTransfer records_{};
     PairingLoad pairingState_ = PairingLoad::Missing;
     v4::Pairing pairing_{};
     char deviceId_[65]{};

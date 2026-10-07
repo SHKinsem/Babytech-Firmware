@@ -101,9 +101,15 @@ STATUS读取真实持久水位、执行/event ID及配置屏障/墓碑；存储�
 
 Motion v4统一读取USB并保留`OTA CODE`，避免两处抢读；默认固件仍使用原OTA命令入口。命令限767个ASCII字符，每loop最多读64 bytes；超长、控制字符或2秒读取间隔的输入整行丢弃到换行，不执行后缀。已处理或拒绝的行缓冲清零，未知输入不回显。`OTA CODE`是既有本地管理员恢复功能，不要分享其输出。
 
-### Brain USB网络配置
+### Brain UART安装前读取
 
 Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`。Motion经同一UART自动返回实际MAC及配对状态，无需第二USB；独立发现请求域、1000ms截止、无NVS写入/动作。`found`不创建配对或授予Start，损坏/读错/冲突不冒充Missing；超时可重试。该入口仅为支持工具及后续单Brain自动安装的基础，不是新的日常验证步骤。完整安装/运行切换仍未完成，旧正常配对使用轻量HELLO自动复用。
+
+发现成功后，维护内`PAIR READ <device_id>`使用同一UART逐块拉取既有`MaintenanceExport`完整快照；只读`PAIR RECORDS`报告idle/pending/complete/invalid/unavailable/timed_out，不打印宝宝数据或密码。协议kind18，每块155 bytes、1秒截止，整体5秒；旧查询ID不能推进来源。同一Brain新的显式读取可用新挑战、递增ID和offset0立即替换丢包后的旧捕获，不重试动作。Brain最多临时分配16KiB+NUL字节区、另分配完整快照与codec解析区，失败局部返回，不写NVS或影响Motion调试；实际堆峰值/时序仍须实板测量。完整UTF-8上下文/墓碑、水位和四结果队列保留，读取状态不冒充Missing；complete仍不是安装授权。真实自动安装将内部调用此路径，而不是要求用户执行多条支持命令。
+
+验证入口：`python3 tools/test_motion_export_snapshot.py --sanitize`、`python3 tools/test_board_export_transfer.py --sanitize`和生产adapter/controller测试。前两者运行生产codec/导出及SHA/NVS边界替身；adapter短写测试另有内存导出fixture，不冒充全NVS实板。UART不是加密通道，接可信台架；只读捕获不证明后续未改变。
+
+### Brain USB网络配置
 
 仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。
 

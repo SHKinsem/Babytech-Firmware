@@ -1021,6 +1021,109 @@ void readOnlySession(bool enableDiscovery = false) {
     fake::assertReadOnly();
     std::puts("PASS real HELLO/ACK/heartbeat/STATUS UART session, wrong identity and no-action rejects");
 }
+// In-memory export source is an I/O boundary here. The transfer suite also
+// links the real MaintenanceExport/NVS reader against namespace-aware fakes.
+class RecordFixture : public BoardExportSource {
+public:
+    bool begin(Role role, const char* device, const char* challenge, uint64_t boot, uint32_t now) override {
+        assert(role == Role::Motion);
+        const int size = std::snprintf(bytes, sizeof(bytes),
+            "[maint-export] {\"schema\":1,\"role\":\"motion\",\"device_id\":\"%s\","
+            "\"physical_id\":\"aabbccddeeff\",\"boot\":\"%016llx\",\"challenge\":\"%s\","
+            "\"captured_ms\":%u,\"pair_status\":\"missing\",\"state_status\":\"missing\","
+            "\"legacy_status\":\"missing\",\"legacy_event\":\"missing\","
+            "\"pair_hex\":\"\",\"state_hex\":\"\",\"legacy_hex\":\"\"}\n",
+            device, static_cast<unsigned long long>(boot), challenge, unsigned(now));
+        assert(size > 0 && size_t(size) < sizeof(bytes));
+        length = size_t(size); position = 0; ++captures;
+        return true;
+    }
+    size_t remaining() const override { return length - position; }
+    size_t peek(uint8_t* output, size_t capacity) const override {
+        const size_t count = std::min(capacity, remaining());
+        std::memcpy(output, bytes + position, count); return count;
+    }
+    void consume(size_t count) override { assert(count <= remaining()); position += count; }
+    void cancel() override { std::memset(bytes, 0, sizeof(bytes)); length = position = 0; }
+    unsigned captures = 0;
+private:
+    char bytes[640]{};
+    size_t length = 0, position = 0;
+};
+
+void recordsOverActualAdapters() {
+    const auto drain = [](ArduinoBoardLink& adapter, uint32_t now) {
+        for (unsigned i = 0; i < 100; ++i) adapter.poll(now);
+    };
+    setup(); storageState(PairingLoad::Missing);
+    ArduinoBoardLink brain;
+    assert(brain.begin(Role::Brain, 44, 43, 115200, true));
+    assert(!brain.requestRecords(pairing().deviceId, 0));
+    assert(brain.requestDiscovery(pairing().deviceId, 0));
+    drainTx(brain, 0);
+    Bytes query = io.tx;
+    fake::State brainIo = io;
+
+    setup(Role::Motion); storageState(PairingLoad::Missing);
+    io.randomWords = {0, uint32_t(kPeerBoot)};
+    ArduinoBoardLink motion;
+    assert(motion.begin(Role::Motion, 44, 43, 115200, true));
+    RecordFixture source;
+    assert(motion.setExportSource(&source));
+    io.maxWrite = 7;
+    io.rx.insert(io.rx.end(), query.begin(), query.end());
+    drainTx(motion, 10);
+    Bytes reply = io.tx;
+    fake::State motionIo = io;
+    onBoard(brainIo, [&] {
+        io.rx.insert(io.rx.end(), reply.begin(), reply.end());
+        drainTx(brain, 20);
+        assert(brain.discoveryResult().state == DiscoveryState::Found);
+        io.tx.clear(); io.maxWrite = 3;
+        io.randomWords = {1, 2, 3, 4};
+        assert(brain.requestRecords(pairing().deviceId, 20));
+        assert(brain.recordsState() == ExportTransferState::Pending && !brain.recordsSnapshot());
+        drain(brain, 20);
+        query = io.tx; io.tx.clear();
+    });
+    unsigned chunks = 0;
+    uint32_t now = 30;
+    while (brain.recordsState() == ExportTransferState::Pending && chunks < 10) {
+        ++chunks;
+        assert(frames(query).size() == 1 && frames(query)[0].kind == Kind::MigrationRead);
+        onBoard(motionIo, [&] {
+            io.tx.clear(); io.rx.insert(io.rx.end(), query.begin(), query.end());
+            drain(motion, now);
+            reply = io.tx;
+            assert(frames(reply).size() == 1 && frames(reply)[0].kind == Kind::MigrationRead);
+        });
+        onBoard(brainIo, [&] {
+            io.rx.insert(io.rx.end(), reply.begin(), reply.end());
+            drain(brain, now + 10);
+            query = io.tx; io.tx.clear();
+            pairingBoundary(brain, Role::Brain, PairingLoad::Missing, now + 10);
+        });
+        now += 20;
+    }
+    assert(chunks > 1 && source.captures == 1);
+    assert(brain.recordsState() == ExportTransferState::Complete && brain.recordsSnapshot());
+    const auto& snapshot = *brain.recordsSnapshot();
+    assert(snapshot.boot == kPeerBoot && snapshot.pairStatus == ExportRead::Missing &&
+           snapshot.stateStatus == ExportRead::Missing && snapshot.legacyStatus == ExportRead::Missing);
+    assert(!std::strcmp(snapshot.deviceId, pairing().deviceId) && !std::strcmp(snapshot.physicalId, "aabbccddeeff"));
+    onBoard(brainIo, [&] {
+        pairingBoundary(brain, Role::Brain, PairingLoad::Missing, now);
+        io.randomWords = {1, 2, 3, 4};
+        assert(!brain.requestRecords("bad/device", now));
+        io.randomWords = {5, 6, 7, 8};
+        assert(brain.requestRecords(pairing().deviceId, now));
+        assert(!brain.recordsSnapshot());
+        brain.poll(now + BoardExportTransfer::kChunkTimeoutMs);
+        assert(brain.recordsState() == ExportTransferState::TimedOut && !brain.recordsSnapshot());
+    });
+    fake::assertReadOnly();
+    std::puts("PASS actual adapters pull records over one short-write UART, decode full capture, timeout locally; no pairing/motion/NVS writes");
+}
 }  // namespace
 
 int main() {
@@ -1038,6 +1141,7 @@ int main() {
     discoveryStartupFailures();
     discoveryReplyShortWrites();
     failedInitRetry();
+    recordsOverActualAdapters();
     fake::assertReadOnly();
     std::puts("PASS Arduino adapter host suite (real core + pair codec; I/O fakes only)");
 }

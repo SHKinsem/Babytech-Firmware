@@ -64,6 +64,8 @@ namespace {
 
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
 babytech::boardlink::ArduinoBoardLink productBoardLink;
+// Same read-only capture as USB diagnostics, independently owned by UART.
+babytech::boardlink::MaintenanceExport migrationExport;
 babytech::boardlink::MaintenanceUsbConsole commissioningSession;
 #else
 HardwareSerial brain(1);
@@ -1816,6 +1818,7 @@ void setup() {
     if (!productBoardLink.begin(babytech::v4::Role::Motion, kLinkRxPin, kLinkTxPin, kLinkBaud, true))
         Serial.printf("[uart] v4 unavailable, pairing state=%u\n",
                       unsigned(productBoardLink.pairingState()));
+    productBoardLink.setExportSource(&migrationExport);
 #else
     brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
 #endif
