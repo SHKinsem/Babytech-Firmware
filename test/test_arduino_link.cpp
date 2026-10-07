@@ -934,7 +934,7 @@ void readOnlySession(bool enableDiscovery = false) {
     assert(adapter.link().peerStatus().contextVersion == 77);
     assert(adapter.link().peerStatus().snapshot.waterMl == 150);
     assert(adapter.link().peerStatus().snapshot.stage == babytech::display::DisplayStage::Ready);
-    assert(!adapter.link().peerStatus().snapshot.startEnabled);
+    assert(adapter.link().peerStatus().snapshot.startEnabled);
     const auto& observed = adapter.link().peerStatus();
     assert(std::strcmp(observed.productProgress, "ready") == 0);
     assert(std::strcmp(observed.productError, "NONE") == 0);
@@ -1006,7 +1006,7 @@ void readOnlySession(bool enableDiscovery = false) {
         Message after;
         assert(encodeStatus(adapter.link().peerStatus(), after));
         assert(after.length == before.length && !std::memcmp(after.payload, before.payload, before.length));
-        assert(!adapter.link().peerStatus().snapshot.startEnabled);
+        assert(adapter.link().peerStatus().snapshot.startEnabled);
     }
     Message stale = peerStatus(100, 100);
     ++stale.senderBoot;

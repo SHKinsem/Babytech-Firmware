@@ -29,6 +29,14 @@ public:
 
     bool busy() const { return active_ || stopQuerying_; }
     bool resultPending() const { return replyPending_; }
+    bool ordinaryBusy() const { return active_; }
+    // A new explicit local operation has the same priority as a Cloud command;
+    // informational Stop lookup never owns the mechanics or blocks new work.
+    bool yieldToLocal(uint32_t nowMs) {
+        if (active_ || stopPending_) return false;
+        if (stopQuerying_) retryStopQuery(nowMs);
+        return true;
+    }
 
     void command(const boardlink::CloudCommand& incoming, uint32_t generation, uint32_t) {
         if (!boardlink::validProductRequest(incoming.request) ||

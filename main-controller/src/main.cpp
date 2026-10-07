@@ -12,6 +12,7 @@
 #include "brain_install_console.h"
 #include "brain_pending_recovery.h"
 #include "brain_cloud_dispatcher.h"
+#include "brain_local_dispatcher.h"
 #include <esp_system.h>
 #endif
 
@@ -23,12 +24,14 @@ babytech::display::ControllerLink controllerLink;
 #if BABYTECH_BOARD_LINK_V4
 babytech::brain::BrainNetwork network;
 babytech::boardlink::MaintenanceUsbConsole commissioningSession;
-// This same store will serve the subsequent local-command runtime owner.
+// Installation, local requests and result recovery share this single store.
 babytech::boardlink::BrainStateStore productState;
 babytech::brain::BrainPendingRecovery<babytech::display::ControllerLink> pendingRecovery(
   controllerLink, productState);
 bool locallyInstalling() { return commissioningSession.active() && !controllerLink.intentPending(); }
 uint32_t installNowMs() { return uint32_t(millis()); }
+babytech::brain::BrainLocalDispatcher<babytech::display::ControllerLink> localDispatcher(
+  controllerLink, productState, installNowMs);
 const char* cloudAdmission() {
   if (commissioningSession.active()) return "maintenance_active";
   if (!productState.ready()) return "storage_fault";
@@ -87,7 +90,7 @@ void setup() {
   Serial.setTxTimeoutMs(1);
 #endif
   Serial.setTimeout(20);
-  displayReady = panel.begin() && view.begin(BABYTECH_BOARD_LINK_V4 == 0);
+  displayReady = panel.begin() && view.begin(true);
   if (displayReady) {
     Serial.println("[Display] LVGL UI ready");
   } else {
@@ -122,9 +125,10 @@ void loop() {
                controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false);
   // Drain a queued urgent Stop before installer/recovery may perform Flash I/O.
   controllerLink.poll(uint32_t(millis()));
+  localDispatcher.poll(uint32_t(millis()));
   pollCommissioningConsole();
   installer.poll(uint32_t(millis()));
-  pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy());
+  pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy() || localDispatcher.busy());
   if (!commissioningSession.active()) controllerLink.releaseMaintenance(uint32_t(millis()));
 #endif
   if (!displayReady) {
@@ -132,23 +136,30 @@ void loop() {
     return;
   }
 
-  view.poll(nowMs);
+  const uint32_t displayNowMs = millis();
+  view.poll(displayNowMs);
   babytech::display::DisplaySnapshot snapshot;
-  bool controllerConnected = controllerLink.connected(nowMs);
+  bool controllerConnected = controllerLink.connected(displayNowMs);
+  bool intentPending = controllerLink.intentPending();
   if (controllerLink.hasSnapshot()) snapshot = controllerLink.snapshot();
 #if BABYTECH_BOARD_LINK_V4
   snapshot.cloudConnected = network.connected();
+  snapshot.startEnabled = localDispatcher.canStart(displayNowMs,
+    commissioningSession.active() || cloudDispatcher.ordinaryBusy());
+  intentPending = intentPending || cloudDispatcher.ordinaryBusy() || commissioningSession.active() ||
+    !productState.ready() || productState.state().pending ||
+    productState.state().localSequence >= babytech::v4::kMaxSequence;
   if (commissioningSession.active()) snapshot.startEnabled = false;
 #endif
-  if (controllerLink.protocolIncompatible(nowMs)) {
+  if (controllerLink.protocolIncompatible(displayNowMs)) {
     snapshot.primaryCondition =
         babytech::display::DisplayCondition::ProtocolIncompatible;
     snapshot.startEnabled = false;
     controllerConnected = true;
-  } else if (controllerLink.intentPending()) {
+  } else if (intentPending) {
     snapshot.startEnabled = false;
   }
-  view.update(snapshot, controllerConnected, controllerLink.intentPending());
+  view.update(snapshot, controllerConnected, intentPending);
 
   babytech::display::DisplayIntent intent;
   const bool hasIntent = view.takeIntent(intent);
@@ -157,9 +168,17 @@ void loop() {
     delay(5);
     return;
   }
-#endif
-  if (hasIntent && !controllerLink.sendIntent(intent, nowMs)) {
+  if (hasIntent) {
+    if (!cloudDispatcher.yieldToLocal(uint32_t(millis()))) {
+      Serial.println("[Brain] Local intent unavailable: busy");
+    } else if (!localDispatcher.dispatch(intent, uint32_t(millis()), commissioningSession.active())) {
+      Serial.printf("[Brain] Local intent unavailable: %s\n", localDispatcher.reason());
+    }
+  }
+#else
+  if (hasIntent && !controllerLink.sendIntent(intent, displayNowMs)) {
     Serial.println("[Display] Intent ignored while controller is unavailable");
   }
+#endif
   delay(5);
 }

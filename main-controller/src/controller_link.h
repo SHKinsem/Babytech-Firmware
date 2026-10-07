@@ -30,6 +30,7 @@ class ControllerLink {
   bool requestCommand(const babytech::boardlink::CommandMessage& command, uint32_t nowMs) {
     return ready_ && boardLink_.requestCommand(command, nowMs);
   }
+  bool commandAvailable(uint32_t nowMs) const { return ready_ && boardLink_.commandAvailable(nowMs); }
   babytech::boardlink::CommandSendState commandSendState() const { return boardLink_.commandSendState(); }
   const babytech::boardlink::CommandResult& commandResponse() const { return boardLink_.commandResponse(); }
   void cancelCommand() { boardLink_.cancelCommand(); }

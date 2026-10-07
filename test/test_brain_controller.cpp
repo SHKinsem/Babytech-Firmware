@@ -151,12 +151,11 @@ struct Fixture {
         assert(controller.lastTelemetryReceivedAtMs() == receivedAt);
         assert(status->powderGrams == 275 && status->contextVersion == 77);
         assert(std::strlen(status->babyId) == 96);
-        assert(!status->snapshot.startEnabled);
+        assert(status->snapshot.startEnabled);
     }
     void expectStatus(const Message& source, uint32_t receivedAt) const {
         Status expected;
         assert(decodeStatus(source, expected));
-        expected.snapshot.startEnabled = false;  // Read-only link normalization.
         assert(payload(controller.lastTelemetry()) == payload(&expected));
         assert(controller.lastTelemetryReceivedAtMs() == receivedAt);
     }

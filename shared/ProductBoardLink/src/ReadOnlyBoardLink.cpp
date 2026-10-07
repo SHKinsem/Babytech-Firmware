@@ -72,6 +72,13 @@ bool ReadOnlyLink::setCommandReadyHandler(CommandReadyHandler handler) {
     return true;
 }
 
+bool ReadOnlyLink::commandAvailable(uint32_t nowMs) const {
+    return role_ == Role::Brain && healthy() && session_.connected(nowMs) &&
+        !helloAckPending_ && !probeRequired_ && sendState_ != CommandSendState::Pending &&
+        lookupState_ != ResultLookupState::Pending && stopState_ != StopSendState::Pending &&
+        !tx_.ordinaryPending();
+}
+
 bool ReadOnlyLink::requestCommand(const CommandMessage& command, uint32_t nowMs) {
     constexpr uint16_t firstFrameBudgetMs = kCommandFirstFrameBudgetMs;
     session_.poll(nowMs);
@@ -318,8 +325,8 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
         const uint32_t sampleStep = status.sampleUptimeMs - peerSample_;
         if (valid && (!peerSampleSeen_ || (sampleStep && sampleStep < UINT32_C(0x80000000))) &&
             session_.status(message, nowMs)) {
-            // Read-only migration stage never authorizes a product action.
-            status.snapshot.startEnabled = false;
+            // Preserve Motion's observation. Consumers apply local ownership,
+            // cache and capability gates; telemetry itself grants no action.
             peerStatus_ = status;
             peerSample_ = status.sampleUptimeMs; peerSampleSeen_ = true;
         }

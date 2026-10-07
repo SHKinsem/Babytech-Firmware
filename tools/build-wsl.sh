@@ -96,6 +96,7 @@ for project in "${projects[@]}"; do
         python3 tools/test_brain_installer.py
         python3 tools/test_brain_pending_recovery.py
         python3 tools/test_brain_cloud_dispatcher.py
+        python3 tools/test_brain_local_dispatcher.py
         python3 tools/test_board_arduino.py
         python3 tools/test_brain_controller.py
         python3 tools/test_brain_network.py

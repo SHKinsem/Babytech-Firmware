@@ -131,7 +131,7 @@ void handshakeAndFreshness() {
     assert(f.brain.connected(f.now) && f.motion.connected(f.now));
     assert(f.brain.freshStatus(f.now));
     assert(f.brain.peerStatus().snapshot.stage == babytech::display::DisplayStage::Ready);
-    assert(!f.brain.peerStatus().snapshot.startEnabled);
+    assert(f.brain.peerStatus().snapshot.startEnabled);
     const auto& observed = f.brain.peerStatus();
     assert(std::strcmp(observed.productProgress, "ready") == 0);
     assert(std::strcmp(observed.productError, "NONE") == 0);
@@ -200,7 +200,7 @@ void wrongBoardAndUnsupported() {
     for (uint8_t byte : f.toBrain.history)
         if (parser.push(byte, 0, frame) && frame.kind == Kind::LinkReject) rejected = true;
     assert(rejected);
-    assert(!f.brain.peerStatus().snapshot.startEnabled);
+    assert(f.brain.peerStatus().snapshot.startEnabled);
 
     ReadOnlyLink unconfigured;
     Wire sink;
@@ -384,7 +384,7 @@ void resultQueryRuntime() {
     assert(f.brain.resultLookupState() == ResultLookupState::Complete);
     assert(sameResultQuery(f.brain.resultQueryResponse().query, query()));
     assert(f.brain.resultQueryResponse().accepted);
-    assert(!f.brain.peerStatus().snapshot.startEnabled);
+    assert(f.brain.peerStatus().snapshot.startEnabled);
     assert(f.brain.requestResult(f.brain.resultQueryResponse().query, f.now));
     assert(sameResultQuery(f.brain.resultQueryResponse().query, query()));
     f.run(500, false);
@@ -635,7 +635,7 @@ void commandAndStopRuntime() {
     deliver(commandMessage(13000), f.motion, f.now);
     assert(commandCalls == 4 && observedTtl == 500);
     f.run(200, false);
-    assert(!f.brain.peerStatus().snapshot.startEnabled); // Brain sender is still readonly.
+    assert(f.brain.peerStatus().snapshot.startEnabled); // Observation, not action authorization.
 }
 
 void commandDeferralAndFirstFragmentExpiry() {

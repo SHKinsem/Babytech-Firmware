@@ -171,7 +171,7 @@ class MaintenanceWiringTest(unittest.TestCase):
     def test_pending_query_owner_reuses_stores_without_action_or_network_gate(self):
         self.assertIn("controllerLink, productState);", self.brain)
         loop = function_body(self.brain, "void loop()")
-        self.assertIn("pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy())", loop)
+        self.assertIn("pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy() || localDispatcher.busy())", loop)
         self.assertLess(loop.index("controllerLink.poll(nowMs)"), loop.index("pendingRecovery.poll("))
         self.assertLess(loop.index("network.poll("), loop.index("pendingRecovery.poll("))
         setup = function_body(self.motion, "void setup()")
@@ -202,6 +202,24 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertIn("cloudDispatcher.stop(stop, generation, nowMs)", stop)
         for forbidden in ("productState", "commissioningSession", "pendingRecovery", "network.connected"):
             self.assertNotIn(forbidden, stop)
+
+    def test_local_touch_shares_store_uart_without_boot_replay_or_cloud_gate(self):
+        self.assertEqual(self.brain.count("BrainStateStore productState;"), 1)
+        self.assertIn("localDispatcher(\n  controllerLink, productState, installNowMs)", self.brain)
+        setup = function_body(self.brain, "void setup()")
+        self.assertIn("view.begin(true)", setup)
+        self.assertNotIn("localDispatcher.dispatch(", setup)
+        loop = function_body(self.brain, "void loop()")
+        self.assertLess(loop.index("controllerLink.poll(uint32_t(millis()))"), loop.index("localDispatcher.poll("))
+        self.assertLess(loop.index("localDispatcher.poll("), loop.index("pendingRecovery.poll("))
+        self.assertIn("snapshot.startEnabled = localDispatcher.canStart(displayNowMs,", loop)
+        self.assertLess(loop.index("cloudDispatcher.yieldToLocal("), loop.index("localDispatcher.dispatch("))
+        local = (ROOT / "main-controller/src/brain_local_dispatcher.h").read_text()
+        self.assertNotIn("network", function_body(local, "bool dispatch("))
+        self.assertNotIn("requestCommand(", function_body(local, "void poll("))
+        dispatch = function_body(local, "bool dispatch(")
+        self.assertLess(dispatch.index("commandAvailable("), dispatch.index("store_.reserveLocal("))
+        self.assertLess(dispatch.index("store_.reserveLocal("), dispatch.index("link_.requestCommand("))
 
     def test_v4_recovery_is_wired_to_boot_and_existing_stop_supervision(self):
         setup = function_body(self.motion, "void setup()")

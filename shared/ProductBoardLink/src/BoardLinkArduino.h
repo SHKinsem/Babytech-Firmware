@@ -42,6 +42,7 @@ public:
     bool requestCommand(const CommandMessage& command, uint32_t nowMs) {
         return started_ && link_.requestCommand(command, nowMs);
     }
+    bool commandAvailable(uint32_t nowMs) const { return started_ && link_.commandAvailable(nowMs); }
     CommandSendState commandSendState() const { return link_.commandSendState(); }
     const CommandResult& commandResponse() const { return link_.commandResponse(); }
     void cancelCommand() { link_.cancelCommand(); }

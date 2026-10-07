@@ -350,6 +350,24 @@ void stopRecoveryFaults() {
 }
 
 void stopRecoveryArbitration() {
+    scenario("local operation yields only informational Stop query", [] {
+        Rig r; const auto s = stop(); beginStopQuery(r, s);
+        CHECK(r.d.busy() && !r.d.ordinaryBusy());
+        CHECK(r.d.yieldToLocal(nowMs));
+        CHECK(!r.d.busy() && r.link.queryCancellations == 1 && r.net.acks.empty());
+        CHECK(r.link.stops.size() == 1 && r.link.commands.empty());
+        CHECK(r.d.yieldToLocal(nowMs) && r.link.queryCancellations == 1);
+    });
+    scenario("local operation cannot cancel Cloud acceptance owner", [] {
+        Rig r; const auto c = command(); r.query(c);
+        CHECK(r.d.ordinaryBusy() && !r.d.yieldToLocal(nowMs));
+        CHECK(r.link.queryCancellations == 0 && r.link.commands.size() == 1);
+    });
+    scenario("local operation waits for actual priority Stop transport", [] {
+        Rig r; r.d.stop(stop(), 7, nowMs);
+        CHECK(!r.d.ordinaryBusy() && !r.d.yieldToLocal(nowMs));
+        CHECK(!r.link.queryCancellations && r.link.stopState == StopSendState::Pending);
+    });
     for (const char* owner : {"durable local pending", "maintenance"})
         scenario(std::string("Stop recovery defers to external owner / ") + owner, [] {
             Rig r; const auto s = stop(); r.d.stop(s, 7, nowMs);

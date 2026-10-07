@@ -33,6 +33,8 @@ public:
     // Only a newly authorized request may be sent, once. The caller owns local
     // durable reservation / Cloud freshness and must query uncertain outcomes.
     bool requestCommand(const CommandMessage& command, uint32_t nowMs);
+    // Read-only transport preflight before reserving a local durable identity.
+    bool commandAvailable(uint32_t nowMs) const;
     CommandSendState commandSendState() const { return sendState_; }
     const CommandResult& commandResponse() const { return sentResult_; }
     void cancelCommand();
