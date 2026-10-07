@@ -2,6 +2,7 @@
 #include "BoardProtocolV4.h"
 #include "FlatJsonGuard.h"
 #include "RecordBytes.h"
+#include "BoundedJsonWriter.h"
 
 #include <ArduinoJson.h>
 #include <cmath>
@@ -18,37 +19,6 @@ static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
 namespace babytech { namespace boardlink {
 namespace {
 constexpr size_t kMaxFields = 11;
-
-// ArduinoJson 6 escapes quotes and common controls, but emits other controls
-// literally. Supplement those escapes while bounding the fully expanded JSON.
-struct ContextJsonWriter {
-    uint8_t* output;
-    size_t capacity;
-    size_t length = 0;
-    bool overflow = false;
-
-    size_t write(uint8_t value) {
-        const size_t width = value < 0x20 ? 6 : 1;
-        if (overflow || width > capacity - length) {
-            overflow = true;
-            return 0;
-        }
-        if (width == 6) {
-            constexpr char hex[] = "0123456789abcdef";
-            std::memcpy(output + length, "\\u00", 4);
-            output[length + 4] = hex[value >> 4];
-            output[length + 5] = hex[value & 15];
-        } else output[length] = value;
-        length += width;
-        return 1;
-    }
-
-    size_t write(const uint8_t* data, size_t size) {
-        size_t written = 0;
-        while (written < size && write(data[written])) ++written;
-        return written;
-    }
-};
 
 bool boundedText(const char* value, size_t capacity, bool nonempty = false) {
     if (!value) return false;
@@ -197,7 +167,7 @@ size_t encodeProductContext(const ProductContext& context, uint8_t* output, size
     const size_t limit = capacity < v4::kMaxMessage ? capacity : v4::kMaxMessage;
     std::unique_ptr<uint8_t[]> scratch(new (std::nothrow) uint8_t[limit]);
     if (!scratch) return 0;
-    ContextJsonWriter writer{scratch.get(), limit};
+    detail::BoundedJsonWriter writer{scratch.get(), limit};
     serializeJson(doc, writer);
     if (writer.overflow || !writer.length) return 0;
     std::memcpy(output, scratch.get(), writer.length);

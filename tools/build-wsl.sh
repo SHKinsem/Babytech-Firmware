@@ -72,6 +72,7 @@ for project in "${projects[@]}"; do
         python3 tools/test_board_commands.py
         python3 tools/test_product_context.py
         python3 tools/test_product_context_messages.py
+        python3 tools/test_product_event_messages.py
         python3 tools/test_legacy_context_store.py
         python3 tools/test_product_state.py
         python3 tools/test_brain_state_store.py

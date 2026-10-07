@@ -195,6 +195,12 @@ Brain v4现从既有MQTT配置槽解析完整档案/墓碑，回调只暂存最�
 
 同版本不同内容会记录本次运行的版本冲突，仅暂停该版本的新Prepare；重发原内容不能解除，需Cloud更高版本保存并精确确认。低版本旧包不撤销有效缓存，Initialize/Stop/调试和已接受快照不受这个门禁影响。冲突观察只保存在RAM，不新加NVS格式，也不承诺断电后的跨板原子撤销；故障配置仍须受控核对。
 
+### v4 终态与 Cloud 回执编解码
+
+共享`ProductEventMessages`实现已确认kind12/13的纯编解码。终态从持久执行快照提取原宝宝、配方、event ID和冻结uptime；Cloud来源附原`command_seq`，local_touch不附云序号。float32数值以9位有效数字往返，JSON转义后最多2047 bytes；失败不修改输出。收到新配置、重连或补报不能改写原终态；Brain转发应保留原JSON字节，不重新编码。回执严格为既有type/device_id/event_id/status=stored四字段，不把LINK_ACK、MQTT发送成功或命令接受当落库证明。
+
+`python3 tools/test_product_event_messages.py --sanitize`测试生产codec；父仓库`python3 Test/brain_event_contract_check.py --sanitize`将生产编码事件交给隔离Cloud数据库，再把实际Cloud回执交给固件解析器。无真实MQTT/UART、Flash或电机，不代表板间交付。终态UART收发、Brain MQTT转发、Motion匹配回执清队列和main接线尚未完成，公开can_start仍false；默认v3及旧单槽事件路径不变。
+
 ### Brain USB网络配置
 
 仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。
