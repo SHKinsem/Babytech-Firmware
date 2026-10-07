@@ -34,6 +34,12 @@ class ControllerLink {
   babytech::boardlink::CommandSendState commandSendState() const { return boardLink_.commandSendState(); }
   const babytech::boardlink::CommandResult& commandResponse() const { return boardLink_.commandResponse(); }
   void cancelCommand() { boardLink_.cancelCommand(); }
+  bool requestContext(const babytech::boardlink::ProductContext& context, uint32_t nowMs) {
+    return ready_ && boardLink_.requestContext(context, nowMs);
+  }
+  babytech::boardlink::ContextSendState contextSendState() const { return boardLink_.contextSendState(); }
+  const babytech::boardlink::ContextResult& contextResponse() const { return boardLink_.contextResponse(); }
+  void cancelContext() { boardLink_.cancelContext(); }
   bool requestStop(const babytech::v4::StopRequest& request, uint32_t nowMs) {
     return ready_ && boardLink_.requestStop(request, nowMs);
   }

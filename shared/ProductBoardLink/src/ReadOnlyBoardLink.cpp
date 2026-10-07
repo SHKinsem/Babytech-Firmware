@@ -4,6 +4,8 @@
 #include <cstring>
 #include <cinttypes>
 #include <cstdio>
+#include <memory>
+#include <new>
 
 namespace babytech { namespace boardlink {
 using namespace v4;
@@ -17,6 +19,12 @@ void ReadOnlyLink::reset() {
     commandHandler_ = nullptr;
     stopHandler_ = nullptr;
     commandReadyHandler_ = nullptr;
+    contextHandler_ = nullptr;
+    contextResult_ = sentContext_ = ContextResult{};
+    contextState_ = ContextSendState::Idle;
+    contextId_ = contextAt_ = 0;
+    receivedContextId_ = 0;
+    contextReplyPending_ = false;
     commandResult_ = CommandResult{};
     commandReplyPending_ = false;
     commandId_ = commandAt_ = highestCommandId_ = stopBarrier_ = 0;
@@ -72,10 +80,55 @@ bool ReadOnlyLink::setCommandReadyHandler(CommandReadyHandler handler) {
     return true;
 }
 
+bool ReadOnlyLink::setContextHandler(ContextHandler handler) {
+    if (!configured_ || role_ != Role::Motion || contextReplyPending_) return false;
+    contextHandler_ = handler;
+    return true;
+}
+
+bool ReadOnlyLink::requestContext(const ProductContext& context, uint32_t nowMs) {
+    session_.poll(nowMs);
+    expireCommand(nowMs); expireResultQuery(nowMs); expireStop(nowMs); expireContext(nowMs);
+    if (!commandAvailable(nowMs) || !validProductContext(context) ||
+        std::strcmp(context.deviceId, session_.localHello().deviceId)) return false;
+    ContextResult expected;
+    std::strcpy(expected.deviceId, context.deviceId);
+    expected.profileVersion = context.profileVersion;
+    expected.cleared = context.cleared;
+    if (!contextDigest(context, expected.digest) || !encodeContextMessage(context, scratch_) ||
+        !queue(scratch_)) return false;
+    expected.replyTo = contextId_ = scratch_.messageId;
+    sentContext_ = expected;
+    contextAt_ = nowMs;
+    contextState_ = ContextSendState::Pending;
+    return true;
+}
+
+void ReadOnlyLink::cancelContext() {
+    if (role_ != Role::Brain) return;
+    if (contextState_ == ContextSendState::Pending && contextId_)
+        tx_.invalidateOrdinary(Kind::Context, contextId_);
+    contextState_ = contextState_ == ContextSendState::Pending ?
+        ContextSendState::Cancelled : ContextSendState::Idle;
+}
+
+void ReadOnlyLink::expireContext(uint32_t nowMs) {
+    if (contextState_ != ContextSendState::Pending && contextState_ != ContextSendState::Complete) return;
+    if (!healthy() || !session_.connected(nowMs)) {
+        if (contextState_ == ContextSendState::Pending)
+            tx_.invalidateOrdinary(Kind::Context, contextId_);
+        contextState_ = ContextSendState::Unavailable;
+    } else if (contextState_ == ContextSendState::Pending && uint32_t(nowMs - contextAt_) >= kMessageTimeoutMs) {
+        tx_.invalidateOrdinary(Kind::Context, contextId_);
+        contextState_ = ContextSendState::TimedOut;
+    }
+}
+
 bool ReadOnlyLink::commandAvailable(uint32_t nowMs) const {
     return role_ == Role::Brain && healthy() && session_.connected(nowMs) &&
         !helloAckPending_ && !probeRequired_ && sendState_ != CommandSendState::Pending &&
         lookupState_ != ResultLookupState::Pending && stopState_ != StopSendState::Pending &&
+        contextState_ != ContextSendState::Pending &&
         !tx_.ordinaryPending();
 }
 
@@ -85,9 +138,11 @@ bool ReadOnlyLink::requestCommand(const CommandMessage& command, uint32_t nowMs)
     expireResultQuery(nowMs);
     expireCommand(nowMs);
     expireStop(nowMs);
+    expireContext(nowMs);
     if (role_ != Role::Brain || !healthy() || !session_.connected(nowMs) ||
         helloAckPending_ || probeRequired_ || sendState_ == CommandSendState::Pending ||
         lookupState_ == ResultLookupState::Pending || stopState_ == StopSendState::Pending ||
+        contextState_ == ContextSendState::Pending ||
         !validProductRequest(command.request) ||
         std::strcmp(command.request.deviceId, session_.localHello().deviceId) ||
         command.remainingTtlMs <= firstFrameBudgetMs || command.remainingTtlMs > 5000 ||
@@ -156,6 +211,7 @@ bool ReadOnlyLink::requestStop(const StopRequest& request, uint32_t nowMs) {
     ++nextId_;
     // Cancellation preserves uncertain business evidence in the caller's Store.
     cancelCommand();
+    if (contextState_ == ContextSendState::Pending) cancelContext();
     sentStopId_ = frame.messageId;
     sentStopAt_ = nowMs;
     stopState_ = StopSendState::Pending;
@@ -186,9 +242,10 @@ bool ReadOnlyLink::requestResult(const ResultQuery& query, uint32_t nowMs) {
     session_.poll(nowMs);
     expireResultQuery(nowMs);
     expireCommand(nowMs);
+    expireContext(nowMs);
     if (role_ != Role::Brain || !healthy() || !session_.connected(nowMs) ||
         helloAckPending_ || probeRequired_ || lookupState_ == ResultLookupState::Pending ||
-        sendState_ == CommandSendState::Pending ||
+        sendState_ == CommandSendState::Pending || contextState_ == ContextSendState::Pending ||
         !validResultQuery(query) || std::strcmp(query.deviceId, session_.localHello().deviceId) ||
         !encodeResultQuery(query, scratch_) || !queue(scratch_)) return false;
     // A caller may requery resultQueryResponse().query, which aliases our state.
@@ -232,6 +289,10 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
         const uint64_t previousBoot = session_.peerBoot();
         if (session_.hello(message, hello, nowMs) != HelloResult::Accepted) return;
         if (previousBoot != session_.peerBoot()) {
+            if (contextState_ == ContextSendState::Pending) cancelContext();
+            contextState_ = ContextSendState::Unavailable;
+            contextReplyPending_ = false;
+            receivedContextId_ = 0;
             if (lookupState_ == ResultLookupState::Pending)
                 lookupState_ = ResultLookupState::Unavailable;
             resultReplyPending_ = false;
@@ -267,7 +328,32 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
     expireResultQuery(nowMs);
     expireCommand(nowMs);
     expireStop(nowMs);
-    if (message.kind == Kind::Command && role_ == Role::Motion) {
+    expireContext(nowMs);
+    if (message.kind == Kind::Context && role_ == Role::Motion) {
+        const uint32_t receivedId = message.messageId;
+        std::unique_ptr<ProductContext> context(new (std::nothrow) ProductContext);
+        if (!context || !session_.connected(nowMs) || contextReplyPending_ || !contextHandler_ ||
+            !decodeContextMessage(message, session_.localHello().deviceId, *context) ||
+            !contextHandler_(*context, nowMs, contextResult_)) {
+            receipt(receivedId, false);
+            return;
+        }
+        contextResult_.replyTo = receivedId;
+        if (!matchesContextResult(contextResult_, *context) || !encodeContextResult(contextResult_, scratch_)) {
+            receipt(receivedId, false);
+            return;
+        }
+        contextReplyPending_ = true;
+    } else if (message.kind == Kind::ContextResult && role_ == Role::Brain) {
+        ContextResult result;
+        if (contextState_ == ContextSendState::Pending && decodeContextResult(message, result) &&
+            result.replyTo == contextId_ && result.profileVersion == sentContext_.profileVersion &&
+            result.cleared == sentContext_.cleared && !std::strcmp(result.deviceId, sentContext_.deviceId) &&
+            !std::memcmp(result.digest, sentContext_.digest, sizeof(result.digest))) {
+            sentContext_ = result;
+            contextState_ = ContextSendState::Complete;
+        }
+    } else if (message.kind == Kind::Command && role_ == Role::Motion) {
         CommandMessage command;
         const uint32_t receivedId = message.messageId;
         if (!session_.connected(nowMs) || commandReplyPending_ || !commandHandler_ ||
@@ -343,6 +429,10 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
             document["message_id"].as<uint32_t>() == lookupId_)
             lookupState_ = ResultLookupState::Unavailable;
         const auto acknowledged = document["message_id"].as<uint32_t>();
+        if (message.kind == Kind::LinkReject && contextState_ == ContextSendState::Pending && acknowledged == contextId_) {
+            cancelContext();
+            contextState_ = ContextSendState::Unavailable;
+        }
         if (message.kind == Kind::LinkReject && sendState_ == CommandSendState::Pending &&
             acknowledged == sentCommandId_) {
             if (commandInTransmitter_) tx_.invalidateOrdinary();
@@ -352,7 +442,7 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
         if (stopState_ == StopSendState::Pending && acknowledged == sentStopId_)
             stopState_ = message.kind == Kind::LinkAck ? StopSendState::Received : StopSendState::Rejected;
     } else {
-        // Commands, Stop, configuration and event receipts cannot mutate hardware here.
+        // Unconfigured handlers and unsupported kinds cannot mutate hardware here.
         receipt(message.messageId, false);
     }
 }
@@ -397,6 +487,12 @@ void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
         if (frame.messageId > stopBarrier_) stopBarrier_ = frame.messageId;
         if (commandId_ && commandId_ <= stopBarrier_)
             assembler_.cancelMessage(Kind::Command, frame.senderBoot, frame.receiverBoot, commandId_);
+        if (receivedContextId_ && receivedContextId_ <= stopBarrier_) {
+            assembler_.cancelMessage(Kind::Context, frame.senderBoot, frame.receiverBoot, receivedContextId_);
+            receivedContextId_ = 0;
+        }
+        if (contextReplyPending_ && contextResult_.replyTo <= stopBarrier_)
+            contextReplyPending_ = false;
         receipt(frame.messageId, stopHandler_(stop, nowMs));
         return;
     }
@@ -406,7 +502,10 @@ void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
     }
     assembler_.expire(nowMs);
     const bool starting = frame.kind == Kind::Command && !frame.offset && !assembler_.active();
+    const bool startingContext = frame.kind == Kind::Context && !frame.offset && !assembler_.active();
     const auto result = assembler_.accept(frame, nowMs, scratch_);
+    if (startingContext && (result == AssemblyResult::Incomplete || result == AssemblyResult::Complete))
+        receivedContextId_ = frame.messageId;
     if (starting && (result == AssemblyResult::Incomplete || result == AssemblyResult::Complete)) {
         if (frame.messageId > highestCommandId_) {
             highestCommandId_ = commandId_ = frame.messageId;
@@ -436,17 +535,19 @@ bool ReadOnlyLink::queueSupportFrame(const Frame& frame) {
 
 void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatus) {
     if (!configured_) { tx_.pump(nowMs, sink); return; }
-    if (!healthy()) { expireResultQuery(nowMs); expireCommand(nowMs); expireStop(nowMs); return; }
+    if (!healthy()) { expireResultQuery(nowMs); expireCommand(nowMs); expireStop(nowMs); expireContext(nowMs); return; }
     session_.poll(nowMs);
     assembler_.expire(nowMs);
     expireResultQuery(nowMs);
     expireCommand(nowMs);
     expireStop(nowMs);
+    expireContext(nowMs);
     if (!session_.canExchange()) {
         peerStatus_ = Status{};
         awaitingStatusId_ = 0;
         resultReplyPending_ = false;
         commandReplyPending_ = false;
+        contextReplyPending_ = false;
     }
     if (helloAckPending_ && !tx_.ordinaryPending()) {
         Hello identity = session_.localHello();
@@ -485,6 +586,10 @@ void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatu
         if ((!commandReadyHandler_ || commandReadyHandler_(commandResult_)) &&
             encodeCommandResult(commandResult_, scratch_) && queue(scratch_))
             commandReplyPending_ = false;
+    }
+    if (role_ == Role::Motion && contextReplyPending_ && session_.connected(nowMs) &&
+        !helloAckPending_ && !tx_.ordinaryPending()) {
+        if (encodeContextResult(contextResult_, scratch_) && queue(scratch_)) contextReplyPending_ = false;
     }
     if (role_ == Role::Motion && localStatus &&
         uint32_t(nowMs - localStatus->sampleUptimeMs) < kStatusIntervalMs &&

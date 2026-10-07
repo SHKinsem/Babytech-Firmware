@@ -1430,6 +1430,101 @@ void commandsOverActualAdapters() {
     onBoard(motionIo, [&] { fake::assertReadOnly(); });
     std::puts("PASS two actual adapters COMMAND/result and priority Stop with bounded short writes; handler fakes, no NVS or stationary claim");
 }
+
+unsigned contextHandlerCalls = 0;
+ProductContext lastContext;
+// Fake persistence decision only; the adapters, codecs and SHA remain real.
+bool storeContextFake(const ProductContext& context, uint32_t, ContextResult& result) {
+    ++contextHandlerCalls;
+    lastContext = context;
+    result = ContextResult{};
+    std::strcpy(result.deviceId, context.deviceId);
+    result.profileVersion = context.profileVersion;
+    result.cleared = context.cleared;
+    result.status = ContextStatus::Stored;
+    return contextDigest(context, result.digest);
+}
+
+void contextsOverActualAdapters() {
+    setup();
+    ArduinoBoardLink brain;
+    assert(brain.begin(Role::Brain, 44, 43));
+    io.maxWrite = 11;
+    fake::State brainIo = io;
+    setup(Role::Motion);
+    io.randomWords = {0, uint32_t(kPeerBoot)};
+    ArduinoBoardLink motion;
+    assert(motion.begin(Role::Motion, 44, 43));
+    assert(motion.setContextHandler(storeContextFake));
+    io.maxWrite = 7;
+    fake::State motionIo = io;
+    const auto exchange = [&](uint32_t now) {
+        onBoard(brainIo, [&] { brain.poll(now); });
+        motionIo.rx.insert(motionIo.rx.end(), brainIo.tx.begin(), brainIo.tx.end());
+        brainIo.tx.clear();
+        onBoard(motionIo, [&] { motion.poll(now); });
+        brainIo.rx.insert(brainIo.rx.end(), motionIo.tx.begin(), motionIo.tx.end());
+        motionIo.tx.clear();
+    };
+    ProductContext context;
+    std::strcpy(context.deviceId, pairing().deviceId);
+    std::strcpy(context.babyId, "baby-context-adapter");
+    std::memset(context.babyName, 'n', 320);
+    std::memset(context.formulaBrand, 'f', 480);
+    context.profileVersion = 91;
+    context.waterMl = 180;
+    context.temperatureC = 45;
+    context.powderGPer100Ml = 25;
+    assert(validProductContext(context));
+    contextHandlerCalls = 0;
+    onBoard(brainIo, [&] { assert(!brain.requestContext(context, 0)); });
+    uint32_t now = 0;
+    for (; now < 3000; ++now) exchange(now);
+    assert(brain.link().connected(now) && motion.link().connected(now));
+    const auto request = [&](const ProductContext& value) {
+        bool queued = false;
+        for (unsigned attempts = 0; attempts < 100 && !queued; ++attempts) {
+            onBoard(brainIo, [&] { queued = brain.requestContext(value, now); });
+            if (!queued) exchange(now++);
+        }
+        assert(queued && brain.contextSendState() == ContextSendState::Pending);
+    };
+    const auto complete = [&](const ProductContext& value, unsigned expectedCalls) {
+        const uint32_t replyTo = brain.contextResponse().replyTo;
+        assert(replyTo);
+        for (unsigned ticks = 0; ticks < 500; ++ticks) exchange(now++);
+        assert(contextHandlerCalls == expectedCalls && sameProductContext(lastContext, value));
+        assert(brain.contextSendState() == ContextSendState::Complete);
+        assert(brain.contextResponse().replyTo == replyTo);
+        assert(brain.contextResponse().status == ContextStatus::Stored);
+        assert(matchesContextResult(brain.contextResponse(), value));
+        onBoard(brainIo, [&] {
+            brain.cancelContext();
+            assert(brain.contextSendState() == ContextSendState::Idle);
+        });
+    };
+    request(context);
+    complete(context, 1);
+    request(context);
+    onBoard(brainIo, [&] {
+        const size_t written = io.tx.size();
+        brain.cancelContext();
+        assert(brain.contextSendState() == ContextSendState::Cancelled);
+        assert(io.tx.size() == written);
+    });
+    for (unsigned ticks = 0; ticks < 300; ++ticks) exchange(now++);
+    assert(contextHandlerCalls == 1 && brain.contextSendState() == ContextSendState::Cancelled);
+    ProductContext tombstone;
+    std::strcpy(tombstone.deviceId, context.deviceId);
+    tombstone.profileVersion = context.profileVersion + 1;
+    tombstone.cleared = true;
+    request(tombstone);
+    complete(tombstone, 2);
+    assert(!brain.link().freshStatus(now));
+    onBoard(brainIo, [&] { fake::assertReadOnly(); });
+    onBoard(motionIo, [&] { fake::assertReadOnly(); });
+    std::puts("PASS two actual adapters CONTEXT/Stored/digest, unsent cancellation and tombstone over short writes; fake handler, not NVS persistence evidence");
+}
 }  // namespace
 
 int main() {
@@ -1453,6 +1548,7 @@ int main() {
     installOverActualAdapters(true);
     resultOverActualAdapters();
     commandsOverActualAdapters();
+    contextsOverActualAdapters();
     fake::assertReadOnly();
     std::puts("PASS Arduino adapter host suite (real core + pair codec; I/O fakes only)");
 }

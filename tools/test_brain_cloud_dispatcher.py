@@ -38,7 +38,7 @@ def main():
                 ("ProductContext.cpp", "ProductRequest.cpp", "ProductDigest.cpp",
                  "BrainStateRecord.cpp", "BrainStateStore.cpp", "BoardPairingRecord.cpp",
                  "MotionStateRecord.cpp", "MotionStateStore.cpp", "ProductResultQuery.cpp",
-                 "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ReadOnlyBoardLink.cpp")]
+                 "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ProductContextMessages.cpp", "ReadOnlyBoardLink.cpp")]
     sources += [root / path for path in (
         "shared/BabytechCloudLink/src/CloudSession.cpp",
         "tests/fakes/brain_state_store/FakeBrainNvs.cpp",

@@ -299,6 +299,18 @@ class MaintenanceWiringTest(unittest.TestCase):
                           "demo.referenceValid()", "controlBusy()", "hasActiveMotion()"):
             self.assertNotIn(forbidden, stationary)
 
+    def test_v4_context_uses_runtime_store_not_legacy_ram_cache(self):
+        # Static wiring only; runtime/core persistence and correlation are tested dynamically elsewhere.
+        setup = function_body(self.motion, "void setup()")
+        self.assertIn("productBoardLink.setContextHandler(contextProduct)", setup)
+        self.assertLess(setup.index("productRecovery.begin("), setup.index("setContextHandler("))
+        self.assertIn("#if MOTION_UART_PEER != MOTION_UART_PEER_PRODUCT_BRAIN\n"
+                      "    loadProductContext();\n#endif", setup)
+        handler = function_body(self.motion, "bool contextProduct(")
+        self.assertEqual(handler.strip(), "return productRuntime.context(context, nowMs, result);")
+        for forbidden in ("saveContext(", "requestContext(", "clearContext(", "applyContext("):
+            self.assertNotIn(forbidden, setup)
+
     def test_static_runtime_reply_waits_for_durable_busy_decision(self):
         # Source wiring only; no moving hardware or Flash timing is exercised.
         setup = function_body(self.motion, "void setup()")

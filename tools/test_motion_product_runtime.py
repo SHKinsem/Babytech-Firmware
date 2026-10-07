@@ -36,7 +36,7 @@ def main():
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
                 ("ProductContext.cpp", "ProductRequest.cpp", "ProductDigest.cpp",
-                 "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ProductResultQuery.cpp",
+                 "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ProductContextMessages.cpp", "ProductResultQuery.cpp",
                  "MotionStateRecord.cpp", "BoardPairingRecord.cpp", "MotionStateStore.cpp", "ReadOnlyBoardLink.cpp")]
     sources += [root / "device-controller/src" / name for name in
                 ("MotionProductRuntime.cpp", "ProductSession.cpp", "DemoFlowController.cpp")]

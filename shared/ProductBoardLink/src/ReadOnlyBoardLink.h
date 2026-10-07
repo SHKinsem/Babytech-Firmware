@@ -3,6 +3,7 @@
 #include "ProductBoardMessages.h"
 #include "ProductResultQuery.h"
 #include "ProductCommandResult.h"
+#include "ProductContextMessages.h"
 #include "BoardTransmitV4.h"
 
 namespace babytech { namespace boardlink {
@@ -10,6 +11,7 @@ namespace babytech { namespace boardlink {
 enum class ResultLookupState { Idle, Pending, Complete, TimedOut, Unavailable };
 enum class CommandSendState { Idle, Pending, Complete, TimedOut, Unavailable, Cancelled };
 enum class StopSendState { Idle, Pending, Received, Rejected, TimedOut, Unavailable };
+enum class ContextSendState { Idle, Pending, Complete, TimedOut, Unavailable, Cancelled };
 
 // Single-owner, non-reentrant link core. Motion actions require explicit handlers;
 // Sending requires an explicit caller; transmission is never business acceptance.
@@ -30,6 +32,14 @@ public:
     bool setCommandHandler(CommandHandler handler);
     bool setStopHandler(StopHandler handler);
     bool setCommandReadyHandler(CommandReadyHandler handler);
+    using ContextHandler = bool (*)(const ProductContext&, uint32_t, ContextResult&);
+    bool setContextHandler(ContextHandler handler);
+    // Idempotent configuration, not a motion command. Completion requires the
+    // exact application reply; LinkAck and equal STATUS versions are not proof.
+    bool requestContext(const ProductContext& context, uint32_t nowMs);
+    ContextSendState contextSendState() const { return contextState_; }
+    const ContextResult& contextResponse() const { return sentContext_; }
+    void cancelContext();
     // Only a newly authorized request may be sent, once. The caller owns local
     // durable reservation / Cloud freshness and must query uncertain outcomes.
     bool requestCommand(const CommandMessage& command, uint32_t nowMs);
@@ -69,6 +79,7 @@ private:
     void expireResultQuery(uint32_t nowMs);
     void expireCommand(uint32_t nowMs);
     void expireStop(uint32_t nowMs);
+    void expireContext(uint32_t nowMs);
     v4::Parser parser_{};
     v4::Assembler assembler_{};
     v4::Session session_{};
@@ -80,6 +91,12 @@ private:
     CommandHandler commandHandler_ = nullptr;
     StopHandler stopHandler_ = nullptr;
     CommandReadyHandler commandReadyHandler_ = nullptr;
+    ContextHandler contextHandler_ = nullptr;
+    ContextResult contextResult_{}, sentContext_{};
+    ContextSendState contextState_ = ContextSendState::Idle;
+    uint32_t contextId_ = 0, contextAt_ = 0;
+    uint32_t receivedContextId_ = 0;
+    bool contextReplyPending_ = false;
     CommandResult commandResult_{};
     bool commandReplyPending_ = false;
     uint32_t commandId_ = 0;

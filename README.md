@@ -181,6 +181,14 @@ Cloud Unknown最小放行已获用户2026-10-07确认：原TTL耗尽，过期后
 
 本地runner双SHA各107场景（每版5项真实core/Store组合、Motion为脚本handler），Code独立复跑通过；Cloud owner新增3项触控抢占边界、双SHA各250通过。保留旧owner与替换pending的回归，清理必须匹配冻结原seq/ID；不同请求回执不清后来证据。静态接线22项、原pending恢复及协议/Arduino/Controller/LVGL回归通过；Code和QA限定范围复审通过，不等于完整设备/生产链路。CI/WSL runner已接，远端未执行。
 
+### v4 配置发送与 Motion 持久确认
+
+同一UART core及Brain Arduino/Controller adapter现提供显式`requestContext`，Motion main注册到同一`MotionProductRuntime / MotionStateStore`，v4不再读旧`productctx`作为RAM档案。CONTEXT复用完整feeding_context JSON；CONTEXT_RESULT严格包含`reply_to/device_id/profile_version/cleared/context_digest/status`。精确当前会话回复才完成传输，业务层还须检查`stored/unchanged`；busy/conflict/storage_fault或LINK_ACK都不是配置已保存。换boot或失联使旧确认失效，Stop可取消本配置传输，不擦缓存或重放运动。
+
+新版本在运动/维护忙碌时只观察版本/摘要，返回busy且不写Flash；下一次旧Prepare被阻止，已接受的快照不变，Initialize/Stop/独立调试不增加配置门禁。已停稳的清洁提示、故障或Complete显示保持不挡配置保存；同内容重发核对持久屏障并恢复空RAM，不重新写Flash。Brain自动MQTT分流/保存/重试owner及终态回执桥接尚未接通，公开can_start仍false，不宣布App全通。默认v3保持原行为。
+
+测试：`python3 tools/test_product_context_messages.py --sanitize`和`python3 tools/test_motion_product_runtime.py --sanitize`，后者可用`--case contexts`或`--case context_uart`限定范围。它们直接运行生产codec/store/core，Flash、机械和串口I/O为替身，不能证明实板或完整main/Cloud链路。
+
 ### Brain USB网络配置
 
 仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。

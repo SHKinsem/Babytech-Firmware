@@ -191,7 +191,7 @@ struct Fixture {
     motion::ProductSession product{flow};
     Hardware hardware{executor};
     motion::MotionProductRuntime runtime{store, product, flow, hardware};
-    explicit Fixture(bool ready = true, unsigned queued = 0, bool restored = false) {
+    explicit Fixture(bool ready = true, unsigned queued = 0, bool restored = false, bool projectContext = true) {
         const auto c = context();
         if (restored) CHECK(store.load(pairing()) == MotionLoad::Ready);
         else {
@@ -218,6 +218,11 @@ struct Fixture {
         feeding.profileVersion = c.profileVersion;
         feeding.recipe = {c.waterMl, c.temperatureC, c.powderGPer100Ml};
         CHECK(product.applyContext(feeding));
+        if (projectContext) {
+            ContextResult contextResult;
+            CHECK(runtime.context(c, hardware.clock, contextResult));
+            CHECK(contextResult.status == ContextStatus::Unchanged);
+        }
         product.setExecutionAuthorized(true);
         product.resources(true, false, true, 300, hardware.clock);
         if (ready) {
@@ -342,7 +347,7 @@ bool validStop(const v4::StopRequest& request) {
 // ReadOnlyLink's callbacks have no context argument; this single-owner route
 // delegates directly to the real runtime/store, never a fake decision handler.
 Fixture* uartRuntime = nullptr;
-unsigned uartCommands = 0, uartStops = 0, uartQueries = 0;
+unsigned uartCommands = 0, uartStops = 0, uartQueries = 0, uartContexts = 0;
 uint16_t uartCommandTtl = 0;
 bool routeCommand(const CommandMessage& command, uint32_t now, CommandResult& result) {
     CHECK(uartRuntime);
@@ -369,6 +374,11 @@ bool routeQuery(const ResultQuery& query, QueriedResult& result) {
     const bool answered = queryMotionResult(uartRuntime->store, query, result);
     CHECK(io.calls.size() == calls && io.disk == disk);
     return answered;
+}
+bool routeContext(const ProductContext& context, uint32_t now, ContextResult& result) {
+    CHECK(uartRuntime);
+    ++uartContexts;
+    return uartRuntime->runtime.context(context, now, result);
 }
 struct PeerWire : v4::ByteSink {
     static constexpr size_t capacity = 23;
@@ -425,6 +435,7 @@ struct LinkFixture {
         CHECK(!uartRuntime);
         uartRuntime = &device;
         uartCommands = uartStops = uartQueries = 0;
+        uartContexts = 0;
         uartCommandTtl = 0;
         auto brainPair = pairing();
         brainPair.role = v4::Role::Brain;
@@ -433,6 +444,8 @@ struct LinkFixture {
         CHECK(motionLink.setCommandHandler(routeCommand) && motionLink.setStopHandler(routeStop));
         CHECK(motionLink.setCommandReadyHandler(routeReady));
         CHECK(motionLink.setResultQueryHandler(routeQuery));
+        CHECK(motionLink.setContextHandler(routeContext));
+        CHECK(!brain.setContextHandler(routeContext));
         CHECK(!brain.setCommandHandler(routeCommand) && !brain.setStopHandler(routeStop));
     }
     ~LinkFixture() { uartRuntime = nullptr; }
@@ -519,6 +532,13 @@ struct LinkFixture {
         command.remainingTtlMs = ttl;
         CHECK(brain.requestCommand(command, now));
         CHECK(brain.commandSendState() == CommandSendState::Pending);
+    }
+    void contextBrain(const ProductContext& context, ContextStatus expected) {
+        CHECK(brain.requestContext(context, now));
+        CHECK(brain.contextSendState() == ContextSendState::Pending);
+        for (unsigned i = 0; i < 1000 && brain.contextSendState() == ContextSendState::Pending; ++i) step();
+        CHECK(brain.contextSendState() == ContextSendState::Complete);
+        CHECK(brain.contextResponse().status == expected && matchesContextResult(brain.contextResponse(), context));
     }
     void awaitBrain(const ProductRequest& request, bool accepted, const char* reason) {
         for (unsigned i = 0; i < 800 && brain.commandSendState() == CommandSendState::Pending; ++i) step();
@@ -618,6 +638,483 @@ void acceptance() {
                 }
             });
         }
+}
+
+ContextResult deliverContext(Fixture& fixture, const ProductContext& context) {
+    v4::Message wire;
+    ProductContext decoded;
+    CHECK(encodeContextMessage(context, wire));
+    CHECK(decodeContextMessage(wire, pairing().deviceId, decoded));
+    ContextResult response;
+    CHECK(fixture.runtime.context(decoded, fixture.hardware.clock, response));
+    // UART owns reply correlation; this group tests only the production handler.
+    response.replyTo = 41;
+    CHECK(matchesContextResult(response, context));
+    ContextResult result;
+    CHECK(encodeContextResult(response, wire) && decodeContextResult(wire, result));
+    CHECK(result.status == response.status && matchesContextResult(result, context));
+    return result;
+}
+
+void contexts() {
+    scenario("Initialize before context proof uses original mechanical admission", [] {
+        Fixture f(false, 0, false, false);
+        decision(f.deliver(request(20, ProductCommand::Initialize)), true, "accepted");
+        CHECK(f.runtime.active());
+    });
+    scenario("boot context proof affects only Prepare not initialization", [] {
+        Fixture f(true, 0, false, false);
+        Status status;
+        f.runtime.project(status, true);
+        CHECK(!status.snapshot.startEnabled);
+        decision(f.deliver(request()), false, "context_required");
+        CHECK(deliverContext(f, context()).status == ContextStatus::Unchanged);
+        f.runtime.project(status, true);
+        CHECK(status.snapshot.startEnabled);
+        decision(f.deliver(request(21, ProductCommand::Initialize)), true, "accepted");
+    });
+    scenario("same persisted context confirms without Flash or motion", [] {
+        Fixture f;
+        const auto sets = fake::count(Op::Set), commits = fake::count(Op::Commit);
+        const auto disk = io.disk;
+        CHECK(deliverContext(f, context()).status == ContextStatus::Unchanged);
+        CHECK(fake::count(Op::Set) == sets && fake::count(Op::Commit) == commits && io.disk == disk);
+        CHECK(!f.executor.starts && !f.executor.stops);
+        Status status;
+        f.runtime.project(status, true);
+        CHECK(status.snapshot.startEnabled);
+    });
+    scenario("new context projects full names and float32 without movement", [] {
+        Fixture f;
+        auto c = context();
+        ++c.profileVersion;
+        std::strcpy(c.babyId, "baby-new");
+        std::strcpy(c.babyName, "A complete new name longer than the display label allows");
+        std::strcpy(c.formulaBrand, "A complete brand longer than the display label allows");
+        c.waterMl = 210; c.temperatureC = 46; c.powderGPer100Ml = 13.123456f;
+        CHECK(deliverContext(f, c).status == ContextStatus::Stored);
+        CHECK(fake::count(Op::Commit) == 1);
+        CHECK(f.product.context().babyName == c.babyName && f.product.context().formulaBrand == c.formulaBrand);
+        CHECK(f.product.context().recipe.powderGPer100Ml == c.powderGPer100Ml);
+        CHECK(!f.executor.starts && !f.executor.stops);
+        auto r = request();
+        r.profileVersion = c.profileVersion;
+        std::strcpy(r.babyId, c.babyId);
+        r.powderGPer100Ml = c.powderGPer100Ml;
+        decision(f.deliver(r), true, "accepted");
+    });
+    for (bool clear : {false, true})
+        scenario("new configuration while running preserves frozen run " + std::to_string(clear), [=] {
+            Fixture f;
+            const auto r = request();
+            decision(f.deliver(r), true, "accepted");
+            f.tick(1001);
+            auto c = context();
+            ++c.profileVersion;
+            if (clear) {
+                c.cleared = true;
+                c.babyId[0] = c.babyName[0] = c.formulaBrand[0] = 0;
+                c.waterMl = c.temperatureC = 0; c.powderGPer100Ml = 0;
+            } else std::strcpy(c.babyId, "baby-new");
+            const auto disk = io.disk;
+            const auto calls = io.calls.size();
+            CHECK(deliverContext(f, c).status == ContextStatus::Busy);
+            CHECK(io.disk == disk && io.calls.size() == calls);
+            CHECK(f.product.activeRun().babyId == r.babyId && f.product.activeRun().profileVersion == r.profileVersion);
+            CHECK(f.product.activeRun().recipe.waterMl == r.waterMl);
+            CHECK(f.product.context().profileVersion == context().profileVersion);
+            CHECK(!f.executor.stops);
+            const auto target = stopRequest(f);
+            CHECK(f.runtime.stop(target, 1002));
+            f.executor.confirm();
+            f.tick(1003);
+            CHECK(!f.runtime.active() && f.store.state().pendingResultCount == 1);
+            CHECK(deliverContext(f, c).status == ContextStatus::Stored);
+            CHECK(f.product.context().profileVersion == c.profileVersion);
+            CHECK(f.product.hasContext() != clear);
+            const auto& terminal = f.store.state().pendingResults[0];
+            CHECK(terminal.request.profileVersion == r.profileVersion);
+            CHECK(!std::strcmp(terminal.request.babyId, r.babyId));
+        });
+    for (bool clear : {false, true})
+        scenario("observed newer context blocks old Prepare but not Initialize " + std::to_string(clear), [=] {
+            Fixture f;
+            auto c = context(); ++c.profileVersion;
+            if (clear) {
+                c.cleared = true;
+                c.babyId[0] = c.babyName[0] = c.formulaBrand[0] = 0;
+                c.waterMl = c.temperatureC = 0; c.powderGPer100Ml = 0;
+            }
+            f.hardware.owner = "debug_busy";
+            const auto calls = io.calls.size();
+            CHECK(deliverContext(f, c).status == ContextStatus::Busy);
+            CHECK(io.calls.size() == calls);
+            f.hardware.owner = nullptr;
+            decision(f.deliver(request()), false, "context_required");
+            CHECK(!f.executor.starts);
+            decision(f.deliver(request(21, ProductCommand::Initialize)), true, "accepted");
+        });
+    scenario("pending newer configuration does not block Clean", [] {
+        Fixture f;
+        auto c = context(); ++c.profileVersion;
+        f.hardware.owner = "debug_busy";
+        CHECK(deliverContext(f, c).status == ContextStatus::Busy);
+        f.hardware.owner = nullptr;
+        decision(f.deliver(request(20, ProductCommand::Clean)), true, "accepted");
+        CHECK(f.executor.stops == 1);
+        f.executor.confirm();
+        f.tick(1001);
+        CHECK(f.product.cleaning() && !f.runtime.active());
+        CHECK(deliverContext(f, c).status == ContextStatus::Stored);
+        CHECK(f.product.cleaning() && f.executor.stops == 1);
+    });
+    scenario("Complete display hold does not block stopped context update", [] {
+        Fixture f;
+        decision(f.deliver(request()), true, "accepted");
+        f.finishFeed(1010, true);
+        CHECK(f.flow.stage() == DisplayStage::Complete && f.flow.busy());
+        CHECK(!f.runtime.active() && f.hardware.stationary());
+        auto c = context(); ++c.profileVersion;
+        CHECK(deliverContext(f, c).status == ContextStatus::Stored);
+        CHECK(f.store.state().pendingResultCount == 1);
+    });
+    scenario("stable cleaning allows clear without another motor Stop", [] {
+        Fixture f;
+        decision(f.deliver(request(20, ProductCommand::Clean)), true, "accepted");
+        f.executor.confirm(); f.tick(1001);
+        auto c = context(); ++c.profileVersion; c.cleared = true;
+        c.babyId[0] = c.babyName[0] = c.formulaBrand[0] = 0;
+        c.waterMl = c.temperatureC = 0; c.powderGPer100Ml = 0;
+        CHECK(deliverContext(f, c).status == ContextStatus::Stored);
+        CHECK(!f.product.hasContext() && f.product.cleaning() && f.executor.stops == 1);
+    });
+    scenario("stopped fault does not prevent storing next context", [] {
+        Fixture f;
+        decision(f.deliver(request(20, ProductCommand::Clean)), true, "accepted");
+        f.tick(4001); f.executor.confirm(); f.tick(4002);
+        CHECK(f.flow.stage() == DisplayStage::Error && !f.runtime.active());
+        auto c = context(); ++c.profileVersion;
+        CHECK(deliverContext(f, c).status == ContextStatus::Stored);
+        CHECK(f.flow.stage() == DisplayStage::Error);
+    });
+    scenario("same persisted context can be confirmed under unrelated maintenance", [] {
+        Fixture f;
+        f.hardware.owner = "maintenance_active";
+        const auto commits = fake::count(Op::Commit);
+        CHECK(deliverContext(f, context()).status == ContextStatus::Unchanged);
+        CHECK(fake::count(Op::Commit) == commits && !f.executor.starts && !f.executor.stops);
+    });
+    for (unsigned mutation = 0; mutation < 4; ++mutation)
+        scenario("same-version wrong RAM cache never receives stored proof " + std::to_string(mutation), [=] {
+            Fixture f;
+            motion::ProductSession product(f.flow);
+            motion::FeedingContext cache = f.product.context();
+            if (mutation == 0) cache.babyName = "Wrong name";
+            else if (mutation == 1) cache.formulaBrand = "Wrong brand";
+            else if (mutation == 2) ++cache.recipe.waterMl;
+            if (mutation == 3) CHECK(product.clearContext(cache.profileVersion));
+            else CHECK(product.applyContext(cache));
+            motion::MotionProductRuntime runtime(f.store, product, f.flow, f.hardware);
+            ContextResult response;
+            const auto commits = fake::count(Op::Commit);
+            CHECK(runtime.context(context(), 1000, response) && response.status == ContextStatus::Conflict);
+            CHECK(fake::count(Op::Commit) == commits);
+            Status status;
+            runtime.project(status, true);
+            CHECK(!status.snapshot.startEnabled);
+        });
+    for (unsigned mutation = 0; mutation < 3; ++mutation)
+        scenario("old or same-version conflicting configuration leaves cache intact " + std::to_string(mutation), [=] {
+            Fixture f;
+            auto c = context();
+            if (mutation == 0) --c.profileVersion;
+            else if (mutation == 1) std::strcpy(c.babyName, "Different same-version name");
+            else c.powderGPer100Ml = 13.500001f;
+            const auto calls = io.calls.size();
+            const auto disk = io.disk;
+            CHECK(deliverContext(f, c).status == ContextStatus::Conflict);
+            CHECK(io.calls.size() == calls && io.disk == disk);
+            Status status;
+            f.runtime.project(status, true);
+            CHECK(status.snapshot.startEnabled);
+        });
+    scenario("higher observed version cannot be displaced by lower retry", [] {
+        Fixture f;
+        auto c = context(); c.profileVersion += 2;
+        f.hardware.owner = "debug_busy";
+        CHECK(deliverContext(f, c).status == ContextStatus::Busy);
+        auto older = c; --older.profileVersion;
+        const auto calls = io.calls.size();
+        CHECK(deliverContext(f, older).status == ContextStatus::Conflict);
+        auto different = c; ++different.waterMl;
+        CHECK(deliverContext(f, different).status == ContextStatus::Conflict);
+        CHECK(io.calls.size() == calls);
+        f.hardware.owner = nullptr;
+        CHECK(deliverContext(f, c).status == ContextStatus::Stored);
+        CHECK(f.product.context().profileVersion == c.profileVersion);
+    });
+    for (bool clear : {false, true})
+        scenario("reboot rehydrates persisted barrier without rewriting NVS " + std::to_string(clear), [=] {
+            auto c = context();
+            if (clear) {
+                c.cleared = true;
+                c.babyId[0] = c.babyName[0] = c.formulaBrand[0] = 0;
+                c.waterMl = c.temperatureC = 0; c.powderGPer100Ml = 0;
+            }
+            MotionStateStore installed;
+            CHECK(installed.installInitial(pairing(), &c) == MotionWrite::Stored);
+            fake::reboot();
+            MotionStateStore loaded;
+            CHECK(loaded.load(pairing()) == MotionLoad::Ready);
+            Executor executor;
+            motion::DemoFlowController flow(executor);
+            motion::ProductSession product(flow);
+            Hardware hardware(executor);
+            motion::MotionProductRuntime runtime(loaded, product, flow, hardware);
+            const auto sets = fake::count(Op::Set), commits = fake::count(Op::Commit);
+            ContextResult reply;
+            CHECK(runtime.context(c, 1000, reply) && reply.status == ContextStatus::Unchanged);
+            CHECK(product.context().profileVersion == c.profileVersion && product.hasContext() != clear);
+            CHECK(fake::count(Op::Set) == sets && fake::count(Op::Commit) == commits);
+            CHECK(!executor.starts && !executor.stops);
+        });
+    scenario("wrong paired device does not mutate output or observe version", [] {
+        Fixture f;
+        auto c = context(); ++c.profileVersion;
+        std::strcpy(c.deviceId, "foreign-device");
+        ContextResult response; response.replyTo = 123;
+        const auto calls = io.calls.size();
+        CHECK(!f.runtime.context(c, 1000, response));
+        CHECK(response.replyTo == 123 && io.calls.size() == calls);
+        Status status;
+        f.runtime.project(status, true);
+        CHECK(status.snapshot.startEnabled);
+    });
+    std::vector<fake::Call> trace;
+    scenario("capture context persistence operations", [&] {
+        Fixture f;
+        auto c = context(); ++c.profileVersion;
+        CHECK(deliverContext(f, c).status == ContextStatus::Stored);
+        trace = io.calls;
+    });
+    for (const auto& call : trace) {
+        if (call.op == Op::Close) continue;
+        for (bool apply : {false, true}) {
+            if (apply && call.op != Op::Set && call.op != Op::Commit) continue;
+            scenario("configuration write fault preserves last verified cache " + std::to_string(int(call.op)) + "/" +
+                     std::to_string(call.occurrence) + "/" + std::to_string(apply), [=] {
+                Fixture f;
+                auto c = context(); ++c.profileVersion;
+                const auto before = encode(f.store.state());
+                fake::fail(call.op, call.occurrence, ESP_FAIL, apply);
+                CHECK(deliverContext(f, c).status == ContextStatus::StorageFault);
+                CHECK(f.store.faulted() && encode(f.store.state()) == before);
+                CHECK(f.product.context().profileVersion == context().profileVersion);
+                CHECK(!f.executor.starts && !f.executor.stops);
+                Status status;
+                f.runtime.project(status, true);
+                CHECK(!status.snapshot.startEnabled);
+            });
+        }
+    }
+    for (bool clear : {false, true})
+        for (bool durable : {false, true})
+            scenario("reboot after uncertain configuration commit uses actual disk " + std::to_string(clear) + "/" +
+                     std::to_string(durable), [=] {
+                Fixture f;
+                auto c = context(); ++c.profileVersion;
+                if (clear) {
+                    c.cleared = true; c.babyId[0] = c.babyName[0] = c.formulaBrand[0] = 0;
+                    c.waterMl = c.temperatureC = 0; c.powderGPer100Ml = 0;
+                }
+                fake::fail(Op::Commit, 1, ESP_FAIL, durable);
+                CHECK(deliverContext(f, c).status == ContextStatus::StorageFault);
+                fake::verifyFaults(); fake::reboot();
+                MotionStateStore loaded;
+                CHECK(loaded.load(pairing()) == MotionLoad::Ready);
+                CHECK(loaded.state().context.profileVersion == (durable ? c.profileVersion : context().profileVersion));
+                motion::ProductSession product(f.flow);
+                motion::MotionProductRuntime runtime(loaded, product, f.flow, f.hardware);
+                const auto commits = fake::count(Op::Commit);
+                ContextResult response;
+                const auto recovered = durable ? c : context();
+                CHECK(runtime.context(recovered, 1000, response) && response.status == ContextStatus::Unchanged);
+                CHECK(product.context().profileVersion == recovered.profileVersion && product.hasContext() != recovered.cleared);
+                CHECK(fake::count(Op::Commit) == commits);
+                if (durable) {
+                    CHECK(runtime.context(context(), 1000, response) && response.status == ContextStatus::Conflict);
+                }
+            });
+}
+
+void contextUart() {
+    scenario("actual Brain context sender confirms Motion durable version", [] {
+        LinkFixture link;
+        link.handshake();
+        auto c = context(); ++c.profileVersion;
+        std::strcpy(c.babyName, "A full label preserved through bounded fragmented UART");
+        link.contextBrain(c, ContextStatus::Stored);
+        CHECK(uartContexts == 1 && link.device.product.context().babyName == c.babyName);
+        CHECK(fake::count(Op::Commit) == 1 && !link.device.executor.starts && !link.device.executor.stops);
+        CHECK(link.toMotion.count(v4::Kind::Context) && link.toBrain.count(v4::Kind::ContextResult));
+        const auto sets = fake::count(Op::Set), commits = fake::count(Op::Commit);
+        link.contextBrain(c, ContextStatus::Unchanged);
+        CHECK(uartContexts == 2 && fake::count(Op::Set) == sets && fake::count(Op::Commit) == commits);
+        auto r = request(); r.profileVersion = c.profileVersion;
+        link.sendBrain(r);
+        link.awaitBrain(r, true, "accepted");
+    });
+    scenario("busy configuration reply is not persistence proof and retry is harmless", [] {
+        LinkFixture link;
+        link.handshake();
+        auto c = context(); ++c.profileVersion;
+        link.device.hardware.owner = "debug_busy";
+        const auto before = io.disk;
+        link.contextBrain(c, ContextStatus::Busy);
+        CHECK(io.disk == before && io.calls.empty());
+        link.device.hardware.owner = nullptr;
+        link.contextBrain(c, ContextStatus::Stored);
+        CHECK(uartContexts == 2 && fake::count(Op::Commit) == 1);
+    });
+    scenario("fragmented clear reaches actual Motion handler", [] {
+        LinkFixture link;
+        link.handshake();
+        auto c = context(); ++c.profileVersion;
+        c.cleared = true; c.babyId[0] = c.babyName[0] = c.formulaBrand[0] = 0;
+        c.waterMl = c.temperatureC = 0; c.powderGPer100Ml = 0;
+        link.contextBrain(c, ContextStatus::Stored);
+        CHECK(!link.device.product.hasContext() && link.device.store.state().context.cleared);
+        link.device.hardware.clock = link.now;
+        decision(link.device.deliver(request(20), 5000, link.now), false, "context_required");
+    });
+    scenario("LinkAck is never durable configuration proof", [] {
+        LinkFixture link;
+        link.handshake();
+        CHECK(link.brain.requestContext(context(), link.now));
+        v4::Frame ack;
+        ack.kind = v4::Kind::LinkAck; ack.senderBoot = 22; ack.receiverBoot = 11; ack.messageId = 800;
+        const auto id = link.brain.contextResponse().replyTo;
+        const int length = std::snprintf(reinterpret_cast<char*>(ack.payload), sizeof(ack.payload),
+                                         "{\"message_id\":%u}", id);
+        CHECK(length > 0); ack.total = ack.length = uint16_t(length);
+        link.brain.receiveFrame(ack, link.now);
+        CHECK(link.brain.contextSendState() == ContextSendState::Pending);
+        link.run(400);
+        CHECK(link.brain.contextSendState() == ContextSendState::Complete && uartContexts == 1);
+    });
+    for (unsigned mutation = 0; mutation < 7; ++mutation)
+        scenario("unmatched configuration response cannot complete request " + std::to_string(mutation), [=] {
+            LinkFixture link;
+            link.handshake();
+            CHECK(link.brain.requestContext(context(), link.now));
+            auto reply = link.brain.contextResponse();
+            reply.status = ContextStatus::Stored;
+            if (mutation == 0) ++reply.replyTo;
+            else if (mutation == 1) ++reply.profileVersion;
+            else if (mutation == 2) reply.cleared = true;
+            else if (mutation == 3) std::strcpy(reply.deviceId, "wrong-device");
+            else if (mutation == 4) reply.digest[0] ^= 1;
+            v4::Message wire;
+            CHECK(encodeContextResult(reply, wire));
+            wire.senderBoot = mutation == 5 ? 23 : 22;
+            wire.receiverBoot = mutation == 6 ? 12 : 11; wire.messageId = 900;
+            size_t offset = 0;
+            while (offset < wire.length) {
+                v4::Frame frame;
+                CHECK(v4::fragment(wire, offset, frame));
+                link.brain.receiveFrame(frame, link.now);
+                offset += frame.length;
+            }
+            CHECK(link.brain.contextSendState() == ContextSendState::Pending);
+            link.run(400);
+            CHECK(link.brain.contextSendState() == ContextSendState::Complete && uartContexts == 1);
+        });
+    scenario("lost context application reply remains unknown despite live link", [] {
+        LinkFixture link;
+        link.handshake();
+        auto c = context(); ++c.profileVersion;
+        CHECK(link.brain.requestContext(c, link.now));
+        for (unsigned i = 0; i < 500 && !uartContexts; ++i) link.step();
+        CHECK(uartContexts == 1 && link.device.store.state().context.profileVersion == c.profileVersion);
+        link.toBrain.drop = true;
+        link.run(1100);
+        CHECK(link.brain.contextSendState() == ContextSendState::TimedOut);
+        link.toBrain.drop = false;
+        link.run(20);
+        const auto commits = fake::count(Op::Commit);
+        link.contextBrain(c, ContextStatus::Unchanged);
+        CHECK(fake::count(Op::Commit) == commits && !link.device.executor.starts);
+    });
+    scenario("context proof expires after link loss and cannot authorize stale cache", [] {
+        LinkFixture link;
+        link.handshake();
+        link.contextBrain(context(), ContextStatus::Unchanged);
+        link.toBrain.drop = true;
+        link.run(2500);
+        CHECK(!link.brain.connected(link.now) && link.brain.contextSendState() == ContextSendState::Unavailable);
+        CHECK(!link.brain.requestContext(context(), link.now));
+    });
+    scenario("new peer boot invalidates completed context proof", [] {
+        LinkFixture link;
+        link.handshake();
+        link.contextBrain(context(), ContextStatus::Unchanged);
+        CHECK(link.motionLink.begin(pairing(), 23));
+        CHECK(link.motionLink.setContextHandler(routeContext));
+        link.run(1000);
+        CHECK(link.brain.contextSendState() != ContextSendState::Complete);
+        CHECK(link.brain.connected(link.now) && link.motionLink.connected(link.now));
+        link.contextBrain(context(), ContextStatus::Unchanged);
+    });
+    scenario("Stop bypasses pending configuration and cancels only its transport", [] {
+        LinkFixture link;
+        link.handshake();
+        auto c = context(); ++c.profileVersion;
+        CHECK(link.brain.requestContext(c, link.now));
+        v4::StopRequest stop;
+        stop.source = v4::Source::LocalTouch; stop.scope = v4::StopScope::Idle;
+        CHECK(link.brain.requestStop(stop, link.now));
+        CHECK(link.brain.contextSendState() == ContextSendState::Cancelled);
+        link.run(300);
+        CHECK(link.brain.stopSendState() == StopSendState::Received);
+        CHECK(!uartContexts && !link.device.executor.starts && !fake::count(Op::Commit));
+        link.contextBrain(c, ContextStatus::Stored);
+    });
+    for (unsigned phase = 0; phase < 3; ++phase)
+        scenario("Stop cancels context partial/first-fragment/applied without stale proof " + std::to_string(phase), [=] {
+            LinkFixture link;
+            link.handshake();
+            auto c = context(); ++c.profileVersion;
+            std::memset(c.babyName, 'b', sizeof(c.babyName) - 1);
+            std::memset(c.formulaBrand, 'f', sizeof(c.formulaBrand) - 1);
+            CHECK(link.brain.requestContext(c, link.now));
+            if (phase == 0) {
+                link.toMotion.writeLimit = 1;
+                link.run(10);
+                CHECK(!link.toMotion.count(v4::Kind::Context) && !uartContexts);
+            } else if (phase == 1) {
+                for (unsigned i = 0; i < 800 && !link.toMotion.count(v4::Kind::Context); ++i) link.step();
+                CHECK(link.toMotion.count(v4::Kind::Context) && !uartContexts);
+            } else {
+                link.toBrain.drop = true;
+                for (unsigned i = 0; i < 800 && !uartContexts; ++i) link.step();
+                CHECK(uartContexts == 1 && link.device.store.state().context.profileVersion == c.profileVersion);
+            }
+            CHECK(link.brain.contextSendState() == ContextSendState::Pending);
+            v4::StopRequest stop;
+            stop.source = v4::Source::LocalTouch; stop.scope = v4::StopScope::Idle;
+            CHECK(link.brain.requestStop(stop, link.now));
+            CHECK(link.brain.contextSendState() == ContextSendState::Cancelled);
+            link.toMotion.writeLimit = 7; link.toBrain.drop = false;
+            const auto stoppedAt = link.now;
+            for (unsigned i = 0; i < 700 && link.brain.stopSendState() == StopSendState::Pending; ++i) link.step();
+            CHECK(link.brain.stopSendState() == StopSendState::Received);
+            CHECK(link.brain.contextSendState() == ContextSendState::Cancelled);
+            CHECK(!link.device.executor.starts && !link.device.executor.stops);
+            CHECK(link.device.store.state().context.profileVersion == (phase == 2 ? c.profileVersion : context().profileVersion));
+            link.contextBrain(c, phase == 2 ? ContextStatus::Unchanged : ContextStatus::Stored);
+            CHECK(uint32_t(link.now - stoppedAt) < v4::kMessageTimeoutMs);
+            CHECK(fake::count(Op::Commit) == 1);
+        });
 }
 
 void writes() {
@@ -1893,7 +2390,8 @@ void uartIntegration() {
 
 int main(int argc, char** argv) {
     const std::vector<std::pair<const char*, std::function<void()>>> groups = {
-        {"acceptance", acceptance}, {"writes", writes}, {"duplicates", duplicates},
+        {"acceptance", acceptance}, {"contexts", contexts}, {"context_uart", contextUart},
+        {"writes", writes}, {"duplicates", duplicates},
         {"rejections", rejections}, {"deferred", deferredRejections}, {"ttl", ttl}, {"terminals", terminals}, {"queues", queues},
         {"offline_link", offlineAndLink}, {"stops", stops}, {"faults", faults}, {"uart", uartIntegration}};
     if (argc > 2) { std::fprintf(stderr, "Expected at most one test group\n"); return 2; }

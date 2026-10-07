@@ -563,6 +563,10 @@ public:
 };
 ProductHardware productHardware;
 motion::MotionProductRuntime productRuntime(productState, product, demo, productHardware);
+bool contextProduct(const babytech::boardlink::ProductContext& context, uint32_t nowMs,
+                    babytech::boardlink::ContextResult& result) {
+    return productRuntime.context(context, nowMs, result);
+}
 bool commandProduct(const babytech::boardlink::CommandMessage& command, uint32_t nowMs,
                     babytech::boardlink::CommandResult& result) {
     return productRuntime.command(command, nowMs, result);
@@ -1960,7 +1964,9 @@ void setup() {
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
     if (productBoardLink.deviceId()[0]) cloudDeviceId = productBoardLink.deviceId();
 #endif
+#if MOTION_UART_PEER != MOTION_UART_PEER_PRODUCT_BRAIN
     loadProductContext();
+#endif
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
     if (const auto* pairing = productBoardLink.verifiedPairing()) {
         const auto loaded = productRecovery.begin(*pairing, millis());
@@ -1980,6 +1986,7 @@ void setup() {
     productBoardLink.setCommandHandler(commandProduct);
     productBoardLink.setStopHandler(stopProduct);
     productBoardLink.setCommandReadyHandler(productResultReady);
+    productBoardLink.setContextHandler(contextProduct);
 #else
     if (productSession) eventOutbox.begin(cloudDeviceId, *productSession);
 #endif

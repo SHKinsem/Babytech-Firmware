@@ -3,6 +3,7 @@
 #include <MotionStateStore.h>
 #include <ProductBoardMessages.h>
 #include <ProductCommandResult.h>
+#include <ProductContextMessages.h>
 #include <ProductResultQuery.h>
 #include "ProductSession.h"
 
@@ -27,6 +28,8 @@ public:
         : store_(store), product_(product), flow_(flow), hardware_(hardware) {}
     bool command(const babytech::boardlink::CommandMessage& command, uint32_t nowMs,
                  babytech::boardlink::CommandResult& result);
+    bool context(const babytech::boardlink::ProductContext& context, uint32_t nowMs,
+                 babytech::boardlink::ContextResult& result);
     // A moving rejection is frozen but not final until poll persists it at rest.
     bool resultReady(babytech::boardlink::CommandResult& result);
     void releaseMotionOwnership() { motionOwned_ = false; }
@@ -38,6 +41,7 @@ public:
     void project(babytech::boardlink::Status& status, bool linkConnected) const;
     bool active() const { return execution_[0] != 0; }
 private:
+    bool contextSynchronized() const;
     ProductRun run(const babytech::boardlink::ProductRequest& request) const;
     bool matchingDigest(const babytech::boardlink::ProductRequest& request,
                         const char (&hex)[65]);
@@ -46,6 +50,11 @@ private:
     ProductSession& product_;
     DemoFlowController& flow_;
     MotionProductHardware& hardware_;
+    // Observation blocks stale prepares even when persistence must wait. No
+    // configuration/action is retained: Brain owns the durable retry payload.
+    uint32_t observedContextVersion_ = 0;
+    uint8_t observedContextDigest_[babytech::boardlink::kProductDigestSize]{};
+    bool contextProjected_ = false;
     babytech::boardlink::QueriedResult queried_{};
     ProductTerminal terminal_{};
     uint32_t terminalAt_ = 0;

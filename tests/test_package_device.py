@@ -79,7 +79,7 @@ class SourceArchiveTest(unittest.TestCase):
                          "tests/fakes/outbox/Arduino.h", "test/test_cloud_session.cpp"):
                 self.assertTrue((extracted / name).is_file())
             self.assertTrue((extracted / "tools/test_display_view.py").is_file())
-            for name in ("test_protocol.py", "test_board_messages.py", "test_board_link.py",
+            for name in ("test_protocol.py", "test_board_messages.py", "test_board_commands.py", "test_board_link.py",
                          "test_pairing_record.py", "test_board_arduino.py", "test_board_discovery.py",
                          "test_motion_export_snapshot.py", "test_board_export_transfer.py",
                          "test_board_maintenance.py",
@@ -87,13 +87,16 @@ class SourceArchiveTest(unittest.TestCase):
                          "test_cloud_contract.py", "test_cloud_session.py", "test_cloud_link.py",
                          "test_brain_network.py", "test_brain_station.py", "test_brain_controller.py",
                          "prepare_board_pairing.py", "test_pairing_store.py",
-                         "test_product_context.py", "test_legacy_context_store.py",
+                         "test_product_context.py", "test_product_context_messages.py", "test_legacy_context_store.py",
                          "test_product_state.py", "test_brain_state_store.py",
                          "test_motion_state_record.py", "test_motion_state_store.py", "test_product_result_query.py", "test_product_command_result.py", "test_motion_product_runtime.py", "test_motion_result_queue.py", "test_board_commissioning.py",
                          "test_maintenance_console.py", "test_maintenance_export.py", "capture_board_export.py",
                          "test_brain_network_console.py", "configure_brain_network.py"):
                 self.assertTrue((extracted / "tools" / name).is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ReadOnlyBoardLink.cpp").is_file())
+            for name in ("ProductContextMessages.h", "ProductContextMessages.cpp"):
+                self.assertTrue((extracted / "shared/ProductBoardLink/src" / name).is_file())
+            self.assertTrue((extracted / "shared/ProductBoardLink/test/test_context_messages.cpp").is_file())
             self.assertTrue((extracted / "main-controller/src/brain_cloud_dispatcher.h").is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ProductResultQuery.cpp").is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ProductResultQuery.h").is_file())

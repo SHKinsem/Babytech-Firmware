@@ -782,6 +782,118 @@ void commandForwarding() {
     std::puts("PASS ControllerLink actual COMMAND/result forwarding, original identity and no fake LINK_ACK acceptance");
 }
 
+unsigned contextHandlerCalls = 0;
+ProductContext lastContext;
+// Fake persistence decision only; ControllerLink and both adapters/cores are real.
+bool storeContextFake(const ProductContext& context, uint32_t, ContextResult& result) {
+    ++contextHandlerCalls;
+    lastContext = context;
+    result = ContextResult{};
+    std::strcpy(result.deviceId, context.deviceId);
+    result.profileVersion = context.profileVersion;
+    result.cleared = context.cleared;
+    result.status = ContextStatus::Stored;
+    return contextDigest(context, result.digest);
+}
+
+void contextForwarding() {
+    Fixture f;
+    ProductContext context;
+    std::strcpy(context.deviceId, pairing().deviceId);
+    std::strcpy(context.babyId, "baby-context-controller");
+    std::memset(context.babyName, 'n', 320);
+    std::memset(context.formulaBrand, 'f', 480);
+    context.profileVersion = 91;
+    context.waterMl = 180;
+    context.temperatureC = 45;
+    context.powderGPer100Ml = 25;
+    assert(validProductContext(context));
+    assert(!f.controller.requestContext(context, 0));
+    io.maxWrite = 11;
+    fake::State brainIo = io;
+    fake::reset();
+    Pairing motionPair = pairing();
+    motionPair.role = Role::Motion;
+    std::strcpy(motionPair.localPhysicalId, pairing().peerPhysicalId);
+    std::strcpy(motionPair.peerPhysicalId, pairing().localPhysicalId);
+    io.blob.resize(kPairingRecordMaxSize);
+    const size_t length = encodePairingRecord(motionPair, io.blob.data(), io.blob.size());
+    assert(length);
+    io.blob.resize(length);
+    io.mac = {{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}};
+    io.randomWords = {0, uint32_t(kPeerBoot)};
+    ArduinoBoardLink motion;
+    assert(motion.begin(Role::Motion, 44, 43));
+    assert(motion.setContextHandler(storeContextFake));
+    io.maxWrite = 7;
+    fake::State motionIo = io;
+    // Switch only global SDK I/O; never copy production adapters or sessions.
+    const auto onBoard = [](fake::State& state, const auto& action) {
+        fake::assertReadOnly();
+        io = state;
+        action();
+        fake::assertReadOnly();
+        state = io;
+    };
+    const auto exchange = [&](uint32_t now) {
+        onBoard(brainIo, [&] { f.controller.poll(now); });
+        motionIo.rx.insert(motionIo.rx.end(), brainIo.tx.begin(), brainIo.tx.end());
+        brainIo.tx.clear();
+        onBoard(motionIo, [&] { motion.poll(now); });
+        brainIo.rx.insert(brainIo.rx.end(), motionIo.tx.begin(), motionIo.tx.end());
+        motionIo.tx.clear();
+    };
+    contextHandlerCalls = 0;
+    uint32_t now = 0;
+    for (; now < 3000; ++now) exchange(now);
+    assert(motion.link().connected(now) && f.controller.commandAvailable(now));
+    assert(!f.controller.connected(now) && !f.controller.lastTelemetry());
+    const auto request = [&](const ProductContext& value) {
+        bool queued = false;
+        for (unsigned attempts = 0; attempts < 100 && !queued; ++attempts) {
+            onBoard(brainIo, [&] { queued = f.controller.requestContext(value, now); });
+            if (!queued) exchange(now++);
+        }
+        assert(queued && f.controller.contextSendState() == ContextSendState::Pending);
+    };
+    const auto complete = [&](const ProductContext& value, unsigned expectedCalls) {
+        const uint32_t replyTo = f.controller.contextResponse().replyTo;
+        assert(replyTo);
+        for (unsigned ticks = 0; ticks < 500; ++ticks) exchange(now++);
+        assert(contextHandlerCalls == expectedCalls && sameProductContext(lastContext, value));
+        assert(f.controller.contextSendState() == ContextSendState::Complete);
+        assert(f.controller.contextResponse().replyTo == replyTo);
+        assert(f.controller.contextResponse().status == ContextStatus::Stored);
+        assert(matchesContextResult(f.controller.contextResponse(), value));
+        onBoard(brainIo, [&] {
+            f.controller.cancelContext();
+            assert(f.controller.contextSendState() == ContextSendState::Idle);
+        });
+    };
+    request(context);
+    complete(context, 1);
+    request(context);
+    onBoard(brainIo, [&] {
+        const size_t written = io.tx.size();
+        f.controller.cancelContext();
+        assert(f.controller.contextSendState() == ContextSendState::Cancelled);
+        assert(io.tx.size() == written);
+    });
+    for (unsigned ticks = 0; ticks < 300; ++ticks) exchange(now++);
+    assert(contextHandlerCalls == 1 && f.controller.contextSendState() == ContextSendState::Cancelled);
+    ProductContext tombstone;
+    std::strcpy(tombstone.deviceId, context.deviceId);
+    tombstone.profileVersion = context.profileVersion + 1;
+    tombstone.cleared = true;
+    request(tombstone);
+    complete(tombstone, 2);
+    assert(!f.controller.lastTelemetry() && !f.controller.hasSnapshot());
+    assert(!f.controller.sendIntent(display::DisplayIntent::StartFeeding, now));
+    onBoard(brainIo, [&] { fake::assertReadOnly(); });
+    onBoard(motionIo, [&] { fake::assertReadOnly(); });
+    std::puts("PASS ControllerLink actual CONTEXT/Stored/digest, unsent cancellation and tombstone over short writes; fake handler, not NVS persistence evidence");
+}
+
 void stopForwarding() {
     Fixture f;
     StopRequest stop;
@@ -839,6 +951,7 @@ int main() {
     pairedConsoleDoesNotDegradeStatus();
     pendingResultForwarding();
     commandForwarding();
+    contextForwarding();
     stopForwarding();
     std::puts("PASS production ControllerLink cache/receipt-time suite (SDK I/O fakes only)");
 }

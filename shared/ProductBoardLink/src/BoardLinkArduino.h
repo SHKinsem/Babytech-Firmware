@@ -38,6 +38,15 @@ public:
     bool setCommandReadyHandler(ReadOnlyLink::CommandReadyHandler handler) {
         return started_ && link_.setCommandReadyHandler(handler);
     }
+    bool setContextHandler(ReadOnlyLink::ContextHandler handler) {
+        return started_ && link_.setContextHandler(handler);
+    }
+    bool requestContext(const ProductContext& context, uint32_t nowMs) {
+        return started_ && link_.requestContext(context, nowMs);
+    }
+    ContextSendState contextSendState() const { return link_.contextSendState(); }
+    const ContextResult& contextResponse() const { return link_.contextResponse(); }
+    void cancelContext() { link_.cancelContext(); }
     v4::LinkFailure takeFailure() { return link_.takeFailure(); }
     bool requestCommand(const CommandMessage& command, uint32_t nowMs) {
         return started_ && link_.requestCommand(command, nowMs);

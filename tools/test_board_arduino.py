@@ -33,7 +33,7 @@ def main():
                 ("BoardDiscovery.cpp", "BoardMaintenance.cpp", "BoardInstall.cpp", "BoardExportTransfer.cpp", "MotionExportSnapshot.cpp",
                  "MotionStateRecord.cpp", "ProductContext.cpp", "ProductDigest.cpp",
                  "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ProductCommandResult.cpp", "ReadOnlyBoardLink.cpp",
-                 "BoardLinkArduino.cpp")]
+                 "ProductContextMessages.cpp", "BoardLinkArduino.cpp")]
     sources += [stubs / "FakeBoardIo.cpp", root / "test/test_arduino_link.cpp"]
     sources += [root / "tests/fakes/product_crypto/FakeProductCrypto.cpp"]
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-DARDUINO=10819"]

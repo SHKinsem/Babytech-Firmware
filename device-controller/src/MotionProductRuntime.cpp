@@ -7,6 +7,90 @@ namespace motion {
 using namespace babytech::boardlink;
 namespace v4 = babytech::v4;
 
+bool MotionProductRuntime::contextSynchronized() const {
+    if (!store_.ready()) return false;
+    const auto& saved = store_.state().context;
+    return contextProjected_ && saved.present && observedContextVersion_ == saved.profileVersion &&
+        (observedContextVersion_ != saved.profileVersion ||
+         !std::memcmp(observedContextDigest_, saved.digest, sizeof(saved.digest))) &&
+        product_.context().profileVersion == saved.profileVersion &&
+        product_.hasContext() != saved.cleared;
+}
+
+bool MotionProductRuntime::context(const ProductContext& context, uint32_t nowMs, ContextResult& result) {
+    (void)nowMs;
+    if (!validProductContext(context) ||
+        !v4::validPairing(store_.state().pairing) ||
+        std::strcmp(context.deviceId, store_.state().pairing.deviceId)) return false;
+    result = ContextResult{};
+    std::strcpy(result.deviceId, context.deviceId);
+    result.profileVersion = context.profileVersion;
+    result.cleared = context.cleared;
+    if (!contextDigest(context, result.digest)) return false;
+    if (!store_.ready()) return true;
+
+    const auto& saved = store_.state().context;
+    if ((saved.present && (context.profileVersion < saved.profileVersion ||
+         (context.profileVersion == saved.profileVersion &&
+          std::memcmp(result.digest, saved.digest, sizeof(saved.digest))))) ||
+        context.profileVersion < observedContextVersion_ ||
+        (context.profileVersion == observedContextVersion_ &&
+         std::memcmp(result.digest, observedContextDigest_, sizeof(observedContextDigest_)))) {
+        result.status = ContextStatus::Conflict;
+        return true;
+    }
+    if (context.profileVersion > observedContextVersion_) {
+        observedContextVersion_ = context.profileVersion;
+        std::memcpy(observedContextDigest_, result.digest, sizeof(observedContextDigest_));
+    }
+    const bool unchanged = saved.present && context.profileVersion == saved.profileVersion;
+    // Already-persisted duplicates are read-only, even on an unrelated hardware
+    // fault. All writes wait for the existing hardware owner's stationary gate.
+    if (!unchanged && (hardware_.unavailable() || !hardware_.stationary() ||
+        active() || product_.active() ||
+        (flow_.busy() && flow_.stage() != babytech::display::DisplayStage::Complete))) {
+        result.status = ContextStatus::Busy;
+        return true;
+    }
+    const auto written = store_.saveContext(context);
+    if (written != MotionWrite::Stored && written != MotionWrite::Unchanged) {
+        result.status = written == MotionWrite::Conflict ? ContextStatus::Conflict :
+            written == MotionWrite::Busy ? ContextStatus::Busy : ContextStatus::StorageFault;
+        return true;
+    }
+    // The Store keeps only the digest/barrier. Rehydrate the complete cache
+    // from the verified retry, including an Unchanged reply after reboot.
+    if (context.cleared) {
+        if (product_.context().profileVersion != context.profileVersion)
+            product_.clearContext(context.profileVersion);
+    }
+    else {
+        FeedingContext feeding;
+        feeding.babyId = context.babyId;
+        feeding.babyName = context.babyName;
+        feeding.formulaBrand = context.formulaBrand;
+        feeding.profileVersion = context.profileVersion;
+        feeding.recipe = {context.waterMl, context.temperatureC, context.powderGPer100Ml};
+        if (product_.context().profileVersion != context.profileVersion)
+            product_.applyContext(feeding);
+    }
+    const auto& projected = product_.context();
+    contextProjected_ = projected.profileVersion == context.profileVersion &&
+        (context.cleared ? !product_.hasContext() :
+         projected.babyId == context.babyId && projected.babyName == context.babyName &&
+         projected.formulaBrand == context.formulaBrand &&
+         projected.recipe.waterMl == context.waterMl &&
+         projected.recipe.temperatureC == context.temperatureC &&
+         projected.recipe.powderGPer100Ml == context.powderGPer100Ml);
+    if (!contextProjected_) {
+        result.status = ContextStatus::Conflict;
+        return true;
+    }
+    product_.setContextStorageReady(true);
+    result.status = written == MotionWrite::Stored ? ContextStatus::Stored : ContextStatus::Unchanged;
+    return true;
+}
+
 ProductRun MotionProductRuntime::run(const ProductRequest& request) const {
     ProductRun value;
     value.commandId = request.commandId;
@@ -66,7 +150,8 @@ bool MotionProductRuntime::command(const CommandMessage& message, uint32_t nowMs
                     flow_.busy() || product_.ownsMotion())) reason = "busy";
     if (!reason) switch (request.command) {
         case ProductCommand::Prepare:
-            if (state.pendingResultCount == kMotionResultQueueCapacity) reason = "result_queue_full";
+            if (!contextSynchronized()) reason = "context_required";
+            else if (state.pendingResultCount == kMotionResultQueueCapacity) reason = "result_queue_full";
             else {
                 prepared = run(request);
                 reason = product_.prepareRejection(prepared);
@@ -300,6 +385,7 @@ void MotionProductRuntime::project(Status& status, bool linkConnected) const {
     status.executionAuthorized = product_.executionAuthorized() && store_.ready() && linkConnected &&
         !cloudStopPending_ && !deferred_ && !hardware_.unavailable();
     status.snapshot.startEnabled = status.executionAuthorized && !active() && product_.canStart() &&
+        contextSynchronized() &&
         store_.state().context.present && !store_.state().context.cleared &&
         store_.state().pendingResultCount < kMotionResultQueueCapacity;
     status.activeExecutionId[0] = 0;
