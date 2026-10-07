@@ -201,7 +201,11 @@ Brain v4现从既有MQTT配置槽解析完整档案/墓碑，回调只暂存最�
 
 共享UART core、Arduino适配器及Brain Controller现有显式`publishTerminal`/`forwardCloudReceipt`和按角色验证的回调，复用kind12/13及唯一普通分片槽；同一已配对会话即可补历史终态，不等当前宝宝、Ready或新鲜STATUS。回调只在同一loop交付，原JSON不改写；没有NVS清槽、自动重新投递或新动作。Stop/心跳走原优先通道，可发送的业务回复优先于终态，尚未准备好的延后回复不挡历史终态。普通槽释放后优先预约到期回复和已有STATUS，避免连续补传挤掉遥测；没有样本时仍可补传，不增加队列或准入门禁。
 
-`python3 tools/test_board_link.py --sanitize`测真实两端core的有界字节传输与上述接口；`python3 tools/test_product_event_messages.py --sanitize`测试生产codec；父仓库`python3 Test/brain_event_contract_check.py --sanitize`把编码事件交给隔离Cloud数据库，再把实际Cloud回执交给固件解析器。没有真实UART、Flash或电机，不代表完整板间交付。Motion持久队列重传/匹配清除owner、Brain真实终态MQTT转发及main接线仍待完成，公开真实模式can_start仍false；默认v3及旧单槽事件路径不变。
+两板main现已接`MotionResultDelivery`/`BrainResultDelivery`及BrainNetwork真实终态发布。Motion复用四条持久结果，成功入UART队列后按一秒间隔轮转；槽忙/断链未入队时保留原项，下轮重试，不消耗周期而与STATUS相位锁定。转换失败的槽按同一周期让行；后续Cloud拒绝不退回轮转索引。传输失败不改原JSON/身份/水位；Intent不发布成喂养记录。Brain按当前MQTT代次发布原字节，无第二份持久outbox；旧结果不要求当前宝宝、Ready、TTL或新鲜STATUS。真实Cloud stored回执按精确config topic/当前代次接收，匹配模拟结果先交其owner，其他回执经UART到Motion。两侧仅复制一条待处理回执，不覆盖不同项；丢回执由原事件补传和Cloud幂等回执恢复。
+
+Motion回调不写Flash，loop在紧急UART/电机服务之后处理精确匹配删除，维护/OTA只暂缓。已归档旧结果可在下一任务运行时确认，保持新意图及消费水位；未归档执行槽还须运行器/恢复owner释放且新鲜停稳，不能抢在其归档前清槽。主机测试不能证明Flash写入期间真实Stop时限或CAN反馈余量。
+
+测试：`tools/test_result_delivery.py --sanitize`测生产Store/codec/UART core与relay组合，NVS/Network边界为替身；`tools/test_brain_network.py --sanitize`另测生产网络worker的原JSON发布及代次，`tools/test_board_link.py --sanitize`/`tools/test_product_event_messages.py --sanitize`覆盖传输/codec。父仓库`Test/brain_event_contract_check.py --sanitize`独立验证真实隔离Cloud事务及回执decoder。它们不构成完整main+broker+App或实机验收。真实can_start仍false；默认v3及旧单槽事件路径不变，B3.3/安装激活与B4继续待做。
 
 ### Brain-only 仿真（Brain v4 USB入口）
 

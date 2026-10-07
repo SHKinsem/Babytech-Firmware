@@ -41,6 +41,26 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertNotIn("contextReady()", loop[loop.index("intentPending = intentPending"):loop.index("view.update")])
         self.assertIn("DisplayIntent::Initialize) contextSync.yield", loop)
 
+    def test_result_delivery_wiring_preserves_runtime_execution_slot(self):
+        # Source wiring only; production Store/transport behavior is tested separately.
+        setup = function_body(self.motion, "void setup()")
+        self.assertIn("productBoardLink.setCloudReceiptHandler(receiptProduct)", setup)
+        callback = function_body(self.motion, "bool receiptProduct(")
+        self.assertIn("return resultDelivery.receipt(receipt);", callback)
+        self.assertNotIn("acknowledge(", callback)
+        polling = function_body(self.motion, "void pollDemo()")
+        self.assertLess(polling.index("productRuntime.poll("), polling.index("resultDelivery.poll("))
+        self.assertIn("!productRuntime.active() && !productRecovery.executionPending() &&", polling)
+        self.assertIn("productHardware.stationary(), commissioningActive() || ota.maintenanceActive()", polling)
+        brain_setup = function_body(self.brain, "void setup()")
+        self.assertIn("controllerLink.setTerminalHandler(receiveMotionTerminal)", brain_setup)
+        receipt = function_body(self.brain, "void receiveCloudReceipt(")
+        self.assertIn("if (simulation && simulation->receipt(receipt)) return;", receipt)
+        self.assertIn("resultDelivery.receipt(receipt)", receipt)
+        loop = function_body(self.brain, "void loop()")
+        self.assertLess(loop.index("controllerLink.poll(uint32_t(millis()))"), loop.index("resultDelivery.poll("))
+        self.assertNotIn("can_start", loop[loop.index("resultDelivery.poll("):loop.index("localDispatcher.poll(")])
+
     def test_motion_mutating_routes_have_gate_except_safety_stop(self):
         safety = {
             "/api/stop": "handleStop",

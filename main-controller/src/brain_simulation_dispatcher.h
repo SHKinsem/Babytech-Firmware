@@ -124,16 +124,18 @@ public:
         refresh();
     }
 
-    void receipt(const boardlink::CloudReceipt& receipt) {
+    bool receipt(const boardlink::CloudReceipt& receipt) {
         size_t index = 0;
         while (index < resultCount() && std::strncmp(simulation_.result(index)->eventId,
                receipt.eventId, sizeof(receipt.eventId))) ++index;
-        if (simulation_.acknowledge(receipt)) {
+        const bool acknowledged = simulation_.acknowledge(receipt);
+        if (acknowledged) {
             for (size_t i = index; i < resultCount(); ++i)
                 std::memcpy(resultSessions_[i], resultSessions_[i + 1], sizeof(resultSessions_[i]));
             resultSessions_[resultCount()][0] = 0;
         }
         refresh();
+        return acknowledged;
     }
 
     void poll(uint32_t nowMs) {

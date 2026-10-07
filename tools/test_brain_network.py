@@ -17,6 +17,15 @@ import tempfile
 
 
 CASES = [
+    *(f"terminal-{kind}" for kind in (
+        "cloud-completed", "cloud-failed", "local-completed", "local-failed", "stale-motion", "wire-boundary",
+        "offline", "full", "current-generation", "reconnect-queued", "reconnect-deferred",
+        "reconnect-before-send", "history", "publish-failure")),
+    *(f"terminal-reject-{kind}" for kind in (
+        "wrong-kind", "unknown-kind", "simulation-marker", "motion-role", "invalid-role",
+        "invalid-pairing", "pair-unterminated", "pair-device", "event-device", "other-current-device",
+        "wrong-epoch", "invalid-physical", "local-command", "oversized", "empty", "invalid-json", "extra", "duplicate",
+        "missing", "range", "type", "sequence", "powder", "trailing", "nul", "escaped-nul", "utf8")),
     "simulation-complete", "simulation-stop", "simulation-offline", "simulation-switch", "simulation-context-batch",
     "configure-wifi", "configure-mqtt", "configure-mqtt-failure", "configure-unpaired",
     "configure-unpaired-failure", "configure-unpaired-begin-failure", "configure-other-owner",

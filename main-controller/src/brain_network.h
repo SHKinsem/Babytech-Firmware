@@ -35,6 +35,11 @@ public:
     // Mode changes rotate immediately, invalidating old-mode queued traffic.
     void resetCommandSession() { if (started_) cloud_.requestReconnect(); }
     bool publishSimulationEvent(const v4::Pairing& pairing, const boardlink::TerminalEvent& event);
+    // Real kind-12 terminal only, validated for this paired Brain/device. Keep
+    // the original JSON bytes and enqueue in the snapshotted cloud generation;
+    // historical results need no Motion status, context or command TTL gate.
+    // True means queued, never delivery/stored proof; the caller retains it.
+    bool publishTerminalEvent(const v4::Pairing& pairing, const v4::Message& message);
     cloud::Freshness checkFreshness(const char* session, uint32_t generation,
                                    uint32_t sampledAtMs, uint16_t ttlMs);
     // Trusted runtime only: publish a determined original result, not a new

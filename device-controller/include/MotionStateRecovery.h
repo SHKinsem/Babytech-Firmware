@@ -26,6 +26,9 @@ public:
     void poll();
     void project(babytech::boardlink::Status& status) const;
     bool motionPending() const { return stopPending_; }
+    // Stop confirmation may precede archival; receipts must not clear the
+    // execution slot while this recovery owner still needs to finish it.
+    bool executionPending() const { return recoveryPending_; }
     bool began() const { return began_; }
     babytech::boardlink::MotionLoad loadResult() const { return loaded_; }
 private:

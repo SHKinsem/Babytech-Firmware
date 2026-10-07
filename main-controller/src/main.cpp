@@ -17,6 +17,7 @@
 #include "brain_simulation_console.h"
 #include "brain_simulation_dispatcher.h"
 #include "brain_simulation_mode_guard.h"
+#include "brain_result_delivery.h"
 #include <esp_system.h>
 #endif
 
@@ -27,6 +28,12 @@ babytech::display::BabytechDisplayView view;
 babytech::display::ControllerLink controllerLink;
 #if BABYTECH_BOARD_LINK_V4
 babytech::brain::BrainNetwork network;
+babytech::brain::BrainResultDelivery<babytech::display::ControllerLink,
+  babytech::brain::BrainNetwork> resultDelivery(controllerLink, network);
+bool receiveMotionTerminal(const babytech::v4::Message& message,
+                           const babytech::boardlink::TerminalEvent&, uint32_t) {
+  return resultDelivery.terminal(message);
+}
 using SimulationOwner = babytech::brain::BrainSimulationDispatcher<babytech::brain::BrainNetwork>;
 std::unique_ptr<SimulationOwner> simulation;
 babytech::brain::BrainSimulationModeGuard simulationModeGuard;
@@ -74,7 +81,8 @@ void dispatchCloudStop(void*, const babytech::boardlink::CloudStop& stop,
   else cloudDispatcher.stop(stop, generation, nowMs);
 }
 void receiveCloudReceipt(void*, const babytech::boardlink::CloudReceipt& receipt) {
-  if (simulation) simulation->receipt(receipt);
+  if (simulation && simulation->receipt(receipt)) return;
+  resultDelivery.receipt(receipt);
 }
 bool newPairingEpoch(char (&epoch)[33]) {
   constexpr char hex[] = "0123456789abcdef";
@@ -163,6 +171,7 @@ void setup() {
   network.setProductHandlers(dispatchCloudCommand, dispatchCloudStop, nullptr);
   network.setContextHandler(receiveCloudContext, nullptr);
   network.setReceiptHandler(receiveCloudReceipt, nullptr);
+  controllerLink.setTerminalHandler(receiveMotionTerminal);
   cloudDispatcher.setPrepareReadyHandler(contextReady);
   cloudDispatcher.setConfigurationYieldHandler(yieldConfiguration);
   cloudDispatcher.setAcceptanceHandler(observeRealAcceptance);
@@ -190,6 +199,7 @@ void loop() {
   if (simulation) simulation->poll(uint32_t(millis()));
   // Drain a queued urgent Stop before installer/recovery may perform Flash I/O.
   controllerLink.poll(uint32_t(millis()));
+  resultDelivery.poll(uint32_t(millis()), commissioningSession.active());
   localDispatcher.poll(uint32_t(millis()));
   pollCommissioningConsole();
   installer.poll(uint32_t(millis()));

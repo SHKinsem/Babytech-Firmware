@@ -82,6 +82,21 @@ bool BrainNetwork::publishSimulationEvent(const v4::Pairing& pairing, const boar
     return cloud_.publishForSession("event", String(payload_), session.generation);
 }
 
+bool BrainNetwork::publishTerminalEvent(const v4::Pairing& pairing, const v4::Message& message) {
+    cloud::SessionSnapshot session;
+    if (!started_ || pairing.role != v4::Role::Brain || !v4::validPairing(pairing) ||
+        std::strcmp(pairing.deviceId, cloud_.deviceId()) || message.kind != v4::Kind::Terminal ||
+        !message.length || message.length > v4::kMaxMessage || message.length >= sizeof(payload_) ||
+        !cloud_.sessionSnapshot(session)) return false;
+    std::unique_ptr<boardlink::TerminalEvent> event(new (std::nothrow) boardlink::TerminalEvent);
+    if (!event || !boardlink::decodeTerminalEvent(message, pairing, *event)) return false;
+    std::memcpy(payload_, message.payload, message.length);
+    payload_[message.length] = 0;
+    const String payload(payload_);
+    if (payload.length() != message.length) return false;
+    return cloud_.publishForSession("event", payload, session.generation);
+}
+
 cloud::Freshness BrainNetwork::checkFreshness(const char* session, uint32_t generation,
                                              uint32_t sampledAtMs, uint16_t ttlMs) {
     return cloud_.checkFreshness(session, generation, sampledAtMs, ttlMs);

@@ -47,6 +47,7 @@
 #include <MaintenanceUsbConsole.h>
 #include "MotionStateRecovery.h"
 #include "MotionProductRuntime.h"
+#include "MotionResultDelivery.h"
 #include <MotionInstallTarget.h>
 #endif
 #if MOTION_HAS_PRODUCT
@@ -563,6 +564,10 @@ public:
 };
 ProductHardware productHardware;
 motion::MotionProductRuntime productRuntime(productState, product, demo, productHardware);
+motion::MotionResultDelivery<babytech::boardlink::ArduinoBoardLink> resultDelivery(productBoardLink, productState);
+bool receiptProduct(const babytech::boardlink::CloudReceipt& receipt, uint32_t) {
+    return resultDelivery.receipt(receipt);
+}
 bool contextProduct(const babytech::boardlink::ProductContext& context, uint32_t nowMs,
                     babytech::boardlink::ContextResult& result) {
     return productRuntime.context(context, nowMs, result);
@@ -1038,6 +1043,10 @@ void pollDemo() {
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
     productRecovery.poll();
     productRuntime.poll(millis());
+    // A runtime/recovery owner may still need to archive its execution slot.
+    // This only delays clearing that slot, never confirmation of queued history.
+    resultDelivery.poll(millis(), !productRuntime.active() && !productRecovery.executionPending() &&
+        productHardware.stationary(), commissioningActive() || ota.maintenanceActive());
 #endif
     static babytech::display::DisplayStage previous = babytech::display::DisplayStage::Unknown;
     static const char* previousReason = nullptr;
@@ -1987,6 +1996,7 @@ void setup() {
     productBoardLink.setStopHandler(stopProduct);
     productBoardLink.setCommandReadyHandler(productResultReady);
     productBoardLink.setContextHandler(contextProduct);
+    productBoardLink.setCloudReceiptHandler(receiptProduct);
 #else
     if (productSession) eventOutbox.begin(cloudDeviceId, *productSession);
 #endif

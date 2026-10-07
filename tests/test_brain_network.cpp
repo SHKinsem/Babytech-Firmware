@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 
 namespace {
@@ -1605,6 +1606,237 @@ Status readyMotion() {
     return value;
 }
 
+babytech::v4::Pairing terminalPairing() {
+    babytech::v4::Pairing pairing;
+    pairing.role = babytech::v4::Role::Brain;
+    std::strcpy(pairing.deviceId, kId);
+    std::strcpy(pairing.epoch, "0123456789abcdef0123456789abcdef");
+    std::strcpy(pairing.localPhysicalId, "aabbccddeeff");
+    std::strcpy(pairing.peerPhysicalId, "112233445566");
+    return pairing;
+}
+
+void terminalBytes(babytech::v4::Message& message, const std::string& bytes) {
+    check(bytes.size() <= babytech::v4::kMaxMessage, "terminal fixture exceeds buffer");
+    std::memcpy(message.payload, bytes.data(), bytes.size());
+    message.length = uint16_t(bytes.size());
+}
+
+std::unique_ptr<babytech::v4::Message> terminalMessage(const babytech::v4::Pairing& pairing,
+                                                     bool local = false, bool completed = true,
+                                                     bool simulation = false) {
+    using namespace babytech::boardlink;
+    auto event = std::make_unique<TerminalEvent>();
+    auto& request = event->request;
+    request.source = local ? babytech::v4::Source::LocalTouch : babytech::v4::Source::CloudCommand;
+    request.command = ProductCommand::Prepare;
+    request.sequence = babytech::v4::kMaxSequence;
+    std::strcpy(request.deviceId, pairing.deviceId);
+    if (local) check(makeLocalCommandId(pairing, request.sequence, request.commandId), "local ID fixture failed");
+    else std::strcpy(request.commandId, "cloud-result");
+    std::strcpy(request.babyId, "historical-baby");
+    request.profileVersion = 7;
+    request.waterMl = 120;
+    request.temperatureC = 42;
+    request.powderGPer100Ml = 25;
+    event->targetPowderG = productTargetPowderG(request);
+    event->completed = completed;
+    event->uptimeMs = 1;
+    if (!completed) {
+        std::strcpy(event->reason, "reboot_during_feed");
+        std::strcpy(event->errorCode, "E_REBOOT_DURING_FEED");
+    }
+    check(makeProductEventId(pairing, request.source, request.sequence, event->eventId), "event ID fixture failed");
+    auto message = std::make_unique<babytech::v4::Message>();
+    check(simulation ? encodeBrainSimulationEvent(pairing, *event, *message) :
+                       encodeTerminalEvent(pairing, *event, *message), "terminal encoder fixture failed");
+    std::string bytes(reinterpret_cast<const char*>(message->payload), message->length);
+    // Legal noncanonical bytes expose any accidental decode/re-encode or trim.
+    const auto at = bytes.find("historical-baby");
+    check(at != std::string::npos, "terminal baby fixture missing");
+    bytes.replace(at, std::strlen("historical-baby"), "historical\\u002dbaby");
+    terminalBytes(*message, " \n\t" + bytes + "\r\n ");
+    message->senderBoot = 17;
+    message->receiverBoot = 29;
+    message->messageId = 41;
+    return message;
+}
+
+std::vector<size_t> terminalPackets() {
+    std::vector<size_t> packets;
+    for (size_t i = 0; i < fake::io.published.size(); ++i)
+        if (fake::io.published[i].topic == kPrefix + "event") packets.push_back(i);
+    return packets;
+}
+
+void terminalTransport(const std::string& mode) {
+    BrainNetwork network;
+    const auto pairing = terminalPairing();
+    auto message = terminalMessage(pairing, mode.compare(0, 5, "local") == 0,
+                                   mode.find("failed") == std::string::npos);
+    if (mode == "wire-boundary") {
+        std::string bytes(reinterpret_cast<const char*>(message->payload), message->length);
+        bytes.append(babytech::v4::kMaxMessage - bytes.size(), ' ');
+        terminalBytes(*message, bytes);
+    }
+    const auto original = std::make_unique<babytech::v4::Message>(*message);
+    const std::string bytes(reinterpret_cast<const char*>(message->payload), message->length);
+    check(!network.publishTerminalEvent(pairing, *message), "unstarted terminal accepted");
+    begin(network);
+    check(!network.publishTerminalEvent(pairing, *message), "terminal accepted before first cloud session");
+    const Status motion = readyMotion();
+    const bool reconnect = mode == "current-generation" || mode == "reconnect-queued" ||
+        mode == "reconnect-deferred" || mode == "reconnect-before-send" || mode == "history";
+    const auto publish = [&] {
+        const bool worker = fake::io.inWorker;
+        fake::io.inWorker = false;
+        const bool result = network.publishTerminalEvent(pairing, *message);
+        fake::io.inWorker = worker;
+        check(std::memcmp(message.get(), original.get(), sizeof(*original)) == 0, "terminal input was mutated");
+        return result;
+    };
+    std::string previous;
+    bool rotatedBeforeSend = false;
+    fake::io.onDelay = [&](unsigned tick) {
+        check(tick < 12, "terminal transport did not converge");
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            previous = token();
+            if (mode == "offline") { WiFi.state = 0; return; }
+            if (mode == "full") {
+                for (unsigned i = 0; i < 8; ++i) check(publish(), "terminal queue filled before eight events");
+                check(terminalPackets().empty(), "enqueue performed synchronous MQTT I/O");
+                check(!publish() && fake::io.queueSendFailures == 1, "full terminal queue did not return false");
+                return;
+            }
+            if (mode == "publish-failure") fake::io.publishOk = false;
+            if (mode == "reconnect-deferred") fake::io.deferNextQueueSend = true;
+            if (mode != "current-generation" && mode != "history") {
+                if (mode == "stale-motion") pollAt(network, &motion, true, millis() - 1500u);
+                fake::io.now += 5001u;
+                check(publish(), "valid historical terminal blocked by Motion/context/readiness/TTL");
+                check(terminalPackets().empty(), "terminal success claimed actual delivery");
+                if (!reconnect && mode != "publish-failure") poll(network);
+            }
+            if (reconnect) {
+                if (mode == "reconnect-before-send") {
+                    fake::io.onLoop = [&] {
+                        if (!rotatedBeforeSend) {
+                            rotatedBeforeSend = true;
+                            network.resetCommandSession();
+                        }
+                    };
+                } else {
+                    network.resetCommandSession();
+                    check(!publish(), "terminal accepted in invalidated current generation");
+                }
+            }
+        } else if (tick == 3 && mode == "offline") {
+            check(!network.connected() && !publish() && terminalPackets().empty(), "offline terminal not retained by caller");
+            connectedWifi();
+        } else if (tick == 3 && mode == "publish-failure") {
+            check(!network.connected() && terminalPackets().size() == 1 && !publish(),
+                  "MQTT rejection was mistaken for durable terminal success");
+            fake::io.publishOk = true;
+            fake::io.now += 5000u;
+        } else if ((tick == 3 && reconnect) ||
+                   (tick == 4 && (mode == "offline" || mode == "publish-failure"))) {
+            check(network.connected() && fake::io.connectCalls == 2, "terminal retry did not reconnect");
+            if (mode == "reconnect-deferred") fake::completeDeferredSends();
+            check(terminalPackets().size() == (mode == "publish-failure" ? 1u : 0u),
+                  "old-generation terminal crossed reconnect before retry");
+            // publish before poll: use CloudLink's actual generation, not the
+            // coordinator's still-old status generation or event uptime.
+            check(publish(), "retained terminal cannot enqueue in new current generation");
+            poll(network);
+        } else if (tick == 3 && mode == "full") {
+            check(publish(), "terminal could not retry after queue drain");
+        } else if ((mode == "full" && tick == 7) ||
+                   (mode != "full" && tick >= (mode == "offline" || mode == "publish-failure" ||
+                                               mode == "reconnect-deferred" ? 5u : reconnect ? 4u : 3u))) {
+            const auto packets = terminalPackets();
+            check(packets.size() == (mode == "full" ? 9u : mode == "publish-failure" ? 2u : 1u),
+                  "terminal lost/duplicated or crossed generations");
+            for (const auto index : packets) {
+                const auto& packet = fake::io.published[index];
+                check(!packet.retained && packet.payload == bytes, "terminal route/retained/raw bytes changed");
+                auto captured = std::make_unique<babytech::v4::Message>();
+                captured->kind = babytech::v4::Kind::Terminal;
+                terminalBytes(*captured, packet.payload);
+                auto decoded = std::make_unique<babytech::boardlink::TerminalEvent>();
+                check(babytech::boardlink::decodeTerminalEvent(*captured, pairing, *decoded),
+                      "MQTT captured bytes do not round-trip production terminal decoder");
+                check(decoded->uptimeMs == 1 && decoded->request.profileVersion == 7 &&
+                      std::string(decoded->request.babyId) == "historical-baby", "historical snapshot changed");
+            }
+            if (reconnect || mode == "offline" || mode == "publish-failure") {
+                auto latest = fake::io.published.size();
+                while (latest && fake::io.published[latest - 1].topic != kPrefix + "status") --latest;
+                check(latest && token(latest - 1) != previous, "terminal retry reused old cloud session");
+            }
+            workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void terminalRejected(const std::string& mode) {
+    BrainNetwork network;
+    begin(network);
+    auto pairing = terminalPairing();
+    auto message = terminalMessage(pairing, mode == "local-command", true, mode == "simulation-marker");
+    std::string bytes(reinterpret_cast<const char*>(message->payload), message->length);
+    const auto replace = [&](const std::string& from, const std::string& to) {
+        const auto at = bytes.find(from);
+        check(at != std::string::npos, "terminal rejection fixture field missing");
+        bytes.replace(at, from.size(), to);
+    };
+    if (mode == "wrong-kind") message->kind = babytech::v4::Kind::CloudReceipt;
+    else if (mode == "unknown-kind") message->kind = babytech::v4::Kind(255);
+    else if (mode == "motion-role") pairing.role = babytech::v4::Role::Motion;
+    else if (mode == "invalid-role") pairing.role = babytech::v4::Role(0);
+    else if (mode == "invalid-pairing") std::memcpy(pairing.peerPhysicalId, pairing.localPhysicalId, sizeof(pairing.peerPhysicalId));
+    else if (mode == "pair-unterminated") std::memset(pairing.deviceId, 'a', sizeof(pairing.deviceId));
+    else if (mode == "pair-device") std::strcpy(pairing.deviceId, "other-device");
+    else if (mode == "event-device") replace(kId, "other-device");
+    else if (mode == "other-current-device") {
+        std::strcpy(pairing.deviceId, "other-device");
+        message = terminalMessage(pairing);
+        bytes.assign(reinterpret_cast<const char*>(message->payload), message->length);
+    }
+    else if (mode == "wrong-epoch") pairing.epoch[0] = '9';
+    else if (mode == "invalid-physical") std::memset(pairing.localPhysicalId, '0', sizeof(pairing.localPhysicalId) - 1);
+    else if (mode == "local-command") replace("local-" + std::string(pairing.epoch), "local-wrong");
+    else if (mode == "empty") bytes.clear();
+    else if (mode == "invalid-json") bytes = "{";
+    else if (mode == "extra") replace("{", "{\"unexpected\":true,");
+    else if (mode == "duplicate") replace("{", "{\"device_id\":\"bt-brain-test\",");
+    else if (mode == "missing") replace("\"water_ml\":120,", "");
+    else if (mode == "range") replace("\"water_ml\":120", "\"water_ml\":0");
+    else if (mode == "type") replace("\"water_ml\":120", "\"water_ml\":\"120\"");
+    else if (mode == "sequence") replace("\"command_seq\":\"9223372036854775807\"", "\"command_seq\":\"42\"");
+    else if (mode == "powder") replace("\"target_powder_g\":30", "\"target_powder_g\":31");
+    else if (mode == "trailing") bytes += "{}";
+    else if (mode == "nul") bytes += std::string(1, '\0');
+    else if (mode == "escaped-nul") replace("historical", "history\\u0000");
+    else if (mode == "utf8") replace("historical", std::string("\xc0\xaf"));
+    else check(mode == "oversized" || mode == "simulation-marker", "unknown terminal rejection fixture");
+    terminalBytes(*message, bytes);
+    if (mode == "oversized") message->length = uint16_t(babytech::v4::kMaxMessage + 1);
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) {
+            check(network.connected(), "terminal rejection fixture has no cloud session");
+            const auto sends = fake::io.queueSendCalls;
+            check(!network.publishTerminalEvent(pairing, *message) && fake::io.queueSendCalls == sends,
+                  "invalid terminal was accepted/enqueued");
+        } else {
+            check(fake::io.published.empty(), "invalid terminal reached MQTT");
+            workerOnly(); stop();
+        }
+    };
+    fake::runWorker();
+}
+
 void simulationPath(const std::string& mode) {
     using Owner = babytech::brain::BrainSimulationDispatcher<BrainNetwork>;
     using namespace babytech::boardlink;
@@ -2261,6 +2493,8 @@ int main(int argc, char** argv) {
         else if (name == "queue-full") queueFull();
         else if (name == "failure-throttle" || name == "failure-throttle-rollover") failureThrottle(name == "failure-throttle-rollover");
         else if (name == "publish-failure") publishFailure();
+        else if (name.compare(0, 16, "terminal-reject-") == 0) terminalRejected(name.substr(16));
+        else if (name.compare(0, 9, "terminal-") == 0) terminalTransport(name.substr(9));
         else if (name == "status-safety") statusSafety();
         else if (name.compare(0, 11, "simulation-") == 0) simulationPath(name.substr(11));
         else if (name == "status-flags") statusFlags();
