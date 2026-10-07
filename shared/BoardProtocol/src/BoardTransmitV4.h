@@ -16,16 +16,29 @@ public:
 class Transmitter {
 public:
     bool enqueue(const Message& message);
+    // Deadlines are exclusive and frozen at acceptance, not at first pump.
+    bool enqueueTimedOrdinary(const Message& message, uint32_t nowMs, uint32_t ttlMs,
+                              uint32_t firstFrameBudgetMs = kCommandFirstFrameBudgetMs);
     bool enqueueControl(const Frame& frame);
+    // Clockless pumping refuses guarded ordinary bytes; controls remain usable.
     bool pump(ByteSink& sink);
+    // nowMs must be fresh; write() must be nonblocking. This guards local writes,
+    // not physical UART drain time or remote business acceptance.
+    bool pump(uint32_t nowMs, ByteSink& sink);
     void cancelOrdinary();
+    // Unlike cancelOrdinary(), poison any partial frame before draining it.
+    // Already completed frames cannot be revoked. Does not change control slots.
+    void invalidateOrdinary();
     void reset();
     bool pending() const;
     bool ordinaryPending() const { return ordinaryPending_; }
+    // Sticky until any successful enqueue (including control) or reset.
+    bool ordinaryTimedOut() const { return ordinaryTimedOut_; }
     bool healthy() const { return healthy_; }
 private:
     enum class Slot { None, Stop, Heartbeat, Control, Ordinary };
     bool prepare();
+    bool pumpInternal(ByteSink& sink, bool hasClock, uint32_t nowMs);
     void finishFrame();
     Message ordinary_{};
     Frame stop_{}, heartbeat_{}, controls_[2]{};
@@ -34,6 +47,9 @@ private:
     size_t wireOffset_ = 0;
     uint16_t ordinaryOffset_ = 0;
     uint16_t framePayloadSize_ = 0;
+    uint32_t ordinaryStartedAt_ = 0;
+    uint32_t ordinaryTtlMs_ = 0;
+    uint32_t firstFrameBudgetMs_ = 0;
     uint8_t controlHead_ = 0;
     uint8_t controlCount_ = 0;
     Slot slot_ = Slot::None;
@@ -41,6 +57,9 @@ private:
     bool stopPending_ = false;
     bool heartbeatPending_ = false;
     bool cancelAfterFrame_ = false;
+    bool ordinaryTimed_ = false;
+    bool ordinaryTimedOut_ = false;
+    bool frameInvalidated_ = false;
     bool healthy_ = true;
 };
 

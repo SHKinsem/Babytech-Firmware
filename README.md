@@ -151,6 +151,12 @@ Brain主循环的`BrainPendingRecovery`用开机已读入的同一个Store自动
 
 持久故障保留journal，不等于仍拥有后续调试动作：停稳或已准入的网页动作接手后释放旧RAM机械身份，旧product目标不能停止新工作台，也不永久锁网页。工作台UART目标化尚未实现，直接HTTP安全Stop仍可用。`python3 tools/test_motion_product_runtime.py --sanitize`验证生产组件/边界替身，main接线另作静态检查；不是实板CAN、NVS、HTTP或完整App验收。默认非食用能力仍关闭；不因本项安装、烧录或宣称产品可供喂养。
 
+### Brain 单次UART发送接口
+
+Brain的共享UART core、Arduino适配器和Controller现提供单次`requestCommand`/精确COMMAND_RESULT及优先`requestStop`接口。发送排入不等于Motion接受，LINK_ACK不完成普通请求；1000ms超时、断链、换boot或取消仅保留未知，随后查询原身份，不自动重发。首帧/调度预算集中为`kCommandFirstFrameBudgetMs=50`，从编码TTL扣除并约束本地写入；过期残帧只改坏尚未写出的CRC后排空，保留Stop/心跳且不交织字节，不宣称已发帧可撤回或实板时限已验收。local Stop由唯一owner生成既有transient ID、seq0，不等待NVS；Received不是停稳。
+
+业务owner仍须在调用前完成local持久占号、Cloud会话/原截止核验和Stop新鲜目标绑定。BrainNetwork/main的App/触控入口尚未调用这些新接口，Start/Initialize仍关闭，故本子项不是完整派发或产品已启用。测试`tools/test_protocol.py --sanitize`、`test_board_link.py`、`test_board_arduino.py`、`test_brain_controller.py`及`test_motion_product_runtime.py --sanitize`覆盖对应生产组件/SDK边界替身，不替代真实Flash/CAN/RTOS或完整App验证。
+
 ### Brain USB网络配置
 
 仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。

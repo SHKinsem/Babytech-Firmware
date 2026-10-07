@@ -24,6 +24,7 @@ using babytech::display::DisplayError;
 namespace {
 unsigned scenarios = 0, failures = 0, deliveries = 0, lookups = 0;
 unsigned uartExchanges = 0, uartShortWrites = 0, uartZeroWrites = 0, uartFrames = 0;
+unsigned brainSenderScenarios = 0;
 #define CHECK(x) do { if (!(x)) throw std::runtime_error(std::string(__FILE__) + ":" + \
     std::to_string(__LINE__) + ": " #x); } while (false)
 
@@ -374,6 +375,9 @@ struct PeerWire : v4::ByteSink {
     std::array<uint8_t, capacity> bytes{};
     size_t used = 0, highWater = 0;
     unsigned calls = 0, shortWrites = 0, zeroWrites = 0;
+    bool drop = false;
+    bool forcedZero = false;
+    size_t writeLimit = 7;
     v4::Parser observer;
     v4::Assembler assembled;
     std::vector<v4::Frame> frames;
@@ -383,8 +387,8 @@ struct PeerWire : v4::ByteSink {
     size_t write(const uint8_t* input, size_t length) override {
         CHECK(length && length <= available());
         ++calls;
-        if (calls % 13 == 0) { ++zeroWrites; return 0; }
-        const size_t written = length > 7 ? 7 : length;
+        if (forcedZero || calls % 13 == 0) { ++zeroWrites; return 0; }
+        const size_t written = length > writeLimit ? writeLimit : length;
         if (written < length) ++shortWrites;
         std::memcpy(bytes.data() + used, input, written);
         used += written;
@@ -401,7 +405,7 @@ struct PeerWire : v4::ByteSink {
                 if (assembled.accept(frame, now, message) == v4::AssemblyResult::Complete)
                     messages.push_back(message);
             }
-            peer.receive(bytes[i], now);
+            if (!drop) peer.receive(bytes[i], now);
         }
         used = 0;
     }
@@ -416,6 +420,7 @@ struct LinkFixture {
     ReadOnlyLink brain, motionLink;
     PeerWire toMotion, toBrain;
     uint32_t now = 1000;
+    bool publishStatus = false;
     LinkFixture() {
         CHECK(!uartRuntime);
         uartRuntime = &device;
@@ -434,7 +439,13 @@ struct LinkFixture {
     void step() {
         device.hardware.clock = now;
         brain.poll(now, toMotion);
-        motionLink.poll(now, toBrain);
+        Status status;
+        status.snapshot = device.product.displaySnapshot();
+        status.sampleUptimeMs = now;
+        status.motionBusy = device.runtime.active() || device.flow.busy() || device.product.active();
+        status.stationary = device.hardware.stationary();
+        device.runtime.project(status, true);
+        motionLink.poll(now, toBrain, publishStatus ? &status : nullptr);
         toMotion.deliver(motionLink, now);
         toBrain.deliver(brain, now);
         device.tick(now);
@@ -461,9 +472,8 @@ struct LinkFixture {
         return message;
     }
     void send(const v4::Frame& frame) {
-        // Brain's public command sender is intentionally disabled. Inject real
-        // encoded frames into its bounded UART wire, preserving frame boundaries
-        // and using the production Motion parser/session/reassembler/handlers.
+        // Keep manual injection for malformed/replayed/fragment ordering cases;
+        // normal sender scenarios below use Brain's actual public API.
         CHECK(toMotion.idle());
         std::array<uint8_t, v4::kMaxFrame> encoded{};
         const size_t length = v4::encode(frame, encoded.data(), encoded.size());
@@ -503,7 +513,48 @@ struct LinkFixture {
         }
         CHECK(responses == 1 && uartCommands == 1 && uartCommandTtl > 0 && uartCommandTtl < 5000);
     }
-    void queryOriginal(const ProductRequest& request, MotionOutcome outcome) {
+    void sendBrain(const ProductRequest& request, uint16_t ttl = 5000) {
+        CommandMessage command;
+        command.request = request;
+        command.remainingTtlMs = ttl;
+        CHECK(brain.requestCommand(command, now));
+        CHECK(brain.commandSendState() == CommandSendState::Pending);
+    }
+    void awaitBrain(const ProductRequest& request, bool accepted, const char* reason) {
+        for (unsigned i = 0; i < 800 && brain.commandSendState() == CommandSendState::Pending; ++i) step();
+        CHECK(brain.commandSendState() == CommandSendState::Complete);
+        const auto& result = brain.commandResponse();
+        CHECK(result.source == request.source && result.sequence == request.sequence);
+        CHECK(!std::strcmp(result.commandId, request.commandId));
+        decision(result, accepted, reason);
+    }
+    v4::StopRequest observedTarget(v4::Source source, uint64_t sequence = 0) {
+        publishStatus = true;
+        for (unsigned i = 0; i < 700; ++i) {
+            if (brain.freshStatus(now) && !std::strcmp(brain.peerStatus().activeExecutionId,
+                                                     device.store.state().slot.executionId)) break;
+            step();
+        }
+        CHECK(brain.freshStatus(now));
+        const auto& status = brain.peerStatus();
+        CHECK(std::strlen(status.activeExecutionId) == 32 && status.motionBusy && !status.stationary);
+        v4::StopRequest stop;
+        stop.scope = v4::StopScope::Product;
+        stop.source = source;
+        stop.sequence = sequence;
+        if (source == v4::Source::CloudCommand) {
+            std::strcpy(stop.commandId, "cloud-stop-from-brain");
+            stop.commandIdLength = uint8_t(std::strlen(stop.commandId));
+        }
+        for (unsigned i = 0; i < 16; ++i) {
+            unsigned byte = 0;
+            CHECK(std::sscanf(status.activeExecutionId + 2 * i, "%2x", &byte) == 1);
+            stop.executionId[i] = uint8_t(byte);
+        }
+        return stop;
+    }
+    void queryOriginal(const ProductRequest& request, MotionOutcome outcome,
+                       bool accepted = true, const char* reason = "accepted") {
         ResultQuery query;
         query.source = request.source;
         query.sequence = request.sequence;
@@ -517,7 +568,7 @@ struct LinkFixture {
         CHECK(brain.resultLookupState() == ResultLookupState::Complete && uartQueries == 1);
         const auto& original = brain.resultQueryResponse();
         CHECK(sameResultQuery(original.query, query) && original.status == ResultQueryStatus::Known);
-        CHECK(original.accepted && !std::strcmp(original.reason, "accepted") && original.outcome == outcome);
+        CHECK(original.accepted == accepted && !std::strcmp(original.reason, reason) && original.outcome == outcome);
         CHECK(original.requestDigestHex == digestHex(request));
         CHECK(io.calls.size() == calls && io.disk == disk && device.executor.starts == starts);
         CHECK(toMotion.count(v4::Kind::ResultQuery) && toBrain.count(v4::Kind::Result));
@@ -1637,6 +1688,7 @@ void uartIntegration() {
         link.queryOriginal(original, MotionOutcome::Failed);
     });
     scenario("real UART accepted prepare completes five production stages and returns original result", [] {
+        ++brainSenderScenarios;
         LinkFixture link;
         link.handshake();
         auto& f = link.device;
@@ -1645,7 +1697,9 @@ void uartIntegration() {
             CHECK(sameMotionState(f.store.state(), decodedDisk()));
             CHECK(decodedDisk().slot.kind == MotionSlotKind::Intent && sameProductRequest(decodedDisk().slot.request, original));
         };
-        link.send(link.command(original, 10000));
+        CHECK(!link.brain.freshStatus(link.now));
+        link.sendBrain(original);
+        link.awaitBrain(original, true, "accepted");
         link.accepted(original);
         CHECK(f.executor.starts == 1 && f.product.active());
         for (unsigned i = 0; i < 5; ++i) {
@@ -1663,6 +1717,176 @@ void uartIntegration() {
         CHECK(f.store.state().pendingResults[0].completed && f.store.state().pendingResults[0].uptimeMs == terminalAt);
         CHECK(f.executor.starts == 5 && !f.executor.stops);
         link.queryOriginal(original, MotionOutcome::Succeeded);
+    });
+    for (auto source : {v4::Source::LocalTouch, v4::Source::CloudCommand})
+        scenario("real Brain lost command reply then targeted Stop preserves moving intent " +
+                 std::to_string(int(source)), [=] {
+            ++brainSenderScenarios;
+            LinkFixture link;
+            link.handshake();
+            auto& f = link.device;
+            const auto original = request(20, ProductCommand::Prepare, source);
+            bool durableBeforeStart = false;
+            f.executor.beforeStart = [&] {
+                CHECK(sameMotionState(f.store.state(), decodedDisk()));
+                CHECK(decodedDisk().slot.kind == MotionSlotKind::Intent);
+                CHECK(sameProductRequest(decodedDisk().slot.request, original));
+                CHECK(fake::count(Op::Commit) == 1);
+                durableBeforeStart = true;
+            };
+            link.toBrain.drop = true;
+            link.sendBrain(original);
+            link.run(200);
+            CHECK(durableBeforeStart && uartCommands == 1 && f.executor.starts == 1);
+            CHECK(link.brain.commandSendState() == CommandSendState::Pending);
+            CHECK(uartCommandTtl > 0 && uartCommandTtl <= 4950);
+            link.toBrain.drop = false;
+            const auto stop = link.observedTarget(source, source == v4::Source::CloudCommand ? 21 : 0);
+            CHECK(link.brain.commandSendState() == CommandSendState::Pending);
+            const auto retained = encode(f.store.state());
+            const auto disk = io.disk;
+            const auto calls = io.calls.size();
+            f.executor.beforeStop = [&] { CHECK(io.calls.size() == calls && io.disk == disk); };
+            CHECK(link.brain.requestStop(stop, link.now));
+            CHECK(link.brain.commandSendState() == CommandSendState::Cancelled);
+            for (unsigned i = 0; i < 300 && link.brain.stopSendState() == StopSendState::Pending; ++i) link.step();
+            f.executor.beforeStop = {};
+            CHECK(link.brain.stopSendState() == StopSendState::Received && uartStops == 1 && f.executor.stops == 1);
+            CHECK(!f.hardware.stationary() && f.runtime.active() && f.product.active());
+            CHECK(encode(f.store.state()) == retained && io.calls.size() == calls && io.disk == disk);
+            CHECK(f.store.state().slot.kind == MotionSlotKind::Intent);
+            CHECK(link.toMotion.count(v4::Kind::Stop) == 1);
+            v4::StopRequest transmitted;
+            bool found = false;
+            for (const auto& frame : link.toMotion.frames) if (frame.kind == v4::Kind::Stop) {
+                CHECK(v4::decodeStop(frame.payload, frame.length, transmitted));
+                CHECK(transmitted.source == source && transmitted.sequence == stop.sequence);
+                CHECK(!std::memcmp(transmitted.executionId, stop.executionId, 16));
+                if (source == v4::Source::CloudCommand) CHECK(!std::strcmp(transmitted.commandId, stop.commandId));
+                else {
+                    char expected[40];
+                    std::snprintf(expected, sizeof(expected), "stop-%016llx-%08x", 11ULL, frame.messageId);
+                    CHECK(!std::strcmp(transmitted.commandId, expected));
+                }
+                found = true;
+            }
+            CHECK(found);
+            link.run(100);
+            CHECK(encode(f.store.state()) == retained && io.calls.size() == calls && f.executor.starts == 1);
+            f.executor.confirm();
+            link.step();
+            CHECK(!f.runtime.active() && f.store.state().pendingResultCount == 1);
+            CHECK(!std::strcmp(f.store.state().pendingResults[0].reason, "stopped"));
+            CHECK(f.executor.starts == 1 && f.executor.stops == 1 && uartCommands == 1);
+            link.publishStatus = false;
+            link.queryOriginal(original, MotionOutcome::Failed);
+        });
+    for (auto source : {v4::Source::LocalTouch, v4::Source::CloudCommand})
+        scenario("real Brain low-water rejection persists and original query never retries action " +
+                 std::to_string(int(source)), [=] {
+            ++brainSenderScenarios;
+            LinkFixture link;
+            link.handshake();
+            auto& f = link.device;
+            f.product.resources(true, true, true, 300, link.now);
+            const auto original = request(20, ProductCommand::Prepare, source);
+            link.sendBrain(original);
+            link.awaitBrain(original, false, "low_water");
+            CHECK(uartCommands == 1 && !f.executor.starts && !f.executor.stops && !f.runtime.active());
+            CHECK(fake::count(Op::Commit) == 1 && sameMotionState(f.store.state(), decodedDisk()));
+            f.product.resources(true, false, true, 300, link.now);
+            link.queryOriginal(original, MotionOutcome::None, false, "low_water");
+            CHECK(uartCommands == 1 && !f.executor.starts && !f.hardware.generated);
+        });
+    scenario("real Brain moving busy rejection stays pending while urgent Stop bypasses Flash", [] {
+        ++brainSenderScenarios;
+        LinkFixture link;
+        link.handshake();
+        auto& f = link.device;
+        const auto original = request();
+        link.sendBrain(original);
+        link.awaitBrain(original, true, "accepted");
+        CHECK(f.executor.starts == 1);
+        const auto stop = link.observedTarget(v4::Source::LocalTouch);
+        // The real queued STATUS receipt is control traffic, not a global
+        // admission gate; sendBrain must accept while the ordinary slot is free.
+        link.publishStatus = false;
+        const auto calls = io.calls.size();
+        const auto disk = io.disk;
+        const auto rejected = request(21, ProductCommand::SetTargetTemp);
+        link.sendBrain(rejected);
+        link.run(150);
+        CHECK(uartCommands == 2 && link.brain.commandSendState() == CommandSendState::Pending);
+        CHECK(io.calls.size() == calls && io.disk == disk && f.product.targetTemp() == 45);
+        f.executor.beforeStop = [&] { CHECK(io.calls.size() == calls && io.disk == disk); };
+        CHECK(link.brain.requestStop(stop, link.now));
+        CHECK(link.brain.commandSendState() == CommandSendState::Cancelled);
+        for (unsigned i = 0; i < 300 && link.brain.stopSendState() == StopSendState::Pending; ++i) link.step();
+        f.executor.beforeStop = {};
+        CHECK(link.brain.stopSendState() == StopSendState::Received && f.executor.stops == 1);
+        CHECK(io.calls.size() == calls && io.disk == disk && f.runtime.active());
+        f.executor.confirm();
+        link.run(300);
+        CHECK(link.brain.commandSendState() == CommandSendState::Cancelled);
+        CHECK(f.store.state().localSequence == 21 && !f.store.state().localResult.accepted);
+        CHECK(!std::strcmp(f.store.state().localResult.reason, "busy"));
+        CHECK(f.executor.starts == 1 && f.product.targetTemp() == 45);
+        link.publishStatus = false;
+        link.queryOriginal(original, MotionOutcome::Failed);
+    });
+    for (bool partial : {false, true})
+        scenario("real Brain first-frame UART expiry never reaches Store or starts Flow " +
+                 std::to_string(partial), [=] {
+            ++brainSenderScenarios;
+            LinkFixture link;
+            link.handshake();
+            auto& f = link.device;
+            const auto before = encode(f.store.state());
+            const auto disk = io.disk;
+            link.toMotion.forcedZero = !partial;
+            link.toMotion.writeLimit = partial ? 1 : 7;
+            link.sendBrain(request());
+            link.run(60);
+            CHECK(link.brain.commandSendState() == CommandSendState::TimedOut);
+            link.toMotion.forcedZero = false;
+            link.toMotion.writeLimit = 7;
+            link.run(1500);
+            CHECK(!uartCommands && !f.executor.starts && !f.executor.stops && !f.hardware.generated);
+            CHECK(io.calls.empty() && io.disk == disk && encode(f.store.state()) == before);
+            CHECK(link.brain.healthy() && link.motionLink.healthy());
+            // CRC-poisoned residual bytes must not prevent a distinct explicit request.
+            const auto next = request(21);
+            link.sendBrain(next);
+            link.awaitBrain(next, true, "accepted");
+            CHECK(uartCommands == 1 && f.executor.starts == 1 && f.runtime.active());
+        });
+    scenario("real Brain wrong-target Stop is rejected without cancelling physical ownership", [] {
+        ++brainSenderScenarios;
+        LinkFixture link;
+        link.handshake();
+        auto& f = link.device;
+        const auto original = request();
+        link.sendBrain(original);
+        link.awaitBrain(original, true, "accepted");
+        const auto correct = link.observedTarget(v4::Source::LocalTouch);
+        auto wrong = correct;
+        wrong.executionId[0] ^= 1;
+        const auto before = encode(f.store.state());
+        const auto disk = io.disk;
+        const auto calls = io.calls.size();
+        CHECK(link.brain.requestStop(wrong, link.now));
+        for (unsigned i = 0; i < 300 && link.brain.stopSendState() == StopSendState::Pending; ++i) link.step();
+        CHECK(link.brain.stopSendState() == StopSendState::Rejected && uartStops == 1);
+        CHECK(f.executor.starts == 1 && !f.executor.stops && f.runtime.ownsMotion());
+        CHECK(encode(f.store.state()) == before && io.disk == disk && io.calls.size() == calls);
+        CHECK(link.brain.requestStop(correct, link.now));
+        for (unsigned i = 0; i < 300 && link.brain.stopSendState() == StopSendState::Pending; ++i) link.step();
+        CHECK(link.brain.stopSendState() == StopSendState::Received && uartStops == 2 && f.executor.stops == 1);
+        CHECK(encode(f.store.state()) == before && io.disk == disk && io.calls.size() == calls);
+        f.executor.confirm();
+        link.run(200);
+        link.publishStatus = false;
+        link.queryOriginal(original, MotionOutcome::Failed);
     });
 }
 }  // namespace
@@ -1686,5 +1910,6 @@ int main(int argc, char** argv) {
                 scenarios, deliveries, lookups, failures);
     std::printf("%u real UART exchanges, %u parsed frames, %u bounded short writes, %u zero writes (23-byte FIFO)\n",
                 uartExchanges, uartFrames, uartShortWrites, uartZeroWrites);
+    std::printf("%u real Brain sender scenarios (manual receive/replay counterexamples retained)\n", brainSenderScenarios);
     return failures ? 1 : 0;
 }

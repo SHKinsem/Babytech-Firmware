@@ -27,6 +27,16 @@ class ControllerLink {
   // Pairing was checked against the actual MAC during begin. A subsequent
   // UART failure must not hide it from the local read-only recovery owner.
   const babytech::v4::Pairing* verifiedPairing() const { return boardLink_.verifiedPairing(); }
+  bool requestCommand(const babytech::boardlink::CommandMessage& command, uint32_t nowMs) {
+    return ready_ && boardLink_.requestCommand(command, nowMs);
+  }
+  babytech::boardlink::CommandSendState commandSendState() const { return boardLink_.commandSendState(); }
+  const babytech::boardlink::CommandResult& commandResponse() const { return boardLink_.commandResponse(); }
+  void cancelCommand() { boardLink_.cancelCommand(); }
+  bool requestStop(const babytech::v4::StopRequest& request, uint32_t nowMs) {
+    return ready_ && boardLink_.requestStop(request, nowMs);
+  }
+  babytech::boardlink::StopSendState stopSendState() const { return boardLink_.stopSendState(); }
   bool requestResult(const babytech::boardlink::ResultQuery& query, uint32_t nowMs) {
     // Result recovery needs the session, not fresh display telemetry or Cloud.
     return ready_ && boardLink_.requestResult(query, nowMs);
@@ -84,7 +94,7 @@ class ControllerLink {
   bool sendIntent(DisplayIntent intent, uint32_t nowMs);
   bool intentPending() const {
 #if BABYTECH_BOARD_LINK_V4
-    return false;
+    return boardLink_.commandSendState() == babytech::boardlink::CommandSendState::Pending;
 #else
     return pendingIntent_;
 #endif

@@ -23,6 +23,12 @@ void ReadOnlyLink::reset() {
     lookupState_ = ResultLookupState::Idle;
     lookupId_ = lookupAt_ = 0;
     resultReplyPending_ = false;
+    sentResult_ = CommandResult{};
+    sendState_ = CommandSendState::Idle;
+    sentCommandId_ = sentCommandAt_ = 0;
+    commandInTransmitter_ = false;
+    stopState_ = StopSendState::Idle;
+    sentStopId_ = sentStopAt_ = 0;
     nextId_ = 1;
     lastHelloAt_ = lastHeartbeatAt_ = lastStatusAt_ = 0;
     awaitingStatusId_ = awaitingStatusAt_ = 0;
@@ -66,6 +72,95 @@ bool ReadOnlyLink::setCommandReadyHandler(CommandReadyHandler handler) {
     return true;
 }
 
+bool ReadOnlyLink::requestCommand(const CommandMessage& command, uint32_t nowMs) {
+    constexpr uint16_t firstFrameBudgetMs = kCommandFirstFrameBudgetMs;
+    session_.poll(nowMs);
+    expireResultQuery(nowMs);
+    expireCommand(nowMs);
+    expireStop(nowMs);
+    if (role_ != Role::Brain || !healthy() || !session_.connected(nowMs) ||
+        helloAckPending_ || probeRequired_ || sendState_ == CommandSendState::Pending ||
+        lookupState_ == ResultLookupState::Pending || stopState_ == StopSendState::Pending ||
+        !validProductRequest(command.request) ||
+        std::strcmp(command.request.deviceId, session_.localHello().deviceId) ||
+        command.remainingTtlMs <= firstFrameBudgetMs || command.remainingTtlMs > 5000 ||
+        tx_.ordinaryPending()) return false;
+    // Admission is immediate, not a queue waiting for mechanical readiness.
+    // The frame guard enforces this deducted scheduling/first-frame budget.
+    auto outgoing = command;
+    outgoing.remainingTtlMs -= firstFrameBudgetMs;
+    if (!encodeCommand(outgoing, scratch_)) return false;
+    scratch_.senderBoot = session_.localBoot();
+    scratch_.receiverBoot = session_.peerBoot();
+    scratch_.messageId = nextId_;
+    if (!tx_.enqueueTimedOrdinary(scratch_, nowMs, command.remainingTtlMs, firstFrameBudgetMs))
+        return false;
+    ++nextId_;
+    sentResult_ = CommandResult{};
+    sentResult_.source = command.request.source;
+    sentResult_.sequence = command.request.sequence;
+    std::strcpy(sentResult_.commandId, command.request.commandId);
+    sentCommandId_ = scratch_.messageId;
+    sentCommandAt_ = nowMs;
+    commandInTransmitter_ = true;
+    sendState_ = CommandSendState::Pending;
+    return true;
+}
+
+void ReadOnlyLink::cancelCommand() {
+    if (role_ != Role::Brain) return;
+    if (commandInTransmitter_) tx_.invalidateOrdinary();
+    commandInTransmitter_ = false;
+    sendState_ = sendState_ == CommandSendState::Pending
+        ? CommandSendState::Cancelled : CommandSendState::Idle;
+}
+
+void ReadOnlyLink::expireCommand(uint32_t nowMs) {
+    if (sendState_ != CommandSendState::Pending) return;
+    if (!healthy() || !session_.connected(nowMs)) sendState_ = CommandSendState::Unavailable;
+    else if (tx_.ordinaryTimedOut() || uint32_t(nowMs - sentCommandAt_) >= kMessageTimeoutMs)
+        sendState_ = CommandSendState::TimedOut;
+    else return;
+    if (commandInTransmitter_) tx_.invalidateOrdinary();
+    commandInTransmitter_ = false;
+}
+
+bool ReadOnlyLink::requestStop(const StopRequest& request, uint32_t nowMs) {
+    session_.poll(nowMs);
+    expireStop(nowMs);
+    if (role_ != Role::Brain || !healthy() || !session_.connected(nowMs) ||
+        probeRequired_ || stopState_ == StopSendState::Pending) return false;
+    auto outgoing = request;
+    if (outgoing.source == Source::LocalTouch) {
+        outgoing.sequence = 0;
+        const int length = std::snprintf(outgoing.commandId, sizeof(outgoing.commandId),
+            "stop-%016" PRIx64 "-%08" PRIx32, session_.localBoot(), nextId_);
+        if (length <= 0 || size_t(length) >= sizeof(outgoing.commandId)) return false;
+        outgoing.commandIdLength = uint8_t(length);
+    }
+    Frame frame;
+    frame.kind = Kind::Stop;
+    const size_t length = encodeStop(outgoing, frame.payload, sizeof(frame.payload));
+    if (!length || outgoing.commandId[outgoing.commandIdLength] != 0) return false;
+    frame.length = frame.total = uint16_t(length);
+    frame.senderBoot = session_.localBoot(); frame.receiverBoot = session_.peerBoot();
+    frame.messageId = nextId_;
+    if (!tx_.enqueueControl(frame)) return false;
+    ++nextId_;
+    // Cancellation preserves uncertain business evidence in the caller's Store.
+    cancelCommand();
+    sentStopId_ = frame.messageId;
+    sentStopAt_ = nowMs;
+    stopState_ = StopSendState::Pending;
+    return true;
+}
+
+void ReadOnlyLink::expireStop(uint32_t nowMs) {
+    if (stopState_ != StopSendState::Pending) return;
+    if (!healthy() || !session_.connected(nowMs)) stopState_ = StopSendState::Unavailable;
+    else if (uint32_t(nowMs - sentStopAt_) >= kMessageTimeoutMs) stopState_ = StopSendState::TimedOut;
+}
+
 void ReadOnlyLink::cancelResultQuery() {
     if (role_ != Role::Brain) return;
     lookupState_ = ResultLookupState::Idle;
@@ -82,8 +177,10 @@ void ReadOnlyLink::expireResultQuery(uint32_t nowMs) {
 bool ReadOnlyLink::requestResult(const ResultQuery& query, uint32_t nowMs) {
     session_.poll(nowMs);
     expireResultQuery(nowMs);
+    expireCommand(nowMs);
     if (role_ != Role::Brain || !healthy() || !session_.connected(nowMs) ||
         helloAckPending_ || probeRequired_ || lookupState_ == ResultLookupState::Pending ||
+        sendState_ == CommandSendState::Pending ||
         !validResultQuery(query) || std::strcmp(query.deviceId, session_.localHello().deviceId) ||
         !encodeResultQuery(query, scratch_) || !queue(scratch_)) return false;
     // A caller may requery resultQueryResponse().query, which aliases our state.
@@ -132,6 +229,11 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
             resultReplyPending_ = false;
             commandReplyPending_ = false;
             commandId_ = commandAt_ = highestCommandId_ = stopBarrier_ = 0;
+            if (sendState_ == CommandSendState::Pending) {
+                cancelCommand();
+                sendState_ = CommandSendState::Unavailable;
+            }
+            if (stopState_ == StopSendState::Pending) stopState_ = StopSendState::Unavailable;
         }
         if (message.kind == Kind::Hello) {
             helloAckPending_ = true;
@@ -155,6 +257,8 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
     }
     if (!session_.matches(message.senderBoot, message.receiverBoot)) return;
     expireResultQuery(nowMs);
+    expireCommand(nowMs);
+    expireStop(nowMs);
     if (message.kind == Kind::Command && role_ == Role::Motion) {
         CommandMessage command;
         const uint32_t receivedId = message.messageId;
@@ -178,6 +282,14 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
             return;
         }
         commandReplyPending_ = true;
+    } else if (message.kind == Kind::CommandResult && role_ == Role::Brain) {
+        CommandResult result;
+        if (sendState_ == CommandSendState::Pending && decodeCommandResult(message, result) &&
+            result.source == sentResult_.source && result.sequence == sentResult_.sequence &&
+            !std::strcmp(result.commandId, sentResult_.commandId)) {
+            sentResult_ = result;
+            sendState_ = CommandSendState::Complete;
+        }
     } else if (message.kind == Kind::ResultQuery && role_ == Role::Motion) {
         ResultQuery query;
         if (!session_.connected(nowMs) || resultReplyPending_ || !resultHandler_ ||
@@ -222,6 +334,15 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
         if (message.kind == Kind::LinkReject && lookupState_ == ResultLookupState::Pending &&
             document["message_id"].as<uint32_t>() == lookupId_)
             lookupState_ = ResultLookupState::Unavailable;
+        const auto acknowledged = document["message_id"].as<uint32_t>();
+        if (message.kind == Kind::LinkReject && sendState_ == CommandSendState::Pending &&
+            acknowledged == sentCommandId_) {
+            if (commandInTransmitter_) tx_.invalidateOrdinary();
+            commandInTransmitter_ = false;
+            sendState_ = CommandSendState::Unavailable;
+        }
+        if (stopState_ == StopSendState::Pending && acknowledged == sentStopId_)
+            stopState_ = message.kind == Kind::LinkAck ? StopSendState::Received : StopSendState::Rejected;
     } else {
         // Commands, Stop, configuration and event receipts cannot mutate hardware here.
         receipt(message.messageId, false);
@@ -306,11 +427,13 @@ bool ReadOnlyLink::queueSupportFrame(const Frame& frame) {
 }
 
 void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatus) {
-    if (!configured_) { tx_.pump(sink); return; }
-    if (!healthy()) { expireResultQuery(nowMs); return; }
+    if (!configured_) { tx_.pump(nowMs, sink); return; }
+    if (!healthy()) { expireResultQuery(nowMs); expireCommand(nowMs); expireStop(nowMs); return; }
     session_.poll(nowMs);
     assembler_.expire(nowMs);
     expireResultQuery(nowMs);
+    expireCommand(nowMs);
+    expireStop(nowMs);
     if (!session_.canExchange()) {
         peerStatus_ = Status{};
         awaitingStatusId_ = 0;
@@ -366,7 +489,9 @@ void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatu
             statusSent_ = true; statusRequested_ = false;
         }
     }
-    tx_.pump(sink);
+    tx_.pump(nowMs, sink);
+    if (commandInTransmitter_ && !tx_.ordinaryPending()) commandInTransmitter_ = false;
+    expireCommand(nowMs);
 }
 
 } }

@@ -1347,6 +1347,89 @@ void resultOverActualAdapters() {
     });
     std::puts("PASS two actual adapters query original results over fragmented short-write UART without STATUS or NVS writes");
 }
+unsigned commandHandlerCalls = 0, stopHandlerCalls = 0;
+CommandMessage lastCommand;
+StopRequest lastStop;
+bool acceptCommand(const CommandMessage& command, uint32_t, CommandResult& result) {
+    ++commandHandlerCalls;
+    lastCommand = command;
+    result = CommandResult{};
+    result.source = command.request.source;
+    result.sequence = command.request.sequence;
+    std::strcpy(result.commandId, command.request.commandId);
+    result.accepted = true;
+    std::strcpy(result.reason, "accepted");
+    return true;
+}
+bool acceptStop(const StopRequest& stop, uint32_t) {
+    ++stopHandlerCalls;
+    lastStop = stop;
+    return true;
+}
+
+void commandsOverActualAdapters() {
+    setup();
+    ArduinoBoardLink brain;
+    assert(brain.begin(Role::Brain, 44, 43));
+    io.maxWrite = 11;
+    fake::State brainIo = io;
+    setup(Role::Motion);
+    io.randomWords = {0, uint32_t(kPeerBoot)};
+    ArduinoBoardLink motion;
+    assert(motion.begin(Role::Motion, 44, 43));
+    assert(motion.setCommandHandler(acceptCommand));
+    assert(motion.setStopHandler(acceptStop));
+    io.maxWrite = 7;
+    fake::State motionIo = io;
+    const auto exchange = [&](uint32_t now) {
+        onBoard(brainIo, [&] { brain.poll(now); });
+        motionIo.rx.insert(motionIo.rx.end(), brainIo.tx.begin(), brainIo.tx.end());
+        brainIo.tx.clear();
+        onBoard(motionIo, [&] { motion.poll(now); });
+        brainIo.rx.insert(brainIo.rx.end(), motionIo.tx.begin(), motionIo.tx.end());
+        motionIo.tx.clear();
+    };
+    uint32_t now = 0;
+    for (; now < 3000; ++now) exchange(now);
+    assert(brain.link().connected(now) && motion.link().connected(now));
+    assert(!brain.link().freshStatus(now));
+    CommandMessage request;
+    request.request.source = Source::CloudCommand;
+    request.request.command = ProductCommand::SetTargetTemp;
+    request.request.sequence = 7;
+    request.request.temperatureC = 45;
+    std::strcpy(request.request.deviceId, pairing().deviceId);
+    std::strcpy(request.request.commandId, "original-cloud-action");
+    request.remainingTtlMs = 5000;
+    commandHandlerCalls = stopHandlerCalls = 0;
+    bool queued = false;
+    for (unsigned attempts = 0; attempts < 100 && !queued; ++attempts) {
+        onBoard(brainIo, [&] { queued = brain.requestCommand(request, now); });
+        if (!queued) exchange(now++);
+    }
+    assert(queued && brain.commandSendState() == CommandSendState::Pending);
+    for (unsigned ticks = 0; ticks < 300; ++ticks) exchange(now++);
+    assert(commandHandlerCalls == 1);
+    assert(sameProductRequest(lastCommand.request, request.request));
+    assert(lastCommand.remainingTtlMs > 0 && lastCommand.remainingTtlMs <= 4950);
+    assert(brain.commandSendState() == CommandSendState::Complete && brain.commandResponse().accepted);
+    assert(brain.commandResponse().sequence == request.request.sequence);
+    onBoard(brainIo, [&] {
+        brain.cancelCommand();
+        assert(brain.commandSendState() == CommandSendState::Idle);
+        StopRequest stop;
+        stop.scope = StopScope::Idle;
+        assert(brain.requestStop(stop, now));
+    });
+    for (unsigned ticks = 0; ticks < 300; ++ticks) exchange(now++);
+    assert(stopHandlerCalls == 1 && lastStop.sequence == 0 && lastStop.source == Source::LocalTouch);
+    assert(!std::strncmp(lastStop.commandId, "stop-1234567812345678-", 22));
+    assert(brain.stopSendState() == StopSendState::Received);
+    assert(!brain.link().freshStatus(now));
+    onBoard(brainIo, [&] { fake::assertReadOnly(); });
+    onBoard(motionIo, [&] { fake::assertReadOnly(); });
+    std::puts("PASS two actual adapters COMMAND/result and priority Stop with bounded short writes; handler fakes, no NVS or stationary claim");
+}
 }  // namespace
 
 int main() {
@@ -1369,6 +1452,7 @@ int main() {
     installOverActualAdapters();
     installOverActualAdapters(true);
     resultOverActualAdapters();
+    commandsOverActualAdapters();
     fake::assertReadOnly();
     std::puts("PASS Arduino adapter host suite (real core + pair codec; I/O fakes only)");
 }

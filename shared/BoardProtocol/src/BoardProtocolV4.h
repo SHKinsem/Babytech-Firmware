@@ -11,6 +11,7 @@ constexpr size_t kMaxMessage = 2047;
 constexpr size_t kMaxFrame = kHeaderSize + kMaxFragment + 2;
 constexpr uint32_t kByteTimeoutMs = 100;
 constexpr uint32_t kMessageTimeoutMs = 1000;
+constexpr uint32_t kCommandFirstFrameBudgetMs = 50;
 constexpr uint32_t kHeartbeatIntervalMs = 250;
 constexpr uint32_t kLinkTimeoutMs = 1500;
 constexpr uint32_t kStatusIntervalMs = 500;

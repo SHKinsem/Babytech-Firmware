@@ -722,6 +722,101 @@ void pendingResultForwarding() {
     assert(io.mutations == 0);
     std::puts("PASS production ControllerLink/Arduino query forwarding without STATUS; no action or NVS mutation");
 }
+void commandForwarding() {
+    Fixture f;
+    CommandMessage request;
+    request.request.source = Source::CloudCommand;
+    request.request.command = ProductCommand::SetTargetTemp;
+    request.request.sequence = 9;
+    request.request.temperatureC = 45;
+    std::strcpy(request.request.deviceId, pairing().deviceId);
+    std::strcpy(request.request.commandId, "original-cloud-command");
+    request.remainingTtlMs = 5000;
+    assert(!f.controller.requestCommand(request, 0));
+    f.handshake(0);
+    assert(!f.controller.lastTelemetry());
+    assert(f.controller.requestCommand(request, 100));
+    assert(f.controller.intentPending());
+    assert(f.controller.commandSendState() == CommandSendState::Pending);
+    f.drain(100);
+    Parser parser;
+    Assembler assembler;
+    Frame frame;
+    Message message;
+    uint32_t sentId = 0;
+    for (uint8_t byte : io.tx) {
+        if (parser.push(byte, 100, frame) && assembler.accept(frame, 100, message) == AssemblyResult::Complete &&
+            message.kind == Kind::Command) {
+            CommandMessage decoded;
+            assert(decodeCommand(message, decoded));
+            assert(sameProductRequest(decoded.request, request.request));
+            assert(decoded.remainingTtlMs == 4950);
+            assert(message.senderBoot == kLocalBoot && message.receiverBoot == kPeerBoot);
+            sentId = message.messageId;
+        }
+    }
+    assert(sentId);
+    auto receipt = envelope(Kind::LinkAck, kPeerBoot, 12);
+    const int length = std::snprintf(reinterpret_cast<char*>(receipt.payload), sizeof(receipt.payload),
+                                    "{\"message_id\":%u}", unsigned(sentId));
+    assert(length > 0);
+    receipt.length = uint16_t(length);
+    f.inject(receipt, 101);
+    assert(f.controller.intentPending()); // Transport receipt is not acceptance.
+    CommandResult reply;
+    reply.source = request.request.source;
+    reply.sequence = request.request.sequence;
+    std::strcpy(reply.commandId, request.request.commandId);
+    reply.accepted = false;
+    std::strcpy(reply.reason, "busy");
+    assert(encodeCommandResult(reply, message));
+    message.senderBoot = kPeerBoot; message.receiverBoot = kLocalBoot; message.messageId = 13;
+    f.inject(message, 102);
+    assert(f.controller.commandSendState() == CommandSendState::Complete);
+    assert(!f.controller.intentPending() && !f.controller.commandResponse().accepted);
+    assert(!std::strcmp(f.controller.commandResponse().reason, "busy"));
+    f.controller.cancelCommand();
+    assert(f.controller.commandSendState() == CommandSendState::Idle);
+    // The lower transport is callable, but the UI still has no product owner.
+    assert(!f.controller.sendIntent(display::DisplayIntent::StartFeeding, 103));
+    assert(io.mutations == 0);
+    std::puts("PASS ControllerLink actual COMMAND/result forwarding, original identity and no fake LINK_ACK acceptance");
+}
+
+void stopForwarding() {
+    Fixture f;
+    StopRequest stop;
+    stop.scope = StopScope::Idle;
+    assert(!f.controller.requestStop(stop, 0));
+    f.handshake(0);
+    assert(f.controller.requestStop(stop, 100));
+    assert(f.controller.stopSendState() == StopSendState::Pending);
+    f.drain(100);
+    Parser parser;
+    Frame frame;
+    uint32_t sentId = 0;
+    for (uint8_t byte : io.tx) if (parser.push(byte, 100, frame) && frame.kind == Kind::Stop) {
+        StopRequest decoded;
+        assert(decodeStop(frame.payload, frame.length, decoded));
+        assert(decoded.source == Source::LocalTouch && decoded.sequence == 0);
+        char expected[40];
+        std::snprintf(expected, sizeof(expected), "stop-%016llx-%08x",
+                      static_cast<unsigned long long>(kLocalBoot), unsigned(frame.messageId));
+        assert(!std::strcmp(decoded.commandId, expected));
+        sentId = frame.messageId;
+    }
+    assert(sentId);
+    auto receipt = envelope(Kind::LinkAck, kPeerBoot, 12);
+    const int length = std::snprintf(reinterpret_cast<char*>(receipt.payload), sizeof(receipt.payload),
+                                    "{\"message_id\":%u}", unsigned(sentId));
+    assert(length > 0);
+    receipt.length = uint16_t(length);
+    f.inject(receipt, 101);
+    assert(f.controller.stopSendState() == StopSendState::Received);
+    assert(!f.controller.lastTelemetry()); // Received cannot invent stationary proof.
+    assert(io.mutations == 0);
+    std::puts("PASS ControllerLink local Stop canonical ID without durable reservation or stationary claim");
+}
 }  // namespace
 
 int main() {
@@ -744,5 +839,7 @@ int main() {
     consoleTimeoutAndRetry();
     pairedConsoleDoesNotDegradeStatus();
     pendingResultForwarding();
+    commandForwarding();
+    stopForwarding();
     std::puts("PASS production ControllerLink cache/receipt-time suite (SDK I/O fakes only)");
 }

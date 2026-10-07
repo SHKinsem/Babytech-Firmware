@@ -8,9 +8,11 @@
 namespace babytech { namespace boardlink {
 
 enum class ResultLookupState { Idle, Pending, Complete, TimedOut, Unavailable };
+enum class CommandSendState { Idle, Pending, Complete, TimedOut, Unavailable, Cancelled };
+enum class StopSendState { Idle, Pending, Received, Rejected, TimedOut, Unavailable };
 
 // Single-owner, non-reentrant link core. Motion actions require explicit handlers;
-// the Brain command sender remains disabled during migration.
+// Sending requires an explicit caller; transmission is never business acceptance.
 // Keep this ~8 KiB object off the MCU task stack (static/member storage).
 class ReadOnlyLink {
 public:
@@ -28,6 +30,16 @@ public:
     bool setCommandHandler(CommandHandler handler);
     bool setStopHandler(StopHandler handler);
     bool setCommandReadyHandler(CommandReadyHandler handler);
+    // Only a newly authorized request may be sent, once. The caller owns local
+    // durable reservation / Cloud freshness and must query uncertain outcomes.
+    bool requestCommand(const CommandMessage& command, uint32_t nowMs);
+    CommandSendState commandSendState() const { return sendState_; }
+    const CommandResult& commandResponse() const { return sentResult_; }
+    void cancelCommand();
+    // Local Stop gets its transient ID here and needs no durable sequence/NVS.
+    // Received is the matched Motion receipt, never proof of stationary axes.
+    bool requestStop(const v4::StopRequest& request, uint32_t nowMs);
+    StopSendState stopSendState() const { return stopState_; }
     bool requestResult(const ResultQuery& query, uint32_t nowMs);
     ResultLookupState resultLookupState() const { return lookupState_; }
     const QueriedResult& resultQueryResponse() const { return queriedResult_; }
@@ -52,6 +64,8 @@ private:
     void handle(const v4::Message& message, uint32_t nowMs);
     void receipt(uint32_t id, bool accepted);
     void expireResultQuery(uint32_t nowMs);
+    void expireCommand(uint32_t nowMs);
+    void expireStop(uint32_t nowMs);
     v4::Parser parser_{};
     v4::Assembler assembler_{};
     v4::Session session_{};
@@ -73,6 +87,14 @@ private:
     uint32_t lookupId_ = 0;
     uint32_t lookupAt_ = 0;
     bool resultReplyPending_ = false;
+    CommandResult sentResult_{};
+    CommandSendState sendState_ = CommandSendState::Idle;
+    uint32_t sentCommandId_ = 0;
+    uint32_t sentCommandAt_ = 0;
+    bool commandInTransmitter_ = false;
+    StopSendState stopState_ = StopSendState::Idle;
+    uint32_t sentStopId_ = 0;
+    uint32_t sentStopAt_ = 0;
     v4::Role role_ = v4::Role::Brain;
     uint32_t nextId_ = 1;
     uint32_t lastHelloAt_ = 0;

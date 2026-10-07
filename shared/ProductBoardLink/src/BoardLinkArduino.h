@@ -39,6 +39,16 @@ public:
         return started_ && link_.setCommandReadyHandler(handler);
     }
     v4::LinkFailure takeFailure() { return link_.takeFailure(); }
+    bool requestCommand(const CommandMessage& command, uint32_t nowMs) {
+        return started_ && link_.requestCommand(command, nowMs);
+    }
+    CommandSendState commandSendState() const { return link_.commandSendState(); }
+    const CommandResult& commandResponse() const { return link_.commandResponse(); }
+    void cancelCommand() { link_.cancelCommand(); }
+    bool requestStop(const v4::StopRequest& request, uint32_t nowMs) {
+        return started_ && link_.requestStop(request, nowMs);
+    }
+    StopSendState stopSendState() const { return link_.stopSendState(); }
     bool requestResult(const ResultQuery& query, uint32_t nowMs) {
         return started_ && link_.requestResult(query, nowMs);
     }
