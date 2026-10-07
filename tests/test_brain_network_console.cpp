@@ -143,19 +143,18 @@ void statusAndGates() {
             }
         });
     }
-    test("unpaired/wifi-allowed-mqtt-blocked-then-ready", []() {
+    test("unpaired/wifi-and-mqtt-saved-then-ready", []() {
         FakeNetwork network;
         network.ready = false;
         response(wifi("ssid", ""), true, network, "wifi_saved");
-        response(mqtt("host", "1883", "user", "secret"), true, network, "pairing_required");
+        response(mqtt("host", "1883", "user", "secret"), true, network, "mqtt_saved");
         CHECK(network.calls.size() == 2);
         wifiCall(network, 0, "ssid", "");
-        CHECK(network.calls[1].method == "started");
+        mqttCall(network, 1, "host", 1883, "user", "secret");
         network.ready = true;
         response(mqtt("host", "1883", "user", "secret"), true, network, "mqtt_saved");
-        CHECK(network.calls.size() == 4);
-        CHECK(network.calls[2].method == "started");
-        mqttCall(network, 3, "host", 1883, "user", "secret");
+        CHECK(network.calls.size() == 3);
+        mqttCall(network, 2, "host", 1883, "user", "secret");
     });
 }
 
@@ -188,9 +187,8 @@ void validConfigurations() {
             const auto& value = mqttValues[i];
             response(mqtt(value.host, std::to_string(value.port), value.user, value.password),
                      true, network, "mqtt_saved");
-            CHECK(network.calls.size() == 2);
-            CHECK(network.calls[0].method == "started");
-            mqttCall(network, 1, value.host, value.port, value.user, value.password);
+            CHECK(network.calls.size() == 1);
+            mqttCall(network, 0, value.host, value.port, value.user, value.password);
         });
     }
 }
@@ -249,9 +247,8 @@ void malformedConfigurations() {
                 wifiCall(network, 0, "retry", "");
             } else {
                 response(mqtt("retry", "1883", "new user", "new secret"), true, network, "mqtt_saved");
-                CHECK(network.calls.size() == 2);
-                CHECK(network.calls[0].method == "started");
-                mqttCall(network, 1, "retry", 1883, "new user", "new secret");
+                CHECK(network.calls.size() == 1);
+                mqttCall(network, 0, "retry", 1883, "new user", "new secret");
             }
         });
     }
@@ -268,17 +265,16 @@ void failuresAndUnknown() {
         wifiCall(network, 0, "first", "private password");
         wifiCall(network, 1, "second", "");
     });
-    test("mqtt/configure-failure-then-retry", []() {
+    for (bool ready : {false, true}) test("mqtt/configure-failure-then-retry/ready=" + std::to_string(ready), [=]() {
         FakeNetwork network;
+        network.ready = ready;
         network.mqttResult = false;
         response(mqtt("first", "1883", "old user", "old secret"), true, network, "mqtt_failed");
         network.mqttResult = true;
         response(mqtt("second", "65535", "new user", "new secret"), true, network, "mqtt_saved");
-        CHECK(network.calls.size() == 4);
-        CHECK(network.calls[0].method == "started");
-        CHECK(network.calls[2].method == "started");
-        mqttCall(network, 1, "first", 1883, "old user", "old secret");
-        mqttCall(network, 3, "second", 65535, "new user", "new secret");
+        CHECK(network.calls.size() == 2);
+        mqttCall(network, 0, "first", 1883, "old user", "old secret");
+        mqttCall(network, 1, "second", 65535, "new user", "new secret");
     });
     test("unknown/no-secret-echo", []() {
         FakeNetwork network;
@@ -408,9 +404,8 @@ void readerFragmentsAndTimeouts() {
             CHECK(reader.feed('\n', now) == Result::Line);
             CHECK(std::string(reader.line()) == command);
             response(reader.line(), true, network, "mqtt_saved");
-            CHECK(network.calls.size() == 2);
-            CHECK(network.calls[0].method == "started");
-            mqttCall(network, 1, host, 65535, user, password);
+            CHECK(network.calls.size() == 1);
+            mqttCall(network, 0, host, 65535, user, password);
             reader.clear();
             cleared(reader);
         });

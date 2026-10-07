@@ -75,12 +75,8 @@ bool CloudLink::loadSettings() {
     return true;
 }
 
-bool CloudLink::saveSettings(const Settings& settings) {
-    if (!started_ || !settingsLock_) return false;
+bool CloudLink::persistSettings(const Settings& settings) {
     struct Record { uint32_t magic; Settings settings; } record{kSettingsMagic, settings};
-    // Serialize the complete transaction, including HTTP writers and worker snapshots.
-    // No socket I/O is performed while this lock is held.
-    xSemaphoreTake(settingsLock_, portMAX_DELAY);
     Preferences preferences;
     bool saved = false;
     if (preferences.begin(kNamespace, false)) {
@@ -100,6 +96,15 @@ bool CloudLink::saveSettings(const Settings& settings) {
             saved = false;
         }
     }
+    return saved;
+}
+
+bool CloudLink::saveSettings(const Settings& settings) {
+    if (!started_ || !settingsLock_) return false;
+    // Running writers and worker snapshots share this lock; first setup has
+    // only its local loop owner and does not allocate a worker or its resources.
+    xSemaphoreTake(settingsLock_, portMAX_DELAY);
+    const bool saved = persistSettings(settings);
     if (saved) {
         settings_ = settings;
         ++settingsRevision_;
@@ -109,11 +114,15 @@ bool CloudLink::saveSettings(const Settings& settings) {
 }
 
 bool CloudLink::configure(const char* host, uint16_t port, const char* user, const char* password) {
-    if (!started_ || !settingsLock_ || !port) return false;
+    if (!port) return false;
     Settings candidate;
     if (!copyConfigField(candidate.host, host) || !validHost(String(candidate.host)) ||
         !copyConfigField(candidate.user, user) || !copyConfigField(candidate.password, password)) return false;
     candidate.port = port;
+    if (!started_) {
+        if (callbackOwner_) return false;
+        return persistSettings(candidate);
+    }
     if (!saveSettings(candidate)) return false;
     requestReconnect();
     return true;

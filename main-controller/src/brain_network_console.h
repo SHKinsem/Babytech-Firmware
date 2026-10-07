@@ -41,7 +41,6 @@ public:
             if (!digits || !port || port > 65535 || *at++ != ' ' ||
                 !decode(at, fields.user) || !decode(at, fields.password) || *at)
                 return reply("invalid_config");
-            if (!network.started()) return reply("pairing_required");
             return reply(network.configureMqtt(fields.host, static_cast<uint16_t>(port),
                                                 fields.user, fields.password) ? "mqtt_saved" : "mqtt_failed");
         }

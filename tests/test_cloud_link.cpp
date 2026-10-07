@@ -106,18 +106,33 @@ void expectSaved(const std::string& host, uint16_t port, const std::string& user
     check(fake::io.openPreferences == 0, "configuration leaked Preferences");
 }
 
-void configureValidation() {
+void expectUnstarted(CloudLink& link) {
+    check(fake::io.allocationCalls == 0 && fake::liveQueues() == 0 && fake::liveSemaphores() == 0 &&
+          fake::io.taskAttempts == 0 && fake::io.tasks.empty(), "pre-start configuration allocated resources");
+    check(WiFi.calls.empty() && fake::io.connectCalls == 0 && fake::io.disconnectCalls == 0 &&
+          fake::io.loopCalls == 0 && fake::io.published.empty() && fake::io.subscriptions.empty() &&
+          fake::io.server.empty(), "pre-start configuration touched network");
+    check(fake::io.clients.front()->callbackChanges() == 0, "pre-start configuration claimed callback");
+    SessionSnapshot value;
+    check(!link.configured() && link.host().isEmpty() && link.port() == 1883 &&
+          !link.connected() && !link.sessionSnapshot(value) && link.sessionGeneration() == 1,
+          "pre-start configuration became active before valid identity");
+    check(fake::io.openPreferences == 0, "pre-start configuration leaked Preferences");
+}
+
+void configureValidation(bool unstarted = false) {
     CloudLink link;
     seedSettings();
-    check(link.beginV4(kId), "begin failed");
+    if (!unstarted) check(link.beginV4(kId), "begin failed");
     const auto original = fake::io.preferences;
     const auto generation = link.sessionGeneration();
     const auto rejected = [&](const char* host, uint16_t port, const char* user, const char* password) {
         check(!link.configure(host, port, user, password), "invalid configuration accepted");
         check(fake::io.preferenceWriteCalls == 0 && fake::io.preferences == original,
               "invalid configuration touched NVS");
-        check(std::string(link.host().c_str()) == "cached.test" && link.port() == 1884 &&
-              link.sessionGeneration() == generation, "invalid configuration changed active settings/session");
+        if (unstarted) expectUnstarted(link);
+        else check(std::string(link.host().c_str()) == "cached.test" && link.port() == 1884 &&
+                   link.sessionGeneration() == generation, "invalid configuration changed active settings/session");
     };
     for (const char* empty : {static_cast<const char*>(nullptr), ""}) {
         rejected(empty, 1883, "user", "password");
@@ -150,23 +165,82 @@ void configureValidation() {
     expectSaved(host, 65535, user, password);
     check(link.configure("::1", 1, "user name", "pass word!\""), "valid printable values rejected");
     expectSaved("::1", 1, "user name", "pass word!\"");
+    if (unstarted) expectUnstarted(link);
 }
 
 void configureLifecycle() {
     CloudLink link;
     seedSettings();
-    const auto original = fake::io.preferences;
     const auto attempt = [&] { return link.configure("broker.test", 1883, "test-user", "host-only-test-secret"); };
-    check(!attempt(), "configuration before begin succeeded");
-    check(!link.beginV4("bad/id") && !attempt(), "configuration after invalid identity succeeded");
-    fake::io.failTask = true;
-    check(!link.beginV4(kId) && !attempt(), "configuration after failed startup succeeded");
-    check(fake::io.preferenceWriteCalls == 0 && fake::io.preferences == original,
-          "unstarted configuration touched NVS");
-    fake::io.failTask = false;
-    link.begin(kId);
-    check(attempt(), "legacy startup/configuration retry failed");
+    check(attempt(), "configuration before begin failed");
     expectSaved("broker.test", 1883);
+    expectUnstarted(link);
+    check(fake::io.preferenceOpens == std::vector<std::pair<std::string, bool>>{
+          {"cloudcfg", false}, {"cloudcfg", true}}, "pre-start save did not verify existing record");
+    for (const char* id : {static_cast<const char*>(nullptr), "", "bad/id"}) {
+        check(!link.beginV4(id), "invalid identity accepted saved configuration");
+        check(attempt(), "configuration after invalid identity could not retry");
+        expectUnstarted(link);
+    }
+    fake::io.failTask = true;
+    check(!link.beginV4(kId) && attempt(), "configuration after failed startup could not retry");
+    check(fake::liveQueues() == 0 && fake::liveSemaphores() == 0 && fake::io.tasks.empty(),
+          "failed begin/configure retry leaked resources");
+    fake::io.failTask = false;
+    check(link.beginV4(kId), "valid startup/configuration retry failed");
+    check(link.configured() && std::string(link.host().c_str()) == "broker.test" && link.port() == 1883,
+          "valid begin did not load pre-start configuration");
+    expectResources();
+    fake::io.onDelay = [&](unsigned) {
+        check(link.connected() && fake::io.connectedId == kId && fake::io.server == "broker.test" &&
+              fake::io.port == 1883 && fake::io.credentialsMatched, "worker did not use pre-start configuration");
+        snapshot(link);
+        stop();
+    };
+    fake::runWorker();
+    expectSaved("broker.test", 1883);
+}
+
+void configurePrestartFailure(const std::string& mode) {
+    CloudLink link;
+    seedSettings();
+    fake::io.preferences["unrelated/record"] = {1, 2, 3};
+    const auto original = fake::io.preferences;
+    fake::io.failPreferencesOpen = mode == "open";
+    fake::io.failPreferencesWrite = mode == "write";
+    fake::io.failPreferencesReadOpen = mode == "read-open";
+    fake::io.failPreferencesLength = mode == "length";
+    fake::io.failPreferencesRead = mode == "read";
+    if (mode == "magic") fake::io.corruptPreferencesReadOffset = offsetof(SettingsRecord, magic);
+    if (mode == "host") fake::io.corruptPreferencesReadOffset = offsetof(SettingsRecord, host);
+    if (mode == "user") fake::io.corruptPreferencesReadOffset = offsetof(SettingsRecord, user);
+    if (mode == "password") fake::io.corruptPreferencesReadOffset = offsetof(SettingsRecord, password);
+    if (mode == "port") fake::io.corruptPreferencesReadOffset = offsetof(SettingsRecord, port);
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        check(!link.configure("replacement.test", 2883, "test-user", "host-only-test-secret"),
+              "pre-start save/verification failure succeeded");
+        expectUnstarted(link);
+        if (mode == "open" || mode == "write")
+            check(fake::io.preferences == original, "failed pre-start write altered NVS");
+        else expectSaved("replacement.test", 2883);
+        check(fake::io.preferences.at("unrelated/record") == std::vector<uint8_t>({1, 2, 3}),
+              "pre-start configuration erased unrelated NVS");
+    }
+    fake::io.failPreferencesOpen = fake::io.failPreferencesWrite = false;
+    fake::io.failPreferencesReadOpen = fake::io.failPreferencesLength = fake::io.failPreferencesRead = false;
+    fake::io.corruptPreferencesReadOffset = -1;
+    check(link.configure("retried.test", 3883, "test-user", "host-only-test-secret"),
+          "pre-start storage failure permanently blocked retry");
+    expectSaved("retried.test", 3883);
+    expectUnstarted(link);
+    check(link.beginV4(kId), "retried pre-start configuration did not start");
+    fake::io.onDelay = [&](unsigned) {
+        check(link.connected() && fake::io.server == "retried.test" && fake::io.port == 3883 &&
+              fake::io.credentialsMatched, "worker did not load retried pre-start configuration");
+        snapshot(link);
+        stop();
+    };
+    fake::runWorker();
 }
 
 void configureFailure(const std::string& mode) {
@@ -327,10 +401,17 @@ void configureWorker(bool duringConnect) {
     fake::runWorker();
 }
 
-void startupFailure(const std::string& failure) {
+void startupFailure(const std::string& failure, bool prestored = false) {
     CloudLink link;
     WebServer server;
     seedSettings();
+    if (prestored) {
+        check(link.configure("broker.test", 1883, "test-user", "host-only-test-secret"),
+              "configuration before resource failure failed");
+        expectUnstarted(link);
+    }
+    const auto saved = fake::io.preferences;
+    const unsigned reads = fake::io.preferenceReads;
     if (failure.compare(0, 6, "alloc-") == 0)
         fake::io.failAllocation = static_cast<unsigned>(std::stoul(failure.substr(6)));
     else if (failure == "packet") fake::io.failBuffer = true;
@@ -352,7 +433,8 @@ void startupFailure(const std::string& failure) {
         if (failureSlot || failure == "packet")
             check(fake::io.taskAttempts == 0, "started task with unavailable resources");
         if (!failureSlot)
-            check(fake::io.preferenceReads == attempt + 1, "failure did not exercise loaded settings");
+            check(fake::io.preferenceReads == reads + attempt + 1, "failure did not exercise loaded settings");
+        check(fake::io.preferences == saved, "startup failure changed saved configuration");
         SessionSnapshot value;
         check(!link.sessionSnapshot(value), "startup failure left active session");
         check(!link.publishForSession("status", "{}", 1, "failed"), "failed link accepted publish");
@@ -365,14 +447,22 @@ void startupFailure(const std::string& failure) {
     fake::io.failAllocation = 0;
     fake::io.failBuffer = false;
     fake::io.failTask = false;
-    fake::io.preferences.clear();
+    if (!prestored) fake::io.preferences.clear();
     check(link.beginV4(kId), "startup failure was not retryable");
-    check(!link.configured() && link.host().isEmpty() && link.port() == 1883,
-          "retry resurrected settings from failed startup");
-    configure(link, server);
+    if (prestored) {
+        check(link.configured() && std::string(link.host().c_str()) == "broker.test" && link.port() == 1883,
+              "startup retry did not reload pre-start settings");
+        expectSaved("broker.test", 1883);
+    } else {
+        check(!link.configured() && link.host().isEmpty() && link.port() == 1883,
+              "retry resurrected settings from failed startup");
+        configure(link, server);
+    }
     expectResources();
     fake::io.onDelay = [&](unsigned) {
         check(link.connected(), "startup retry did not connect");
+        check(fake::io.server == "broker.test" && fake::io.port == 1883 && fake::io.credentialsMatched,
+              "startup retry used wrong saved settings");
         snapshot(link);
         receive("command", command("stop", "after-retry"));
         expectInbound(link, command("stop", "after-retry"));
@@ -388,6 +478,12 @@ void ownership() {
     check(!owner.beginV4("bad/id"), "invalid identity accepted");
     check(fake::io.allocationCalls == 0, "invalid identity allocated resources");
     start(owner, server);
+    const auto saved = fake::io.preferences;
+    const unsigned writes = fake::io.preferenceWriteCalls;
+    check(!second.configure("other.test", 2883, "other-user", "other-secret"),
+          "unstarted instance configured another active owner's record");
+    check(fake::io.preferences == saved && fake::io.preferenceWriteCalls == writes &&
+          !second.configured(), "rejected other-owner configuration changed settings");
     const auto task = fake::io.tasks.front();
     const unsigned allocations = fake::io.allocationCalls;
     check(!owner.beginV4("replacement"), "repeated beginV4 accepted");
@@ -1199,7 +1295,10 @@ int main(int argc, char** argv) {
         else if (name == "routes") routes();
         else if (name == "settings-load") settingsLoad();
         else if (name == "configure-validation") configureValidation();
+        else if (name == "configure-prestart-validation") configureValidation(true);
         else if (name == "configure-lifecycle") configureLifecycle();
+        else if (name.compare(0, 27, "configure-prestart-failure-") == 0) configurePrestartFailure(name.substr(27));
+        else if (name.compare(0, 25, "configure-prestart-begin-") == 0) startupFailure(name.substr(25), true);
         else if (name == "configure-worker") configureWorker(false);
         else if (name == "configure-connect-race") configureWorker(true);
         else if (name.compare(0, 18, "configure-failure-") == 0) configureFailure(name.substr(18));

@@ -28,6 +28,11 @@ CASES = [
     *(f"status-ordering-{mode}" for mode in ("fault", "wrap", "stale", "deferred", "recovery", "newer-probe")),
     "status-order-full", "status-order-stale-fence",
     "configure-validation", "configure-lifecycle", "configure-worker", "configure-connect-race",
+    "configure-prestart-validation",
+    *(f"configure-prestart-failure-{mode}" for mode in
+      ("open", "write", "read-open", "length", "read", "magic", "host", "user", "password", "port")),
+    *(f"configure-prestart-begin-{mode}" for mode in
+      (*(f"alloc-{slot}" for slot in range(1, 7)), "packet", "task")),
     *(f"configure-failure-{mode}" for mode in
       ("open", "write", "read-open", "length", "read", "magic", "host", "user", "password", "port")),
     *(f"configure-threads-{mode}" for mode in ("api", "http", "reader", "failure")),

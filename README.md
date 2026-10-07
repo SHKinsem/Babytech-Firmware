@@ -110,7 +110,7 @@ python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN wifi
 python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN mqtt
 ```
 
-按提示输入SSID/密码或broker/端口/账号/密码；密码隐藏输入，不写命令行、文件或串口日志。工具先确认Brain，再进入本地维护、保存、退出；失败也尝试退出，若USB断开则重新连接后用`MAINT END`解除本地UI锁。成功仅表示存储读回通过，需另查连接状态。Wi-Fi未配对也能预存；MQTT需有效配对且网络worker已启动，当前完整安装入口尚缺，不能通过这个工具绕过身份安装。旧账号撤销与新Brain独占产品MQTT仍需单独受控交接。
+按提示输入SSID/密码或broker/端口/账号/密码；密码隐藏输入，不写命令行、文件或串口日志。工具先确认Brain，再进入本地维护、保存、退出；失败也尝试退出，若USB断开则重新连接后用`MAINT END`解除本地UI锁。成功仅表示存储读回通过，需另查连接状态。Wi-Fi与MQTT均可在未配对时预存，不创建网络任务、不联网或发布设备身份；有效配对后网络启动时读取已保存凭据。已运行时配置成功由worker重连。当前完整UART安装入口尚缺，预存不等于身份安装。旧账号撤销与新Brain独占产品MQTT仍需单独受控交接。
 
 底层命令为`NET STATUS`、`NET WIFI <ssid_hex> <password_hex或->`、`NET MQTT <host_hex> <port> <user_hex> <password_hex>`；除STATUS外要求本地维护。hex是编码不是加密，不要将完整命令贴聊天。Wi-Fi/MQTT配置由各自NVS格式保存，不是跨两项事务；一项成功另一项失败时仅重试失败项。凭据保留在设备NVS/RAM中，本工具不提供存储加密。USB打开仍可能因驱动/适配器复位板子；实机验证须在授权安全台架执行。此入口未改变Motion独立网页，也不开放产品动作。
 

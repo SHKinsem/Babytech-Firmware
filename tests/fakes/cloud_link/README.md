@@ -53,8 +53,11 @@ Compiler outputs live in an automatically removed temporary directory.
   and retry with backoff. A valid persisted settings fixture reaches MQTT.
   HTTP status is valid JSON with no username/password fields or credential
   values; AP access checks and failed NVS saves preserve their boundaries.
-- Local `configure()` accepts only started links, bounded nonempty fields,
-  nonzero ports and the existing DNS/IP host characters. ASCII controls and
+- Local `configure()` can save/read back before start with one provisioning
+  owner and no other running CloudLink. It creates no worker, queues or mutex,
+  performs no network I/O and is loaded by a later valid start. Running links
+  still serialize saves and request worker reconnection. Both paths require
+  bounded nonempty fields, nonzero ports and the existing DNS/IP host characters. ASCII controls and
   overlong/unterminated fields are rejected before storage. Maximum field sizes
   and both port boundaries are covered without exposing credentials in logs.
 - Save and readback-open/length/read/content faults retain verified RAM and the

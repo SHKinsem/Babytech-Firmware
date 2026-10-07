@@ -64,7 +64,10 @@ public:
     bool connected() const { return connected_.load() && !reconnectRequested_.load(); }
     uint32_t sessionGeneration() const { return sessionGeneration_.load(); }
     bool configured() const;
-    // Local provisioning only, after successful begin/beginV4. Nonempty C strings:
+    // Local provisioning only. Before begin, save/read back without starting I/O;
+    // one provisioning owner, no concurrent start or other running CloudLink.
+    // After begin, serialize with worker snapshots and request reconnection.
+    // Nonempty C strings:
     // host/password <=127 bytes, user <=63; no ASCII controls; host uses DNS/IP characters.
     // False preserves RAM settings; NVS may already contain an unverified write.
     bool configure(const char* host, uint16_t port, const char* user, const char* password);
@@ -108,6 +111,7 @@ private:
     void failPendingPublishes();
     void receive(char* topic, uint8_t* payload, unsigned int length);
     bool loadSettings();
+    bool persistSettings(const Settings& settings);
     bool saveSettings(const Settings& settings);
     bool copySettings(Settings& settings, uint32_t* revision = nullptr) const;
     bool onApInterface(WebServer& server) const;

@@ -1150,23 +1150,108 @@ void motionExpiry(const std::string& kind) {
     fake::runWorker();
 }
 
+void configureUnpaired(const std::string& kind) {
+    fake::nvs.allowWrites = true;
+    BrainNetwork network;
+    char output[96]{};
+    constexpr char mqtt[] = "NET MQTT 6e65772e74657374 1885 746573742d75736572 686f73742d6f6e6c792d746573742d736563726574";
+    const auto command = [&](const char* line, bool maintenance, const char* expected) {
+        check(babytech::brain::BrainNetworkConsole::handle(line, maintenance, network, output, sizeof(output)),
+              "unpaired command not handled");
+        check(std::string(output) == std::string("[network] ") + expected + "\n", "wrong unpaired result");
+    };
+    const auto dormant = [&] {
+        poll(network);
+        check(!network.started() && !network.connected() && fake::io.tasks.empty() &&
+              fake::io.allocationCalls == 0 && fake::liveQueues() == 0 && fake::liveSemaphores() == 0 &&
+              fake::io.taskAttempts == 0, "unpaired save/poll started network resources");
+        check(WiFi.calls.empty() && fake::io.connectCalls == 0 && fake::io.disconnectCalls == 0 &&
+              fake::io.loopCalls == 0 && fake::io.published.empty(), "unpaired save/poll touched network");
+        check(fake::io.openPreferences == 0, "unpaired configuration leaked Preferences");
+    };
+    command("NET STATUS", false, "brain_unpaired");
+    command(mqtt, false, "maintenance_required");
+    check(fake::io.preferenceWriteCalls == 0, "configuration escaped maintenance gate");
+    command("NET WIFI 486f6d65 -", true, "wifi_saved");
+    dormant();
+    if (kind == "configure-unpaired-failure") {
+        for (bool readFailure : {false, true}) {
+            fake::io.failPreferencesWrite = !readFailure;
+            fake::io.failPreferencesRead = readFailure;
+            command(mqtt, true, "mqtt_failed");
+            dormant();
+            fake::io.failPreferencesWrite = fake::io.failPreferencesRead = false;
+        }
+    }
+    command(mqtt, true, "mqtt_saved");
+    const auto saved = fake::io.preferences;
+    check(saved.count("cloudcfg/record") == 1, "unpaired save missing existing record");
+    dormant();
+    check(!network.begin("bad/id"), "invalid identity used saved credentials");
+    dormant();
+    if (kind == "configure-unpaired-begin-failure") {
+        fake::io.failTask = true;
+        check(!network.begin(kId), "task allocation failure accepted");
+        check(!network.started() && fake::io.tasks.empty() && fake::liveQueues() == 0 &&
+              fake::liveSemaphores() == 0 && WiFi.calls.empty(), "failed begin leaked resources/radio");
+        fake::io.failTask = false;
+    }
+    check(network.begin(kId), "valid identity could not load unpaired configuration");
+    check(fake::io.preferences == saved, "begin changed pre-saved record");
+    check(fake::io.connectCalls == 0 && WiFi.calls.empty(), "begin connected outside worker");
+    const size_t configNvsCalls = fake::nvs.calls.size();
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) {
+            check(calls("begin") == 1 && WiFi.attemptedSsid == "Home" && WiFi.attemptedPassword.empty(),
+                  "worker did not join pre-saved Wi-Fi");
+            check(fake::io.connectCalls == 0, "MQTT connected before Wi-Fi join completed");
+            WiFi.state = WL_CONNECTED;
+            WiFi.ssid = "Home";
+            WiFi.address = IPAddress(192, 168, 1, 40);
+            return;
+        }
+        check(network.connected() && fake::io.connectedId == kId && fake::io.server == "new.test" &&
+              fake::io.port == 1885 && fake::io.credentialsMatched, "worker did not use pre-saved MQTT values");
+        for (const auto& call : WiFi.calls) check(call.worker, "radio escaped worker after pre-start save");
+        for (size_t i = configNvsCalls; i < fake::nvs.calls.size(); ++i)
+            check(fake::nvs.calls[i].worker, "station reload escaped worker after pre-start save");
+        stop();
+    };
+    fake::runWorker();
+    for (const auto& log : fake::io.serial)
+        check(log.find("host-only-test-secret") == std::string::npos &&
+              log.find("686f73742d6f6e6c792d746573742d736563726574") == std::string::npos,
+              "unpaired configuration logged secret");
+}
+
+void configureOtherOwner() {
+    BrainNetwork owner;
+    begin(owner);
+    BrainNetwork other;
+    const auto saved = fake::io.preferences;
+    const unsigned writes = fake::io.preferenceWriteCalls;
+    check(!other.configureMqtt("other.test", 2883, "user", "private-secret"),
+          "unstarted BrainNetwork configured active owner's record");
+    check(fake::io.preferences == saved && fake::io.preferenceWriteCalls == writes &&
+          !other.started() && fake::io.tasks.size() == 1, "other-owner refusal changed state");
+    fake::io.onDelay = [&](unsigned) {
+        check(owner.connected() && !other.connected() && fake::io.server == "cached.test" &&
+              fake::io.port == 1884 && fake::io.credentialsMatched, "other-owner refusal disrupted owner");
+        stop();
+    };
+    fake::runWorker();
+}
+
 void configureNetwork(const std::string& kind) {
     fake::nvs.allowWrites = true;
     BrainNetwork network;
-    if (kind != "configure-unpaired") begin(network);
+    begin(network);
     char output[96]{};
     const auto command = [&](const char* line, const char* expected) {
         check(babytech::brain::BrainNetworkConsole::handle(line, true, network, output, sizeof(output)),
               "network command not handled");
         check(std::string(output) == std::string("[network] ") + expected + "\n", "wrong configuration result");
     };
-    if (kind == "configure-unpaired") {
-        command("NET WIFI 486f6d65 -", "wifi_saved");
-        command("NET MQTT 686f7374 1883 75736572 70617373", "pairing_required");
-        check(fake::io.preferenceWriteCalls == 0 && fake::io.tasks.empty(), "unpaired MQTT side effect");
-        check(WiFi.calls.empty(), "unpaired configuration started radio");
-        return;
-    }
     if (kind == "configure-mqtt-failure") {
         fake::io.failPreferencesWrite = true;
         command("NET MQTT 6e65772e74657374 1885 75736572 70617373", "mqtt_failed");
@@ -1209,6 +1294,8 @@ int main(int argc, char** argv) {
     const std::string name = fixtures ? "cloud-fixtures" : argv[1];
     try {
         if (fixtures) cloudFixtures(fixtures, ackOutput);
+        else if (name.compare(0, 18, "configure-unpaired") == 0) configureUnpaired(name);
+        else if (name == "configure-other-owner") configureOtherOwner();
         else if (name.compare(0, 10, "configure-") == 0) configureNetwork(name);
         else if (name == "station-retry" || name == "station-rollover") stationRetry(name == "station-rollover");
         else if (name == "station-connected" || name == "station-wrong-ssid" || name == "station-no-ip")

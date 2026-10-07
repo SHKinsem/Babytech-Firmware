@@ -6,7 +6,7 @@ Credentials are prompted, never accepted as arguments, saved in files, or
 printed. Requires pyserial only for the CLI. Hex on USB is NOT encryption;
 use a trusted computer/cable and close other serial monitors. This writes
 network settings, not pairing, product state, ACLs, or Motion settings.
-MQTT requires an already paired/running Brain network worker. Saved means
+MQTT can be saved before pairing; only a paired Brain starts its network worker. Saved means
 read-back verified, not authenticated or connected. No reset/flash is sent;
 USB adapters/drivers may still reset a board on open. No production commands.
 """
@@ -95,9 +95,7 @@ def configure(port, command, *, timeout=15, clock=time.monotonic, sleep=time.sle
                 raise ConfigureError("Board rejected the operation.")
 
     port.reset_input_buffer()
-    role = exchange(b"NET STATUS\n", (b"[network] brain_ready", b"[network] brain_unpaired"))
-    if role == b"[network] brain_unpaired" and expected == b"[network] mqtt_saved":
-        raise ConfigureError("Pair Brain before configuring MQTT.")
+    exchange(b"NET STATUS\n", (b"[network] brain_ready", b"[network] brain_unpaired"))
     exchange(b"MAINT BEGIN\n", (b"[maint] active",))
     saved = False
     try:

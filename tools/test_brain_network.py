@@ -17,6 +17,7 @@ import tempfile
 
 CASES = [
     "configure-wifi", "configure-mqtt", "configure-mqtt-failure", "configure-unpaired",
+    "configure-unpaired-failure", "configure-unpaired-begin-failure", "configure-other-owner",
     *(f"station-{kind}" for kind in (
         "missing", "open-error", "ssid-missing", "pass-missing", "ssid-error", "pass-error",
         "ssid-empty", "ssid-max", "ssid-long", "pass-open", "pass-short", "pass-min",

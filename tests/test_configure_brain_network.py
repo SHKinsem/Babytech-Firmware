@@ -36,7 +36,7 @@ class Port:
             elif command == b"MAINT END\n":
                 reply = b"[maint] inactive" if self.release else b"[maint] unsafe"
             elif self.fail:
-                reply = b"[network] wifi_failed"
+                reply = b"[network] wifi_failed" if command.startswith(b"NET WIFI") else b"[network] mqtt_failed"
             else:
                 reply = b"[network] wifi_saved" if command.startswith(b"NET WIFI") else b"[network] mqtt_saved"
             self.lines.extend(b"unrelated private log\n" + reply + b"\n")
@@ -95,11 +95,36 @@ class ConfigureTest(unittest.TestCase):
         with self.assertRaisesRegex(tool.ConfigureError, "release unconfirmed"):
             tool.configure(Port(release=False), tool.wifi_command("Home", ""))
 
-    def test_unpaired_mqtt_does_not_send_secret(self):
+    def test_unpaired_mqtt_saved_in_maintenance_without_echo(self):
         port = Port(ready=False)
-        with self.assertRaises(tool.ConfigureError):
-            tool.configure(port, tool.mqtt_command("localhost", 1883, "user", "private"))
-        self.assertEqual(port.writes, b"NET STATUS\n")
+        command = tool.mqtt_command("localhost", 1883, "user", "private")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertTrue(tool.configure(port, command, sleep=lambda _: None))
+        self.assertEqual(port.writes, b"NET STATUS\nMAINT BEGIN\n" + command + b"MAINT END\n")
+        self.assertEqual(output.getvalue(), "")
+
+    def test_unpaired_mqtt_failed_save_releases_and_retries_without_echo(self):
+        port = Port(ready=False, fail=True)
+        command = tool.mqtt_command("localhost", 1883, "user", "private")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(tool.ConfigureError) as failure:
+                tool.configure(port, command, sleep=lambda _: None)
+            self.assertNotIn("private", str(failure.exception))
+            self.assertNotIn("70726976617465", str(failure.exception))
+            self.assertTrue(port.writes.endswith(b"MAINT END\n"))
+            port.fail = False
+            self.assertTrue(tool.configure(port, command, sleep=lambda _: None))
+        self.assertEqual(port.writes, (b"NET STATUS\nMAINT BEGIN\n" + command + b"MAINT END\n") * 2)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_unpaired_mqtt_failed_release_reports_uncertainty_without_secret(self):
+        port = Port(ready=False, release=False)
+        with self.assertRaisesRegex(tool.ConfigureError, "release unconfirmed") as failure:
+            tool.configure(port, tool.mqtt_command("localhost", 1883, "user", "private"), sleep=lambda _: None)
+        self.assertTrue(port.writes.endswith(b"MAINT END\n"))
+        self.assertNotIn("private", str(failure.exception))
 
     def test_unpaired_wifi_can_be_saved(self):
         self.assertTrue(tool.configure(Port(ready=False), tool.wifi_command("Home", "")))

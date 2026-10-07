@@ -24,7 +24,7 @@ public:
         return true;
     }
     bool configureMqtt(const char* host, uint16_t port, const char* user, const char* password) {
-        return started_ && cloud_.configure(host, port, user, password);
+        return cloud_.configure(host, port, user, password);
     }
 private:
     bool publishStatus(const boardlink::Status* lastMotion, bool motionConnected,
