@@ -2,6 +2,8 @@
 
 #include <ArduinoJson.h>
 #include <cstring>
+#include <cinttypes>
+#include <cstdio>
 
 namespace babytech { namespace boardlink {
 using namespace v4;
@@ -12,6 +14,12 @@ void ReadOnlyLink::reset() {
     peerStatus_ = Status{};
     queriedResult_ = QueriedResult{};
     resultHandler_ = nullptr;
+    commandHandler_ = nullptr;
+    stopHandler_ = nullptr;
+    commandReadyHandler_ = nullptr;
+    commandResult_ = CommandResult{};
+    commandReplyPending_ = false;
+    commandId_ = commandAt_ = highestCommandId_ = stopBarrier_ = 0;
     lookupState_ = ResultLookupState::Idle;
     lookupId_ = lookupAt_ = 0;
     resultReplyPending_ = false;
@@ -37,6 +45,24 @@ bool ReadOnlyLink::begin(const Pairing& pairing, uint64_t boot) {
 bool ReadOnlyLink::setResultQueryHandler(ResultQueryHandler handler) {
     if (!configured_ || role_ != Role::Motion || resultReplyPending_) return false;
     resultHandler_ = handler;
+    return true;
+}
+
+bool ReadOnlyLink::setCommandHandler(CommandHandler handler) {
+    if (!configured_ || role_ != Role::Motion || commandReplyPending_) return false;
+    commandHandler_ = handler;
+    return true;
+}
+
+bool ReadOnlyLink::setStopHandler(StopHandler handler) {
+    if (!configured_ || role_ != Role::Motion) return false;
+    stopHandler_ = handler;
+    return true;
+}
+
+bool ReadOnlyLink::setCommandReadyHandler(CommandReadyHandler handler) {
+    if (!configured_ || role_ != Role::Motion || commandReplyPending_) return false;
+    commandReadyHandler_ = handler;
     return true;
 }
 
@@ -104,6 +130,8 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
             if (lookupState_ == ResultLookupState::Pending)
                 lookupState_ = ResultLookupState::Unavailable;
             resultReplyPending_ = false;
+            commandReplyPending_ = false;
+            commandId_ = commandAt_ = highestCommandId_ = stopBarrier_ = 0;
         }
         if (message.kind == Kind::Hello) {
             helloAckPending_ = true;
@@ -114,6 +142,7 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
             return;
         }
         probeRequired_ = false;
+        if (message.messageId > highestCommandId_) highestCommandId_ = message.messageId;
         if (previousBoot != session_.peerBoot()) {
             assembler_.reset();
             if (previousBoot) tx_.cancelOrdinary();
@@ -126,7 +155,30 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
     }
     if (!session_.matches(message.senderBoot, message.receiverBoot)) return;
     expireResultQuery(nowMs);
-    if (message.kind == Kind::ResultQuery && role_ == Role::Motion) {
+    if (message.kind == Kind::Command && role_ == Role::Motion) {
+        CommandMessage command;
+        const uint32_t receivedId = message.messageId;
+        if (!session_.connected(nowMs) || commandReplyPending_ || !commandHandler_ ||
+            !decodeCommand(message, command) ||
+            std::strcmp(command.request.deviceId, session_.localHello().deviceId)) {
+            receipt(receivedId, false);
+            return;
+        }
+        // First-fragment time, not completion or a replayed offset-zero frame.
+        const uint32_t elapsed = uint32_t(nowMs - commandAt_);
+        if (commandId_ != receivedId || elapsed >= command.remainingTtlMs)
+            command.remainingTtlMs = 0;
+        else command.remainingTtlMs -= elapsed;
+        if (!commandHandler_(command, nowMs, commandResult_) ||
+            commandResult_.source != command.request.source ||
+            commandResult_.sequence != command.request.sequence ||
+            std::strcmp(commandResult_.commandId, command.request.commandId) ||
+            !encodeCommandResult(commandResult_, scratch_)) {
+            receipt(receivedId, false);
+            return;
+        }
+        commandReplyPending_ = true;
+    } else if (message.kind == Kind::ResultQuery && role_ == Role::Motion) {
         ResultQuery query;
         if (!session_.connected(nowMs) || resultReplyPending_ || !resultHandler_ ||
             !decodeResultQuery(message, query) ||
@@ -196,7 +248,42 @@ void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
     if (!hello && !session_.matches(frame.senderBoot, frame.receiverBoot)) return;
     if (hello && frame.receiverBoot != session_.localBoot() &&
         !(frame.kind == Kind::Hello && frame.receiverBoot == 0)) return;
+    if (frame.kind == Kind::Stop) {
+        StopRequest stop;
+        if (role_ != Role::Motion || !session_.connected(nowMs) || !stopHandler_ ||
+            !decodeStop(frame.payload, frame.length, stop)) {
+            receipt(frame.messageId, false);
+            return;
+        }
+        if (stop.source == Source::LocalTouch) {
+            char expected[40];
+            std::snprintf(expected, sizeof(expected), "stop-%016" PRIx64 "-%08" PRIx32,
+                          frame.senderBoot, frame.messageId);
+            if (std::strcmp(stop.commandId, expected)) {
+                receipt(frame.messageId, false);
+                return;
+            }
+        }
+        // Control handling bypasses the normal reassembly slot and all Flash.
+        if (frame.messageId > stopBarrier_) stopBarrier_ = frame.messageId;
+        if (commandId_ && commandId_ <= stopBarrier_)
+            assembler_.cancelMessage(Kind::Command, frame.senderBoot, frame.receiverBoot, commandId_);
+        receipt(frame.messageId, stopHandler_(stop, nowMs));
+        return;
+    }
+    if (frame.kind == Kind::Command && role_ == Role::Motion && frame.messageId <= stopBarrier_) {
+        receipt(frame.messageId, false);
+        return;
+    }
+    assembler_.expire(nowMs);
+    const bool starting = frame.kind == Kind::Command && !frame.offset && !assembler_.active();
     const auto result = assembler_.accept(frame, nowMs, scratch_);
+    if (starting && (result == AssemblyResult::Incomplete || result == AssemblyResult::Complete)) {
+        if (frame.messageId > highestCommandId_) {
+            highestCommandId_ = commandId_ = frame.messageId;
+            commandAt_ = nowMs;
+        } else commandId_ = 0; // Replay can query a cached decision, never regain TTL.
+    }
     if (result == AssemblyResult::Complete) handle(scratch_, nowMs);
 }
 
@@ -228,6 +315,7 @@ void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatu
         peerStatus_ = Status{};
         awaitingStatusId_ = 0;
         resultReplyPending_ = false;
+        commandReplyPending_ = false;
     }
     if (helloAckPending_ && !tx_.ordinaryPending()) {
         Hello identity = session_.localHello();
@@ -260,6 +348,12 @@ void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatu
         !helloAckPending_ && !tx_.ordinaryPending()) {
         if (encodeQueriedResult(queriedResult_, scratch_) && queue(scratch_))
             resultReplyPending_ = false;
+    }
+    if (role_ == Role::Motion && commandReplyPending_ && session_.connected(nowMs) &&
+        !helloAckPending_ && !tx_.ordinaryPending()) {
+        if ((!commandReadyHandler_ || commandReadyHandler_(commandResult_)) &&
+            encodeCommandResult(commandResult_, scratch_) && queue(scratch_))
+            commandReplyPending_ = false;
     }
     if (role_ == Role::Motion && localStatus &&
         uint32_t(nowMs - localStatus->sampleUptimeMs) < kStatusIntervalMs &&

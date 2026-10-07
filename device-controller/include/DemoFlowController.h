@@ -69,6 +69,7 @@ public:
     bool startEnabled() const { return stage_ == DisplayStage::Ready; }
     const char* reason() const { return reason_; }
     bool apply(DemoConfig config);
+    bool canInitialize() const;
     bool initialize(uint32_t now);
     bool start(uint32_t now);
     bool single(uint8_t index, uint32_t now);

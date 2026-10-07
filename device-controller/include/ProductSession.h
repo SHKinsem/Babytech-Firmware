@@ -62,6 +62,11 @@ public:
     bool executionAuthorized() const { return executionAuthorized_; }
     bool startCloud(ProductRun run, uint32_t now, const char*& rejection);
     bool startLocal(const std::string& commandId, uint32_t now, const char*& rejection);
+    bool startPaired(ProductRun run, uint32_t now, const char*& rejection);
+    // Read-only admission checks; persistence and motion remain with the caller/actions.
+    const char* prepareRejection(const ProductRun& run) const;
+    const char* cleanRejection() const;
+    const char* initializeRejection() const;
     void setStartGuard(ProductStartGuard* guard) { startGuard_ = guard; }
     void networkState(bool wifiConnected, uint32_t now);
     void recoverAfterRestart(uint32_t now);

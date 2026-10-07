@@ -2,13 +2,15 @@
 
 #include "ProductBoardMessages.h"
 #include "ProductResultQuery.h"
+#include "ProductCommandResult.h"
 #include "BoardTransmitV4.h"
 
 namespace babytech { namespace boardlink {
 
 enum class ResultLookupState { Idle, Pending, Complete, TimedOut, Unavailable };
 
-// Single-owner, non-reentrant link core. No action dispatch is present.
+// Single-owner, non-reentrant link core. Motion actions require explicit handlers;
+// the Brain command sender remains disabled during migration.
 // Keep this ~8 KiB object off the MCU task stack (static/member storage).
 class ReadOnlyLink {
 public:
@@ -20,6 +22,12 @@ public:
     bool queueInstallMessage(const v4::Message& message);
     using ResultQueryHandler = bool (*)(const ResultQuery&, QueriedResult&);
     bool setResultQueryHandler(ResultQueryHandler handler);
+    using CommandHandler = bool (*)(const CommandMessage&, uint32_t, CommandResult&);
+    using StopHandler = bool (*)(const v4::StopRequest&, uint32_t);
+    using CommandReadyHandler = bool (*)(CommandResult&);
+    bool setCommandHandler(CommandHandler handler);
+    bool setStopHandler(StopHandler handler);
+    bool setCommandReadyHandler(CommandReadyHandler handler);
     bool requestResult(const ResultQuery& query, uint32_t nowMs);
     ResultLookupState resultLookupState() const { return lookupState_; }
     const QueriedResult& resultQueryResponse() const { return queriedResult_; }
@@ -52,6 +60,15 @@ private:
     Status peerStatus_{};
     QueriedResult queriedResult_{};
     ResultQueryHandler resultHandler_ = nullptr;
+    CommandHandler commandHandler_ = nullptr;
+    StopHandler stopHandler_ = nullptr;
+    CommandReadyHandler commandReadyHandler_ = nullptr;
+    CommandResult commandResult_{};
+    bool commandReplyPending_ = false;
+    uint32_t commandId_ = 0;
+    uint32_t commandAt_ = 0;
+    uint32_t highestCommandId_ = 0;
+    uint32_t stopBarrier_ = 0;
     ResultLookupState lookupState_ = ResultLookupState::Idle;
     uint32_t lookupId_ = 0;
     uint32_t lookupAt_ = 0;

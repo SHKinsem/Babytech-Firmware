@@ -507,6 +507,187 @@ void resultQueryCancellationAndTransportFault() {
     f.brain.poll(f.now + 1, broken);
     assert(f.brain.resultLookupState() == ResultLookupState::Unavailable);
 }
+
+unsigned commandCalls = 0, stopCalls = 0;
+uint16_t observedTtl = 0;
+bool finalCommandReady = true;
+bool commandReady(CommandResult&) { return finalCommandReady; }
+bool handleCommand(const CommandMessage& command, uint32_t, CommandResult& result) {
+    ++commandCalls;
+    observedTtl = command.remainingTtlMs;
+    result = CommandResult{};
+    result.source = command.request.source;
+    result.sequence = command.request.sequence;
+    std::strcpy(result.commandId, command.request.commandId);
+    result.accepted = command.remainingTtlMs != 0;
+    std::strcpy(result.reason, result.accepted ? "accepted" : "request_expired");
+    return true;
+}
+bool handleStop(const StopRequest&, uint32_t) { ++stopCalls; return true; }
+
+Message commandMessage(uint32_t id, uint16_t ttl = 500) {
+    CommandMessage command;
+    command.request.command = ProductCommand::Prepare;
+    command.request.sequence = id;
+    std::strcpy(command.request.deviceId, "bt-test-device");
+    assert(makeLocalCommandId(pairing(Role::Brain), id, command.request.commandId));
+    std::strcpy(command.request.babyId, "baby-id");
+    command.request.profileVersion = 1;
+    command.request.waterMl = 180;
+    command.request.temperatureC = 45;
+    command.request.powderGPer100Ml = 13;
+    command.remainingTtlMs = ttl;
+    Message message;
+    assert(encodeCommand(command, message));
+    message.senderBoot = 11; message.receiverBoot = 22; message.messageId = id;
+    assert(message.length > kMaxFragment);
+    return message;
+}
+
+void restOfCommand(const Message& message, Fixture& f, size_t offset = kMaxFragment) {
+    while (offset < message.length) {
+        Frame frame;
+        assert(fragment(message, offset, frame));
+        f.motion.receiveFrame(frame, f.now);
+        offset += frame.length;
+    }
+}
+
+void commandAndStopRuntime() {
+    Fixture f;
+    f.run(3000);
+    assert(!f.brain.setCommandHandler(handleCommand));
+    assert(!f.brain.setStopHandler(handleStop));
+    assert(f.motion.setCommandHandler(handleCommand));
+    assert(f.motion.setStopHandler(handleStop));
+    commandCalls = stopCalls = 0;
+    auto message = commandMessage(10000);
+    Frame first;
+    assert(fragment(message, 0, first));
+    f.motion.receiveFrame(first, f.now);
+    f.now += 100;
+    f.motion.receiveFrame(first, f.now); // Duplicate fragment cannot renew TTL.
+    f.now += 100;
+    restOfCommand(message, f);
+    assert(commandCalls == 1 && observedTtl == 300);
+    // A pending reply is not overwritten by a second accepted command.
+    deliver(commandMessage(10001), f.motion, f.now);
+    assert(commandCalls == 1);
+    f.toBrain.history.clear();
+    f.run(200, false);
+    Parser parser;
+    Assembler assembler;
+    Frame frame;
+    Message decoded;
+    CommandResult result;
+    bool received = false;
+    for (uint8_t byte : f.toBrain.history)
+        if (parser.push(byte, f.now, frame) &&
+            assembler.accept(frame, f.now, decoded) == AssemblyResult::Complete &&
+            decodeCommandResult(decoded, result)) received = true;
+    assert(received && result.accepted && result.sequence == 10000);
+    deliver(message, f.motion, f.now);
+    assert(commandCalls == 2 && observedTtl == 0); // Lost/replayed transmission gains no time.
+    f.run(200, false);
+
+    message = commandMessage(11000, 100);
+    assert(fragment(message, 0, first));
+    f.motion.receiveFrame(first, f.now);
+    f.now += 100;
+    restOfCommand(message, f);
+    assert(commandCalls == 3 && observedTtl == 0);
+    f.run(200, false);
+
+    message = commandMessage(12000);
+    assert(fragment(message, 0, first));
+    f.motion.receiveFrame(first, f.now);
+    StopRequest stop;
+    std::strcpy(stop.commandId, "stop-000000000000000b-000030d5"); // transport ID 12501
+    stop.commandIdLength = uint8_t(std::strlen(stop.commandId));
+    Frame urgent;
+    urgent.kind = Kind::Stop;
+    urgent.senderBoot = 11; urgent.receiverBoot = 22; urgent.messageId = 12501;
+    urgent.total = urgent.length = uint16_t(encodeStop(stop, urgent.payload, sizeof(urgent.payload)));
+    assert(urgent.length);
+    f.motion.receiveFrame(urgent, f.now);
+    assert(stopCalls == 1); // Immediate, no ordinary-slot or ACK drain prerequisite.
+    restOfCommand(message, f);
+    deliver(message, f.motion, f.now);
+    assert(commandCalls == 3);
+    urgent.receiverBoot = 33;
+    f.motion.receiveFrame(urgent, f.now);
+    assert(stopCalls == 1);
+    urgent.receiverBoot = 22;
+    ++urgent.messageId; // Doesn't match canonical local Stop ID.
+    f.motion.receiveFrame(urgent, f.now);
+    assert(stopCalls == 1);
+    f.run(200, false);
+    deliver(commandMessage(13000), f.motion, f.now);
+    assert(commandCalls == 4 && observedTtl == 500);
+    f.run(200, false);
+    assert(!f.brain.peerStatus().snapshot.startEnabled); // Brain sender is still readonly.
+}
+
+void commandDeferralAndFirstFragmentExpiry() {
+    Fixture f;
+    f.run(3000, false);
+    assert(f.motion.setCommandHandler(handleCommand));
+    assert(f.motion.setCommandReadyHandler(commandReady));
+    assert(f.motion.setStopHandler(handleStop));
+    commandCalls = stopCalls = 0;
+    auto command = commandMessage(10000);
+    Frame first;
+    assert(fragment(command, 0, first));
+    f.motion.receiveFrame(first, f.now);
+    f.run(1100, false); // Assembly expires while heartbeats still work.
+    restOfCommand(command, f);
+    assert(commandCalls == 0);
+    deliver(command, f.motion, f.now);
+    assert(commandCalls == 1 && observedTtl == 0);
+    f.run(200, false);
+
+    finalCommandReady = false;
+    f.toBrain.history.clear();
+    deliver(commandMessage(11000), f.motion, f.now);
+    f.run(500, false);
+    Parser parser;
+    Frame frame;
+    for (uint8_t byte : f.toBrain.history)
+        if (parser.push(byte, f.now, frame)) assert(frame.kind != Kind::CommandResult);
+    assert(f.brain.connected(f.now) && f.motion.connected(f.now));
+    StopRequest stop;
+    std::strcpy(stop.commandId, "stop-000000000000000b-00002ee0"); // ID 12000
+    stop.commandIdLength = uint8_t(std::strlen(stop.commandId));
+    Frame urgent;
+    urgent.kind = Kind::Stop;
+    urgent.senderBoot = 11; urgent.receiverBoot = 22; urgent.messageId = 12000;
+    urgent.total = urgent.length = uint16_t(encodeStop(stop, urgent.payload, sizeof(urgent.payload)));
+    f.motion.receiveFrame(urgent, f.now);
+    assert(stopCalls == 1); // Flash-delayed rejection doesn't block safety controls.
+    finalCommandReady = true;
+    f.run(200, false);
+    Assembler assembler;
+    Message message;
+    CommandResult result;
+    bool found = false;
+    parser.reset();
+    for (uint8_t byte : f.toBrain.history)
+        if (parser.push(byte, f.now, frame) && assembler.accept(frame, f.now, message) == AssemblyResult::Complete &&
+            decodeCommandResult(message, result)) found = true;
+    assert(found && result.sequence == 11000);
+
+    Fixture wrap;
+    wrap.now = UINT32_MAX - 4000;
+    wrap.run(3000, false);
+    wrap.motion.setCommandHandler(handleCommand);
+    wrap.now = UINT32_MAX - 50;
+    command = commandMessage(10000, 300);
+    assert(fragment(command, 0, first));
+    wrap.motion.receiveFrame(first, wrap.now);
+    wrap.now += 100;
+    restOfCommand(command, wrap);
+    assert(observedTtl == 200);
+}
 } // namespace
 
 int main() {
@@ -525,5 +706,7 @@ int main() {
     resultQueryTimeoutAndRestart();
     resultReplyBackpressure();
     resultQueryCancellationAndTransportFault();
-    std::puts("PASS v4 two-peer readonly link, query runtime, matching, stale status, backpressure and restarts");
+    commandAndStopRuntime();
+    commandDeferralAndFirstFragmentExpiry();
+    std::puts("PASS v4 two-peer link, Motion commands/Stop/TTL, query, stale status, backpressure and restarts");
 }

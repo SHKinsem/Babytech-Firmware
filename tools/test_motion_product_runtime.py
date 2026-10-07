@@ -1,9 +1,8 @@
-"""Host-test BrainPendingRecovery against the real BrainStateStore and SHA-256.
+"""Host tests of production Motion runtime, session, flow, NVS and result query.
 
-Production Brain/Motion links exchange frames through a short-write byte sink;
-fault tests also use FakeLink. Reboot preserves serialized records in fake NVS.
-No PlatformIO, network, hardware or dependency installation; this does not
-establish real UART/Flash behavior.
+Uses FakeBrainNvs and system SHA-256 through both mbedTLS SDK shims. Only
+clock, executor and board I/O are replaced. No hardware, broker, installs or
+downloads; fake feedback/NVS cannot prove real mechanical or Flash behavior.
 """
 import argparse
 import os
@@ -23,7 +22,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     json_dir = root / "device-controller/.pio/libdeps/motion/ArduinoJson/src"
     if not (json_dir / "ArduinoJson.h").is_file():
-        raise SystemExit("Existing ArduinoJson 6 required; no dependencies installed")
+        raise SystemExit("ArduinoJson 6 required in existing motion libdeps; no dependencies installed")
     compiler = shutil.which(os.environ.get("CXX", "c++"))
     if not compiler:
         raise SystemExit("A C++17 compiler is required")
@@ -32,26 +31,26 @@ def main():
     includes = (json_dir, root / "tests/fakes/brain_state_store",
                 root / "tests/fakes/product_crypto", root / "shared/BoardProtocol/src",
                 root / "shared/ProductBoardLink/src", root / "shared/BabytechDisplayCore/src",
-                root / "main-controller/src")
+                root / "device-controller/include")
     sources = [root / "shared/BoardProtocol/src" / name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
                 ("ProductContext.cpp", "ProductRequest.cpp", "ProductDigest.cpp",
-                 "BrainStateRecord.cpp", "BrainStateStore.cpp", "BoardPairingRecord.cpp",
-                 "MotionStateRecord.cpp", "MotionStateStore.cpp", "ProductResultQuery.cpp",
-                 "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ReadOnlyBoardLink.cpp")]
-    sources += [root / path for path in (
-        "tests/fakes/brain_state_store/FakeBrainNvs.cpp",
-        "tests/fakes/product_crypto/FakeProductCrypto.cpp",
-        "tests/test_brain_pending_recovery.cpp")]
+                 "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ProductResultQuery.cpp",
+                 "MotionStateRecord.cpp", "BoardPairingRecord.cpp", "MotionStateStore.cpp", "ReadOnlyBoardLink.cpp")]
+    sources += [root / "device-controller/src" / name for name in
+                ("MotionProductRuntime.cpp", "ProductSession.cpp", "DemoFlowController.cpp")]
+    sources += [root / "tests/fakes/brain_state_store/FakeBrainNvs.cpp",
+                root / "tests/fakes/product_crypto/FakeProductCrypto.cpp",
+                root / "test/test_motion_product_runtime.cpp"]
     environment = os.environ.copy()
     if args.sanitize:
         environment["ASAN_OPTIONS"] = environment.get("ASAN_OPTIONS", "") + ":halt_on_error=1:abort_on_error=1"
         environment["UBSAN_OPTIONS"] = environment.get("UBSAN_OPTIONS", "") + ":halt_on_error=1:print_stacktrace=1"
     failed = False
-    with tempfile.TemporaryDirectory(prefix="babytech-brain-pending-recovery-") as directory:
+    with tempfile.TemporaryDirectory(prefix="babytech-motion-product-runtime-") as directory:
         for major in (("2", "3") if args.mbedtls_major == "both" else (args.mbedtls_major,)):
-            binary = Path(directory) / ("brain_pending_recovery_" + major)
+            binary = Path(directory) / ("motion_product_runtime_" + major)
             command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                        "-DARDUINO=10819", "-DMBEDTLS_VERSION_MAJOR=" + major]
             for feature in ("ARDUINO_STRING", "ARDUINO_STREAM", "ARDUINO_PRINT", "PROGMEM"):
@@ -67,7 +66,7 @@ def main():
             if sys.platform == "linux":
                 command += ["-lcrypto"]
             subprocess.run([*command, "-o", str(binary)], check=True)
-            print("Brain pending recovery / mbedTLS " + major, flush=True)
+            print("MotionProductRuntime / mbedTLS " + major, flush=True)
             result = subprocess.run([str(binary), *([args.case] if args.case else [])],
                                     env=environment, check=False)
             failed = failed or result.returncode != 0

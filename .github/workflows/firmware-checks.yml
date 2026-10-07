@@ -116,6 +116,8 @@ jobs:
           python tools/test_motion_state_record.py --sanitize
           python tools/test_motion_state_store.py --sanitize
           python tools/test_product_result_query.py --sanitize
+          python tools/test_product_command_result.py --sanitize
+          python tools/test_motion_product_runtime.py --sanitize
           python tools/test_motion_state_recovery.py --sanitize
           python tools/test_motion_result_queue.py --sanitize
           python tools/test_board_commissioning.py --sanitize

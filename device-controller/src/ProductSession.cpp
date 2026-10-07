@@ -75,29 +75,37 @@ bool ProductSession::canStart() const {
         flow_.startEnabled() && !flow_.busy();
 }
 
-bool ProductSession::start(ProductRun run, uint32_t now, const char*& rejection) {
-    if (!executionAuthorized_) { rejection = "non_consumable_demo_disabled"; return false; }
-    if (!contextStorageReady_) { rejection = "context_storage_fault"; return false; }
-    if (active_ || cleanPending_ || cleaning_ || eventPending_) { rejection = "busy"; return false; }
-    if (completedLatch_) { rejection = "bottle_full"; return false; }
-    if (!waterValid_) { rejection = "water_sensor_invalid"; return false; }
-    if (lowWater_) { rejection = "low_water"; return false; }
-    if (!powderValid_) { rejection = "powder_sensor_invalid"; return false; }
-    if (powderGrams_ <= 50.0f) { rejection = "low_powder"; return false; }
+const char* ProductSession::prepareRejection(const ProductRun& run) const {
+    if (!executionAuthorized_) return "non_consumable_demo_disabled";
+    if (!contextStorageReady_) return "context_storage_fault";
+    if (active_ || cleanPending_ || cleaning_ || eventPending_) return "busy";
+    if (completedLatch_) return "bottle_full";
+    if (!waterValid_) return "water_sensor_invalid";
+    if (lowWater_) return "low_water";
+    if (!powderValid_) return "powder_sensor_invalid";
+    if (powderGrams_ <= 50.0f) return "low_powder";
     if (run.recipe.waterMl < 30 || run.recipe.waterMl > 500) {
-        rejection = "invalid_water_ml"; return false;
+        return "invalid_water_ml";
     }
     if (run.recipe.temperatureC < 35 || run.recipe.temperatureC > 60) {
-        rejection = "invalid_temp"; return false;
+        return "invalid_temp";
     }
     if (!std::isfinite(run.recipe.powderGPer100Ml) ||
         run.recipe.powderGPer100Ml < 1.0f || run.recipe.powderGPer100Ml > 50.0f) {
-        rejection = "invalid_powder_g_per_100ml"; return false;
+        return "invalid_powder_g_per_100ml";
     }
-    if (run.babyId.empty()) { rejection = "baby_context_missing"; return false; }
+    if (run.babyId.empty()) return "baby_context_missing";
+    const float targetPowderG = std::round(run.recipe.waterMl * run.recipe.powderGPer100Ml / 10.0f) / 10.0f;
+    if (powderGrams_ < targetPowderG + 50.0f) return "low_powder";
+    if (!flow_.startEnabled() || flow_.busy()) return "not_ready";
+    if (startGuard_ && !startGuard_->ready()) return "event_storage_fault";
+    return nullptr;
+}
+
+bool ProductSession::start(ProductRun run, uint32_t now, const char*& rejection) {
+    rejection = prepareRejection(run);
+    if (rejection) return false;
     run.targetPowderG = std::round(run.recipe.waterMl * run.recipe.powderGPer100Ml / 10.0f) / 10.0f;
-    if (powderGrams_ < run.targetPowderG + 50.0f) { rejection = "low_powder"; return false; }
-    if (!flow_.startEnabled() || flow_.busy()) { rejection = "not_ready"; return false; }
     if (startGuard_ && !startGuard_->prepare(run, now)) {
         rejection = "event_storage_fault"; return false;
     }
@@ -131,6 +139,14 @@ bool ProductSession::startLocal(const std::string& commandId, uint32_t now, cons
     run.babyId = context_.babyId;
     run.profileVersion = context_.profileVersion;
     run.recipe = context_.recipe;
+    return start(std::move(run), now, rejection);
+}
+
+bool ProductSession::startPaired(ProductRun run, uint32_t now, const char*& rejection) {
+    if (run.commandId.empty()) { rejection = "invalid_command_id"; return false; }
+    if (run.source != "cloud_command" && run.source != "local_touch") {
+        rejection = "invalid_source"; return false;
+    }
     return start(std::move(run), now, rejection);
 }
 
@@ -192,11 +208,17 @@ bool ProductSession::abort(uint32_t now, const char* reason, const char* errorCo
     return true;
 }
 
-bool ProductSession::clean(uint32_t now, const char*& rejection) {
+const char* ProductSession::cleanRejection() const {
     if (active_ || cleanPending_ || cleaning_ || eventPending_ || flow_.busy()) {
-        rejection = "busy"; return false;
+        return "busy";
     }
-    if (flow_.stage() == DisplayStage::Error) { rejection = "error_state"; return false; }
+    if (flow_.stage() == DisplayStage::Error) return "error_state";
+    return nullptr;
+}
+
+bool ProductSession::clean(uint32_t now, const char*& rejection) {
+    rejection = cleanRejection();
+    if (rejection) return false;
     flow_.stop(now);
     if (flow_.error() == DisplayError::CanFault) { rejection = "stop_unconfirmed"; return false; }
     cleanPending_ = true;
@@ -204,8 +226,13 @@ bool ProductSession::clean(uint32_t now, const char*& rejection) {
     return true;
 }
 
+const char* ProductSession::initializeRejection() const {
+    if (active_ || eventPending_ || cleanPending_ || cleaning_ || flow_.busy()) return "busy";
+    return flow_.canInitialize() ? nullptr : "not_ready";
+}
+
 bool ProductSession::initialize(uint32_t now) {
-    if (active_ || eventPending_ || cleanPending_ || cleaning_) return false;
+    if (initializeRejection()) return false;
     if (!flow_.initialize(now)) return false;
     completedLatch_ = false;
     return true;

@@ -77,6 +77,8 @@ for project in "${projects[@]}"; do
         python3 tools/test_motion_state_record.py
         python3 tools/test_motion_state_store.py
         python3 tools/test_product_result_query.py
+        python3 tools/test_product_command_result.py
+        python3 tools/test_motion_product_runtime.py
         python3 tools/test_motion_state_recovery.py
         python3 tools/test_motion_result_queue.py
         python3 tools/test_board_commissioning.py

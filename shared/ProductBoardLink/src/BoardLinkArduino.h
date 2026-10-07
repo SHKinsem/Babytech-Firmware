@@ -29,6 +29,16 @@ public:
     bool setResultQueryHandler(ReadOnlyLink::ResultQueryHandler handler) {
         return started_ && link_.setResultQueryHandler(handler);
     }
+    bool setCommandHandler(ReadOnlyLink::CommandHandler handler) {
+        return started_ && link_.setCommandHandler(handler);
+    }
+    bool setStopHandler(ReadOnlyLink::StopHandler handler) {
+        return started_ && link_.setStopHandler(handler);
+    }
+    bool setCommandReadyHandler(ReadOnlyLink::CommandReadyHandler handler) {
+        return started_ && link_.setCommandReadyHandler(handler);
+    }
+    v4::LinkFailure takeFailure() { return link_.takeFailure(); }
     bool requestResult(const ResultQuery& query, uint32_t nowMs) {
         return started_ && link_.requestResult(query, nowMs);
     }

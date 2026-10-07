@@ -1,7 +1,7 @@
 // ESP32-S3 Motion controller.
 //
 // Responsibilities of this file:
-//   * product display UART v3, with the legacy Brain/v2 path kept for debug,
+//   * product UART v3/v4, with the legacy Brain/v2 path kept for debug,
 //   * CAN bring-up + motor command HTTP API (delegated to motion::MotorControl),
 //   * Wi-Fi AP, MQTT Cloud link, and the embedded motor debug page.
 //
@@ -46,6 +46,7 @@
 #include <BoardLinkArduino.h>
 #include <MaintenanceUsbConsole.h>
 #include "MotionStateRecovery.h"
+#include "MotionProductRuntime.h"
 #include <MotionInstallTarget.h>
 #endif
 #if MOTION_HAS_PRODUCT
@@ -528,6 +529,50 @@ uint32_t installNowMs() { return uint32_t(millis()); }
 babytech::boardlink::MotionInstallTarget migrationInstall(
     productState, productBoardLink.maintenance(), safeForRemoteInstall, installNowMs);
 motion::MotionStateRecovery productRecovery(productState, recoveryHardware);
+class ProductHardware : public motion::MotionProductHardware {
+public:
+    uint32_t nowMs() const override { return uint32_t(millis()); }
+    const char* unavailable() const override {
+        if (commissioningActive()) return "commissioning_active";
+        if (ota.maintenanceActive()) return "ota_active";
+        if (wifiSetup.busy()) return "wifi_busy";
+        if (endpoint.busy() || motor.operationBusy() || queue.active() ||
+            productRecovery.motionPending()) return "busy";
+        return nullptr;
+    }
+    bool newExecution(char (&id)[33]) override {
+        uint32_t words[4];
+        uint32_t nonzero;
+        do {
+            nonzero = 0;
+            for (auto& word : words) { word = esp_random(); nonzero |= word; }
+        } while (!nonzero);
+        constexpr char hex[] = "0123456789abcdef";
+        for (size_t i = 0; i < 4; ++i)
+            for (size_t digit = 0; digit < 8; ++digit)
+                id[i * 8 + digit] = hex[(words[i] >> ((7 - digit) * 4)) & 15];
+        id[32] = 0;
+        return true;
+    }
+    bool stationary() const override {
+        // Complete's display hold is not motion; cleaning also retains UI ownership.
+        const bool flowIdle = !demo.busy() || demo.stage() == babytech::display::DisplayStage::Complete;
+        return canStarted && !endpoint.busy() && !motor.operationBusy() &&
+            !queue.active() && flowIdle && (demo.stationary() || demoExecutor.stopConfirmed());
+    }
+};
+ProductHardware productHardware;
+motion::MotionProductRuntime productRuntime(productState, product, demo, productHardware);
+bool commandProduct(const babytech::boardlink::CommandMessage& command, uint32_t nowMs,
+                    babytech::boardlink::CommandResult& result) {
+    return productRuntime.command(command, nowMs, result);
+}
+bool stopProduct(const babytech::v4::StopRequest& request, uint32_t nowMs) {
+    return productRuntime.stop(request, nowMs);
+}
+bool productResultReady(babytech::boardlink::CommandResult& result) {
+    return productRuntime.resultReady(result);
+}
 bool queryProductResult(const babytech::boardlink::ResultQuery& query,
                         babytech::boardlink::QueriedResult& result) {
     return babytech::boardlink::queryMotionResult(productState, query, result);
@@ -841,7 +886,7 @@ void serviceBrainLink() {
     status.sampleUptimeMs = millis();
     status.contextVersion = product.context().profileVersion;
     status.motionBusy = controlBusy();
-    status.stationary = !controlBusy() && !motor.operationBusy() && demo.stationary();
+    status.stationary = productHardware.stationary();
     status.eventPending = product.eventPending();
     strlcpy(status.productProgress, product.progress(), sizeof(status.productProgress));
     strlcpy(status.productError, product.errorCode(), sizeof(status.productError));
@@ -870,7 +915,11 @@ void serviceBrainLink() {
         status.feedingContextConfigured = false;
     }
     productRecovery.project(status);
+    productRuntime.project(status, productBoardLink.link().connected(status.sampleUptimeMs));
     productBoardLink.poll(status.sampleUptimeMs, &status);
+    if (productBoardLink.takeFailure() != babytech::v4::LinkFailure::None ||
+        !productBoardLink.link().healthy())
+        productRuntime.linkLost(millis());
 #else
     if (ota.maintenanceActive()) { while (brain.available() > 0) brain.read(); return; }
     uint8_t bytes[babytech::display::kDisplayMaxFrameSize];
@@ -885,6 +934,9 @@ void serviceBrainLink() {
 
 bool demoManualMutation() {
     if (demoBusy()) { sendError(409, F("demo_busy")); return false; }
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    productRuntime.releaseMotionOwnership();
+#endif
 #if MOTION_HAS_PRODUCT
     demo.invalidate();
 #endif
@@ -895,6 +947,11 @@ bool demoManualMutation() {
 enum class StopOwnershipResult { None, Requested, Unconfirmed };
 
 StopOwnershipResult stopDemoOwnership() {
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    if (productRuntime.ownsMotion())
+        return productRuntime.stopOwned(millis()) ? StopOwnershipResult::Requested
+                                                  : StopOwnershipResult::Unconfirmed;
+#endif
 #if MOTION_HAS_PRODUCT
     if (product.ownsMotion()) {
         bool wasActive = false;
@@ -965,6 +1022,9 @@ void handleDemoAction() {
         for (uint8_t i = 0; i < 5; ++i) if (id == motion::kDemoStageIds[i]) accepted = demo.single(i, millis());
     }
     if (!accepted) { sendError(409, F("not_ready")); return; }
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    productRuntime.releaseMotionOwnership();
+#endif
     sendJson(202, demoStatusJson());
 }
 void pollDemo() {
@@ -973,6 +1033,7 @@ void pollDemo() {
     product.tick(millis());
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
     productRecovery.poll();
+    productRuntime.poll(millis());
 #endif
     static babytech::display::DisplayStage previous = babytech::display::DisplayStage::Unknown;
     static const char* previousReason = nullptr;
@@ -992,7 +1053,7 @@ void loadProductContext() {
     Preferences preferences;
     if (!preferences.begin("productctx", true)) {
         product.setContextStorageReady(false);
-        Serial.println("[cloud] feeding context NVS unavailable at boot; product start blocked");
+        Serial.println("[product] legacy feeding context NVS unavailable at boot");
         return;
     }
     const String stored = preferences.getString("payload", "");
@@ -1003,14 +1064,14 @@ void loadProductContext() {
         String(document["device_id"] | "") != cloudDeviceId ||
         String(document["type"] | "") != "feeding_context") {
         product.setContextStorageReady(false);
-        Serial.println("[cloud] feeding context NVS invalid at boot; product start blocked");
+        Serial.println("[product] legacy feeding context NVS invalid at boot");
         return;
     }
     if (document["cleared"] == true) {
         uint32_t profileVersion = 0;
         if (!motion::decodeFeedingContextClear(document.as<JsonVariantConst>(), profileVersion)) {
             product.setContextStorageReady(false);
-            Serial.println("[cloud] feeding context tombstone invalid at boot; product start blocked");
+            Serial.println("[product] legacy feeding context tombstone invalid at boot");
             return;
         }
         product.clearContext(profileVersion);
@@ -1019,7 +1080,7 @@ void loadProductContext() {
     motion::FeedingContext context;
     if (!motion::decodeFeedingContext(document.as<JsonVariantConst>(), context)) {
         product.setContextStorageReady(false);
-        Serial.println("[cloud] feeding context profile invalid at boot; product start blocked");
+        Serial.println("[product] legacy feeding context profile invalid at boot");
         return;
     }
     product.applyContext(context);
@@ -1403,12 +1464,18 @@ void handleStop() {
 // is not evidence of that. GET cannot reach this handler.
 void handleControlReset() {
 #if MOTION_HAS_PRODUCT
-    if (product.ownsMotion()) {
+#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
+    const bool pairedProduct = productRuntime.ownsMotion();
+    if (pairedProduct) productRuntime.stopOwned(millis());
+#else
+    const bool pairedProduct = false;
+#endif
+    if (!pairedProduct && product.ownsMotion()) {
         bool wasActive = false;
         product.stop(millis(), wasActive);
     }
     demo.invalidate();
-    if (demo.busy()) demo.stop(millis());
+    if (!pairedProduct && demo.busy()) demo.stop(millis());
 #endif
     // First record what is being cleared: without this the reset itself would
     // erase the only evidence of the state it repaired.
@@ -1850,15 +1917,14 @@ void setup() {
 #endif
 #if MOTION_HAS_PRODUCT
     productSession = &product;
-    product.setExecutionAuthorized(MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY &&
-                                   BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1);
+    product.setExecutionAuthorized(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1);
 #endif
     if (BABYTECH_LOW_WATER_PIN >= 0)
         pinMode(BABYTECH_LOW_WATER_PIN,
                 BABYTECH_LOW_WATER_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
     Serial.printf("[uart] peer=%s TX43/RX44 @115200\n",
         MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY ? "display-v3" :
-        MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN ? "brain-v4-readonly" : "brain-v2");
+        MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN ? "brain-v4" : "brain-v2");
 
     loadScalePins();
     if (!powderScale.begin(makeScaleConfig(), millis())) {
@@ -1902,12 +1968,18 @@ void setup() {
                       unsigned(loaded));
     }
     productBoardLink.setResultQueryHandler(queryProductResult);
+    // V4 admission is verified by the shared runtime Store/context barrier;
+    // legacy namespace health remains relevant only to the old v3 path.
+    product.setContextStorageReady(productState.ready());
     const auto legacyState = ProductEventOutbox::inspectLegacyState();
     if (legacyState != ProductEventOutbox::LegacyState::Empty) {
         product.setEventPending(true);
         if (!productRecovery.motionPending()) product.recoverAfterRestart(millis());
         Serial.println("[product] legacy event requires controlled migration; record unchanged");
     }
+    productBoardLink.setCommandHandler(commandProduct);
+    productBoardLink.setStopHandler(stopProduct);
+    productBoardLink.setCommandReadyHandler(productResultReady);
 #else
     if (productSession) eventOutbox.begin(cloudDeviceId, *productSession);
 #endif

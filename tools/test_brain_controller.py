@@ -45,7 +45,7 @@ def main():
     sources += [root / "shared/ProductBoardLink/src" / name for name in
                 ("BoardDiscovery.cpp", "BoardMaintenance.cpp", "BoardInstall.cpp", "BoardExportTransfer.cpp", "MotionExportSnapshot.cpp",
                  "MotionStateRecord.cpp", "ProductContext.cpp", "ProductDigest.cpp",
-                 "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ReadOnlyBoardLink.cpp",
+                 "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ProductCommandResult.cpp", "ReadOnlyBoardLink.cpp",
                  "BoardLinkArduino.cpp")]
     sources += [stubs / "FakeBoardIo.cpp", root / "main-controller/src/controller_link.cpp",
                 root / "test/test_brain_controller.cpp", root / "tests/fakes/product_crypto/FakeProductCrypto.cpp"]

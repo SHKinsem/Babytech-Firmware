@@ -207,6 +207,158 @@ class MaintenanceWiringTest(unittest.TestCase):
                           "hasActiveMotion()", "demo.stationary()"):
             self.assertNotIn(recursive, body)
 
+    def test_motion_product_runtime_static_entry_wiring_and_d1_d2(self):
+        # Source wiring only: this does not execute main, UART, CAN or Flash.
+        self.assertIn('#include "MotionProductRuntime.h"', self.motion)
+        self.assertEqual(self.motion.count("MotionStateStore productState;"), 1)
+        self.assertRegex(self.motion, r"motion::MotionProductRuntime\s+productRuntime\(\s*"
+                         r"productState,\s*product,\s*demo,\s*productHardware\s*\);")
+        setup = function_body(self.motion, "void setup()")
+        for setter in ("setCommandHandler(commandProduct)", "setStopHandler(stopProduct)"):
+            self.assertIn("productBoardLink." + setter, setup)
+            self.assertLess(setup.index("productRecovery.begin("), setup.index(setter))
+        command = function_body(self.motion, "bool commandProduct(")
+        stop = function_body(self.motion, "bool stopProduct(")
+        self.assertIn("return productRuntime.command(command, nowMs, result);", command)
+        self.assertIn("return productRuntime.stop(request, nowMs);", stop)
+        polling = function_body(self.motion, "void pollDemo()")
+        self.assertLess(polling.index("product.tick("), polling.index("productRecovery.poll()"))
+        self.assertLess(polling.index("productRecovery.poll()"), polling.index("productRuntime.poll("))
+
+        telemetry = function_body(self.motion, "void serviceBrainLink()")
+        v4 = telemetry.split("#elif MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN", 1)[1]
+        v4 = v4.split("#else", 1)[0]
+        self.assertIn("productRuntime.project(status, productBoardLink.link().connected(", v4)
+        self.assertLess(v4.index("productRecovery.project("), v4.index("productRuntime.project("))
+        self.assertLess(v4.index("productRuntime.project("), v4.index("productBoardLink.poll("))
+        self.assertRegex(v4, r"productBoardLink\.poll\([^;]+\);\s*"
+                         r"if\s*\(productBoardLink\.takeFailure\(\)\s*!=\s*"
+                         r"babytech::v4::LinkFailure::None\s*\|\|\s*"
+                         r"!productBoardLink\.link\(\)\.healthy\(\)\)\s*"
+                         r"productRuntime\.linkLost\(millis\(\)\);")
+        cloud = function_body(self.motion, "void serviceCloud()")
+        v4_cloud = cloud.split("#else", 1)[0]
+        v4_cloud = re.sub(r"//[^\n]*", "", v4_cloud)
+        self.assertRegex(v4_cloud, r"^\s*#if MOTION_UART_PEER == "
+                         r"MOTION_UART_PEER_PRODUCT_BRAIN\s+return;\s*$")
+        self.assertIn("productSession->networkState(wifiConnected, millis())", cloud.split("#else", 1)[1])
+        self.assertRegex(self.motion, r"#ifndef BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW\s+"
+                         r"#define BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW 0\s+#endif")
+        self.assertIn("product.setExecutionAuthorized(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1)", setup)
+
+        hardware = function_body(self.motion, "class ProductHardware :")
+        unavailable = function_body(hardware, "const char* unavailable() const override")
+        for forbidden in ("product.ownsMotion()", "demo.busy()", "demoBusy()", "cloud.", "WiFi.status()"):
+            self.assertNotIn(forbidden, unavailable)
+        stationary = function_body(hardware, "bool stationary() const override")
+        self.assertRegex(stationary, r"const bool flowIdle\s*=\s*!demo\.busy\(\)\s*\|\|\s*"
+                         r"demo\.stage\(\)\s*==\s*babytech::display::DisplayStage::Complete;")
+        self.assertRegex(stationary, r"return\s+canStarted\s*&&\s*!endpoint\.busy\(\)\s*&&\s*"
+                         r"!motor\.operationBusy\(\)\s*&&\s*!queue\.active\(\)\s*&&\s*flowIdle\s*&&\s*"
+                         r"\(demo\.stationary\(\)\s*\|\|\s*demoExecutor\.stopConfirmed\(\)\);\s*$")
+        for forbidden in ("product.ownsMotion()", "product.cleaning()", "healthy()", "motor.ready()",
+                          "demo.referenceValid()", "controlBusy()", "hasActiveMotion()"):
+            self.assertNotIn(forbidden, stationary)
+
+    def test_static_runtime_reply_waits_for_durable_busy_decision(self):
+        # Source wiring only; no moving hardware or Flash timing is exercised.
+        setup = function_body(self.motion, "void setup()")
+        ready = "productBoardLink.setCommandReadyHandler(productResultReady)"
+        self.assertIn(ready, setup)
+        self.assertLess(setup.index("productRecovery.begin("), setup.index(ready))
+        self.assertLess(setup.index("setCommandHandler(commandProduct)"), setup.index(ready))
+        callback = function_body(self.motion, "bool productResultReady(")
+        self.assertEqual(callback.strip(), "return productRuntime.resultReady(result);")
+        link = (ROOT / "shared/ProductBoardLink/src/ReadOnlyBoardLink.cpp").read_text()
+        polling = function_body(link, "void ReadOnlyLink::poll(")
+        self.assertRegex(polling, r"if\s*\(\(!commandReadyHandler_\s*\|\|\s*"
+                         r"commandReadyHandler_\(commandResult_\)\)\s*&&\s*"
+                         r"encodeCommandResult\(commandResult_,\s*scratch_\)\s*&&\s*queue\(scratch_\)\)")
+        runtime = (ROOT / "device-controller/src/MotionProductRuntime.cpp").read_text()
+        result = function_body(runtime, "bool MotionProductRuntime::resultReady(")
+        self.assertIn("if (deferred_) return false;", result)
+        self.assertLess(result.index("if (deferred_)"), result.index("result = deferredResult_"))
+        deferred = function_body(function_body(runtime, "void MotionProductRuntime::poll("),
+                                 "if (deferred_ && hardware_.stationary())")
+        self.assertIn("store_.recordDecision(deferredRequest_, false, deferredResult_.reason)", deferred)
+        self.assertLess(deferred.index("store_.recordDecision("), deferred.index("deferred_ = false"))
+
+    def test_static_http_stop_prioritizes_runtime_interruption(self):
+        # The Interrupted mapping is inspected, not a dynamic HTTP/Flash proof.
+        owner = function_body(self.motion, "StopOwnershipResult stopDemoOwnership()")
+        v4 = owner.split("#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN", 1)[1]
+        v4 = v4.split("#endif", 1)[0]
+        self.assertRegex(v4, r"if\s*\(productRuntime\.ownsMotion\(\)\)\s*"
+                         r"return productRuntime\.stopOwned\(millis\(\)\)\s*\?\s*"
+                         r"StopOwnershipResult::Requested\s*:\s*StopOwnershipResult::Unconfirmed;")
+        self.assertLess(owner.index("productRuntime.stopOwned("), owner.index("product.stop("))
+        self.assertLess(owner.index("productRuntime.stopOwned("), owner.index("demo.stop("))
+        self.assertIn("stopDemoOwnership()", function_body(self.motion, "bool stopDemoIfOwned()"))
+        for handler, mutation in (("handleStop", "motor.stop("),
+                                  ("handleStopAll", "queue.cancel("),
+                                  ("handleQueueCancel", "queue.cancel(")):
+            with self.subTest(handler=handler):
+                body = function_body(self.motion, "void " + handler + "()")
+                self.assertIn("if (stopDemoIfOwned()) return;", body)
+                self.assertLess(body.index("stopDemoIfOwned()"), body.index(mutation))
+        runtime = (ROOT / "device-controller/src/MotionProductRuntime.cpp").read_text()
+        stopping = function_body(runtime, "bool MotionProductRuntime::stopOwned(")
+        self.assertLess(stopping.index("stopped_ = true"), stopping.index("product_.stop("))
+        polling = function_body(runtime, "void MotionProductRuntime::poll(")
+        self.assertIn("stopped_ ? MotionOutcome::Interrupted : MotionOutcome::Succeeded", polling)
+        self.assertIn("store_.finishOperation(execution_, outcome, true)", polling)
+
+    def test_static_debug_takeover_releases_old_product_motion_identity(self):
+        # Guard/release order only; no old Stop or new debug action is executed.
+        manual = function_body(self.motion, "bool demoManualMutation()")
+        release = "productRuntime.releaseMotionOwnership();"
+        self.assertLess(manual.index("if (demoBusy())"), manual.index(release))
+        self.assertLess(manual.index(release), manual.index("demo.invalidate()"))
+        self.assertIn("#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\n"
+                      "    " + release + "\n#endif", manual)
+        for handler, guard, mutation in (
+            ("handleEnable", "if (enabling && !demoManualMutation()) return;", "motor.enable("),
+            ("handleEnableAll", "if (enabled && !demoManualMutation()) return;", "motor.broadcastEnable("),
+            ("handleMove", "if (!demoManualMutation()) return;", "motor.move("),
+            ("handleCommand", "if (!stopLike && kind != motion::CommandKind::Read && !demoManualMutation()) return;",
+             "motor.command("),
+            ("handleQueueStart", "if (!demoManualMutation()) return;", "queue.start("),
+            ("handleLimits", "if (!demoManualMutation()) return;", "motor.setDebugLimits("),
+            ("handleMotorDistance", "if (!demoManualMutation()) return;", "clearRotationMm("),
+        ):
+            with self.subTest(handler=handler):
+                body = function_body(self.motion, "void " + handler + "()")
+                self.assertIn(guard, body)
+                # The raw-command invalid/read branch is not a mechanical takeover.
+                self.assertLess(body.index(guard), body.rindex(mutation))
+        action = function_body(self.motion, "void handleDemoAction()")
+        self.assertIn("if (demoBusy() ||", action)
+        for launch in ("accepted = demo.initialize(", "accepted = demo.start(", "accepted = demo.single("):
+            self.assertLess(action.index(launch), action.index("if (!accepted)"))
+        self.assertLess(action.index("if (!accepted)"), action.index(release))
+        self.assertLess(action.index(release), action.index("sendJson(202,"))
+
+    def test_static_control_reset_preserves_runtime_interruption_before_clear(self):
+        # Source branch/order checks, not dynamic Stop-window or Flash confirmation.
+        body = function_body(self.motion, "void handleControlReset()")
+        paired = body.split("#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN", 1)[1]
+        v4, legacy = paired.split("#else", 1)
+        self.assertRegex(v4, r"^\s*const bool pairedProduct\s*=\s*productRuntime\.ownsMotion\(\);\s*"
+                         r"if\s*\(pairedProduct\)\s*productRuntime\.stopOwned\(millis\(\)\);\s*$")
+        self.assertRegex(legacy.split("#endif", 1)[0],
+                         r"^\s*const bool pairedProduct\s*=\s*false;\s*$")
+        product_stop = function_body(body, "if (!pairedProduct && product.ownsMotion())")
+        self.assertIn("product.stop(millis(), wasActive);", product_stop)
+        self.assertRegex(body, r"if\s*\(!pairedProduct\s*&&\s*demo\.busy\(\)\)\s*demo\.stop\(millis\(\)\);")
+        self.assertEqual(body.count("productRuntime.stopOwned("), 1)
+        self.assertEqual(body.count("product.stop("), 1)
+        self.assertEqual(body.count("demo.stop("), 1)
+        ordered = ("productRuntime.ownsMotion()", "productRuntime.stopOwned(",
+                   "if (!pairedProduct && product.ownsMotion())", "demo.invalidate()",
+                   "if (!pairedProduct && demo.busy())", "queue.clearControlState()")
+        for before, after in zip(ordered, ordered[1:]):
+            self.assertLess(body.index(before), body.index(after))
+
     def test_boot_inventory_precedes_executable_parameter_validation(self):
         body = function_body(self.motion, "bool applyDemoJson(")
         self.assertLess(body.index("parseDemoConfig("), body.index("configureStopAxes("))

@@ -40,6 +40,12 @@ bool DemoFlowController::begin(int index, uint32_t now) {
     reason_ = index < 0 ? "initializing" : "running";
     return true;
 }
+bool DemoFlowController::canInitialize() const {
+    if (busy() || !config_.configured || !executor_.available()) return false;
+    // Error/unhealthy states enter reset; their feedback is checked afterwards.
+    if (stage_ == DisplayStage::Error || !executor_.healthy()) return true;
+    return !reference_ || settled(true);
+}
 bool DemoFlowController::initialize(uint32_t now) {
     if (busy() || !config_.configured || !executor_.available()) return false;
     if (stage_ == DisplayStage::Error || !executor_.healthy()) {
