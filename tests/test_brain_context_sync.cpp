@@ -672,6 +672,14 @@ struct Integration {
             brain.receiveFrame(frame, now); offset += frame.length;
         }
     }
+    void injectMotionFrame(const v4::Frame& frame, const std::function<void()>& beforeCrc) {
+        std::array<uint8_t, v4::kMaxFrame> bytes{};
+        const auto length = v4::encode(frame, bytes.data(), bytes.size()); CHECK(length);
+        // Exercise the real parser, including its commit boundary, not receiveFrame.
+        for (size_t i = 0; i + 1 < length; ++i) motionLink.receive(bytes[i], now);
+        beforeCrc();
+        motionLink.receive(bytes[length - 1], now);
+    }
     void fullWire(const ProductContext& expected) const {
         MotionState persisted;
         const auto& bytes = nvs::io.disk.at("productstate").at("record").bytes;
@@ -773,6 +781,208 @@ void preemption() {
                 CHECK(!rig.store->state().pending && rig.store->state().localSequence == sequence);
                 std::printf("  preemption phase=%u command=%u fragments=%u completion=%u ms\n",
                             phase, unsigned(operation), fragments, uint32_t(rig.now - yieldedAt));
+            }, true);
+}
+
+void preemptionRejections() {
+    const char* cases[] = {"old-id", "first-offset-1", "first-offset-fragment",
+                          "first-offset-last", "old-sender-boot", "future-sender-boot",
+                          "old-receiver-boot", "future-receiver-boot"};
+    for (unsigned mutation = 0; mutation < sizeof(cases) / sizeof(cases[0]); ++mutation)
+        for (auto operation : {ProductCommand::Initialize, ProductCommand::Clean})
+            scenario("real unfinished Context survives Command / " + std::string(cases[mutation]) + "/" +
+                     std::to_string(unsigned(operation)), [=] {
+                constexpr uint64_t sequence = v4::kMaxSequence - 1;
+                Integration rig(false, operation == ProductCommand::Clean, sequence - 1);
+                const auto c = context(11, false, true);
+                const auto r = request(c, sequence, operation);
+                CHECK(rig.store->reserveLocal(r) == BrainWrite::Stored);
+                CHECK(rig.sync->receive(c)); rig.sync->poll(rig.now);
+                const auto contextId = rig.brain.contextResponse().replyTo;
+                CHECK(contextId > 1);
+                for (unsigned i = 0; i < 800 && !rig.toMotion.fragments(v4::Kind::Context); ++i) rig.step(false);
+                CHECK(rig.toMotion.fragments(v4::Kind::Context) == 1 && delivered.empty());
+                CHECK(rig.motionLink.installAssembler().active());
+                const auto beganAt = rig.now;
+                const auto brainBefore = rig.store->state();
+                const auto motionBefore = rig.device->store.state();
+                const auto disk = nvs::io.disk; const auto calls = nvs::io.calls.size();
+                const auto sets = nvs::count(Op::Set), commits = nvs::count(Op::Commit);
+                const auto projected = rig.device->product.context();
+                const auto unchanged = [&] {
+                    CHECK(rig.brain.contextSendState() == ContextSendState::Pending);
+                    CHECK(rig.brain.commandSendState() == CommandSendState::Idle);
+                    CHECK(delivered.empty() && !stops); rig.noActions();
+                    CHECK(!rig.device->runtime.active() && !rig.device->product.ownsMotion());
+                    CHECK(nvs::io.calls.size() == calls && nvs::io.disk == disk);
+                    CHECK(sameBrainState(rig.store->state(), brainBefore));
+                    CHECK(sameMotionState(rig.device->store.state(), motionBefore));
+                    CHECK(rig.device->product.context().profileVersion == projected.profileVersion &&
+                          rig.device->product.context().babyId == projected.babyId);
+                    CHECK(rig.motionLink.installAssembler().active());
+                };
+                CommandMessage command; command.request = r; command.remainingTtlMs = 5000;
+                v4::Message illegal; CHECK(encodeCommand(command, illegal));
+                CHECK(illegal.length > v4::kMaxFragment);
+                illegal.senderBoot = rig.brainBoot; illegal.receiverBoot = rig.motionBoot;
+                illegal.messageId = mutation == 0 ? contextId - 1 : contextId + 1;
+                size_t offset = 0;
+                if (mutation == 1) offset = 1;
+                if (mutation == 2) offset = v4::kMaxFragment;
+                if (mutation == 3) offset = illegal.length - 1;
+                if (mutation == 4) --illegal.senderBoot;
+                if (mutation == 5) ++illegal.senderBoot;
+                if (mutation == 6) --illegal.receiverBoot;
+                if (mutation == 7) ++illegal.receiverBoot;
+                while (offset < illegal.length) {
+                    v4::Frame frame; CHECK(v4::fragment(illegal, offset, frame));
+                    rig.injectMotionFrame(frame, unchanged); unchanged(); offset += frame.length;
+                }
+                // Continue the original sender, without yielding, a retry, or RX timeout.
+                for (unsigned i = 0; i < 800 && rig.brain.contextSendState() == ContextSendState::Pending; ++i)
+                    rig.step(false);
+                CHECK(uint32_t(rig.now - beganAt) < v4::kMessageTimeoutMs);
+                CHECK(!rig.motionLink.installAssembler().active());
+                CHECK(rig.brain.contextSendState() == ContextSendState::Complete &&
+                      rig.brain.contextResponse().status == ContextStatus::Stored);
+                CHECK(delivered.size() == 1 && sameProductContext(delivered[0], c));
+                CHECK(rig.toMotion.count(v4::Kind::Context) == 1 && rig.toBrain.count(v4::Kind::ContextResult) == 1);
+                rig.sync->poll(rig.now); CHECK(rig.sync->canPrepare());
+                rig.fullWire(c); rig.noActions(); CHECK(!stops);
+                CHECK(sameBrainState(rig.store->state(), brainBefore) && nvs::io.disk.at("brainstate") == disk.at("brainstate"));
+                auto expected = motionBefore; CHECK(makeMotionContextBarrier(c, expected.context));
+                CHECK(sameMotionState(rig.device->store.state(), expected));
+                CHECK(nvs::count(Op::Set) == sets + 1 && nvs::count(Op::Commit) == commits + 1);
+            }, true);
+
+    for (auto operation : {ProductCommand::Initialize, ProductCommand::Clean})
+        scenario("real equal-ID kind collision aborts Context; timeout retry recovers / " +
+                 std::to_string(unsigned(operation)), [=] {
+            constexpr uint64_t sequence = v4::kMaxSequence - 1;
+            Integration rig(false, operation == ProductCommand::Clean, sequence - 1);
+            const auto c = context(11, false, true); const auto r = request(c, sequence, operation);
+            CHECK(rig.store->reserveLocal(r) == BrainWrite::Stored);
+            CHECK(rig.sync->receive(c)); rig.sync->poll(rig.now);
+            const auto sentAt = rig.now, contextId = rig.brain.contextResponse().replyTo;
+            for (unsigned i = 0; i < 800 && !rig.toMotion.fragments(v4::Kind::Context); ++i) rig.step(false);
+            CHECK(rig.toMotion.fragments(v4::Kind::Context) == 1 && rig.motionLink.installAssembler().active());
+            const auto brainBefore = rig.store->state(); const auto motionBefore = rig.device->store.state();
+            const auto disk = nvs::io.disk; const auto calls = nvs::io.calls.size();
+            const auto sets = nvs::count(Op::Set), commits = nvs::count(Op::Commit);
+            const auto untouched = [&] {
+                CHECK(delivered.empty() && !stops && !rig.sync->canPrepare()); rig.noActions();
+                CHECK(!rig.device->runtime.active() && !rig.device->product.ownsMotion());
+                CHECK(sameBrainState(rig.store->state(), brainBefore));
+                CHECK(sameMotionState(rig.device->store.state(), motionBefore));
+                CHECK(nvs::io.calls.size() == calls && nvs::io.disk == disk);
+            };
+            CommandMessage command; command.request = r; command.remainingTtlMs = 5000;
+            v4::Message collision; CHECK(encodeCommand(command, collision));
+            CHECK(collision.length > v4::kMaxFragment);
+            collision.senderBoot = rig.brainBoot; collision.receiverBoot = rig.motionBoot; collision.messageId = contextId;
+            size_t offset = 0;
+            while (offset < collision.length) {
+                v4::Frame frame; CHECK(v4::fragment(collision, offset, frame));
+                rig.injectMotionFrame(frame, [&] {
+                    untouched(); CHECK(rig.motionLink.installAssembler().active() == (offset == 0));
+                });
+                // Same key but a different kind is malformed-message Invalid,
+                // not a newer Command preemption. Its tails cannot start a command.
+                CHECK(!rig.motionLink.installAssembler().active()); untouched(); offset += frame.length;
+            }
+            for (unsigned i = 0; i < 800 && !rig.toMotion.count(v4::Kind::Context); ++i) {
+                rig.step(false); untouched(); CHECK(!rig.motionLink.installAssembler().active());
+            }
+            CHECK(rig.toMotion.count(v4::Kind::Context) == 1 && rig.toBrain.count(v4::Kind::ContextResult) == 0);
+            CHECK(uint32_t(rig.now - sentAt) < v4::kMessageTimeoutMs &&
+                  rig.brain.contextSendState() == ContextSendState::Pending);
+            for (unsigned i = 0; i < 1200 && rig.brain.contextSendState() == ContextSendState::Pending; ++i) {
+                rig.step(false); untouched(); CHECK(!rig.motionLink.installAssembler().active());
+            }
+            CHECK(rig.brain.contextSendState() == ContextSendState::TimedOut &&
+                  uint32_t(rig.now - sentAt) >= v4::kMessageTimeoutMs);
+            rig.sync->poll(rig.now); rig.run(1000); untouched();
+            CHECK(rig.brain.contextSendState() == ContextSendState::TimedOut && rig.toMotion.count(v4::Kind::Context) == 1);
+            rig.await(ContextStatus::Stored); rig.fullWire(c); rig.noActions(); CHECK(!stops);
+            CHECK(rig.brain.contextResponse().replyTo > contextId && !rig.motionLink.installAssembler().active());
+            CHECK(delivered.size() == 1 && sameProductContext(delivered[0], c));
+            CHECK(rig.toMotion.count(v4::Kind::Context) == 2 && rig.toBrain.count(v4::Kind::ContextResult) == 1);
+            CHECK(sameBrainState(rig.store->state(), brainBefore) && nvs::io.disk.at("brainstate") == disk.at("brainstate"));
+            auto expected = motionBefore; CHECK(makeMotionContextBarrier(c, expected.context));
+            CHECK(sameMotionState(rig.device->store.state(), expected));
+            CHECK(nvs::count(Op::Set) == sets + 1 && nvs::count(Op::Commit) == commits + 1);
+        }, true);
+
+    for (bool continuation : {false, true})
+        for (auto operation : {ProductCommand::Initialize, ProductCommand::Clean})
+            scenario("real existing Command RX survives newer Command " + std::string(continuation ? "tail" : "head") +
+                     "/" + std::to_string(unsigned(operation)), [=] {
+                constexpr uint64_t sequence = v4::kMaxSequence - 1;
+                Integration rig(false, operation == ProductCommand::Clean, sequence - 1); rig.confirm(); rig.available();
+                // A completed high-ID Context leaves its marker behind. Starting
+                // a lower-ID Command keeps that marker, exercising kind-specific cancellation.
+                constexpr uint32_t contextId = 900;
+                v4::Message prior; CHECK(encodeContextMessage(context(), prior));
+                prior.senderBoot = rig.brainBoot; prior.receiverBoot = rig.motionBoot; prior.messageId = contextId;
+                const auto setupDisk = nvs::io.disk;
+                const auto setupSets = nvs::count(Op::Set), setupCommits = nvs::count(Op::Commit);
+                const auto replies = rig.toBrain.count(v4::Kind::ContextResult);
+                size_t offset = 0;
+                while (offset < prior.length) {
+                    v4::Frame frame; CHECK(v4::fragment(prior, offset, frame));
+                    rig.injectMotionFrame(frame, [] {}); offset += frame.length;
+                }
+                CHECK(!rig.motionLink.installAssembler().active() && delivered.size() == 2);
+                for (unsigned i = 0; i < 300 && rig.toBrain.count(v4::Kind::ContextResult) == replies; ++i) rig.step(false);
+                CHECK(rig.toBrain.count(v4::Kind::ContextResult) == replies + 1);
+                CHECK(nvs::io.disk == setupDisk && nvs::count(Op::Set) == setupSets &&
+                      nvs::count(Op::Commit) == setupCommits); rig.noActions();
+                const auto r = request(context(), sequence, operation);
+                CHECK(rig.store->reserveLocal(r) == BrainWrite::Stored);
+                CommandMessage command; command.request = r; command.remainingTtlMs = 5000;
+                CHECK(rig.brain.requestCommand(command, rig.now));
+                for (unsigned i = 0; i < 100 && !rig.toMotion.fragments(v4::Kind::Command); ++i) rig.step(false);
+                CHECK(rig.toMotion.fragments(v4::Kind::Command) == 1 && rig.motionLink.installAssembler().active());
+                const auto& first = rig.toMotion.frames.back();
+                CHECK(first.kind == v4::Kind::Command && !first.offset && first.messageId < contextId && first.total > first.length);
+                const auto beganAt = rig.now;
+                const auto brainBefore = rig.store->state(); const auto motionBefore = rig.device->store.state();
+                const auto disk = nvs::io.disk; const auto calls = nvs::io.calls.size();
+                const auto sets = nvs::count(Op::Set), commits = nvs::count(Op::Commit);
+                const auto unchanged = [&] {
+                    CHECK(rig.motionLink.installAssembler().active() && commands == 0 && stops == 0);
+                    CHECK(rig.brain.commandSendState() == CommandSendState::Pending);
+                    CHECK(!rig.device->executor.starts && !rig.device->executor.stops && !rig.device->hardware.generated);
+                    CHECK(!rig.device->runtime.active() && !rig.device->product.ownsMotion());
+                    CHECK(delivered.size() == 2 && nvs::io.calls.size() == calls && nvs::io.disk == disk);
+                    CHECK(sameBrainState(rig.store->state(), brainBefore));
+                    CHECK(sameMotionState(rig.device->store.state(), motionBefore));
+                };
+                auto intruder = command; intruder.request = request(context(), sequence - 1, operation);
+                v4::Message illegal; CHECK(encodeCommand(intruder, illegal));
+                CHECK(illegal.length > v4::kMaxFragment);
+                illegal.senderBoot = rig.brainBoot; illegal.receiverBoot = rig.motionBoot; illegal.messageId = contextId + 1;
+                offset = continuation ? v4::kMaxFragment : 0;
+                while (offset < illegal.length) {
+                    v4::Frame frame; CHECK(v4::fragment(illegal, offset, frame));
+                    rig.injectMotionFrame(frame, unchanged); unchanged(); offset += frame.length;
+                }
+                for (unsigned i = 0; i < 500 && rig.brain.commandSendState() == CommandSendState::Pending; ++i) rig.step(false);
+                CHECK(uint32_t(rig.now - beganAt) < v4::kMessageTimeoutMs);
+                CHECK(!rig.motionLink.installAssembler().active() && rig.brain.commandSendState() == CommandSendState::Complete);
+                const auto& reply = rig.brain.commandResponse();
+                CHECK(reply.accepted && reply.source == r.source && reply.sequence == r.sequence &&
+                      !std::strcmp(reply.commandId, r.commandId) && !std::strcmp(reply.reason, "accepted"));
+                CHECK(commands == 1 && !stops && delivered.size() == 2 && rig.device->hardware.generated == 1);
+                CHECK(rig.toMotion.count(v4::Kind::Command) == 1 && rig.toBrain.count(v4::Kind::CommandResult) == 1);
+                CHECK(rig.device->store.state().localSequence == sequence && rig.device->store.state().localResult.accepted);
+                CHECK(sameProductRequest(rig.device->store.state().localResult.request, r));
+                CHECK(sameMotionContextBarrier(rig.device->store.state().context, motionBefore.context));
+                CHECK(sameBrainState(rig.store->state(), brainBefore) && nvs::io.disk.at("brainstate") == disk.at("brainstate"));
+                CHECK(nvs::count(Op::Set) == sets + 1 && nvs::count(Op::Commit) == commits + 1);
+                if (operation == ProductCommand::Initialize)
+                    CHECK(rig.device->executor.starts == 1 && !rig.device->executor.stops);
+                else CHECK(rig.device->product.ownsMotion() && !rig.device->executor.starts && rig.device->executor.stops == 1);
             }, true);
 }
 
@@ -1036,7 +1246,8 @@ int main(int argc, char** argv) {
     const std::string selected = argc == 2 ? argv[1] : "all";
     const struct { const char* name; void (*run)(); } groups[] = {
         {"cache", cacheTests}, {"conflicts", conflicts}, {"replies", replies}, {"scheduling", scheduling},
-        {"storage", storage}, {"production", production}, {"preemption", preemption}};
+        {"storage", storage}, {"production", production}, {"preemption", preemption},
+        {"preemption-rejections", preemptionRejections}};
     bool found = selected == "all";
     for (const auto& group : groups) if (selected == "all" || selected == group.name) { found = true; group.run(); }
     if (!found || argc > 2) { std::fprintf(stderr, "Unknown test group\n"); return 2; }
