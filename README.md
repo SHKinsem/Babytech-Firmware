@@ -201,6 +201,12 @@ Brain v4现从既有MQTT配置槽解析完整档案/墓碑，回调只暂存最�
 
 `python3 tools/test_product_event_messages.py --sanitize`测试生产codec；父仓库`python3 Test/brain_event_contract_check.py --sanitize`将生产编码事件交给隔离Cloud数据库，再把实际Cloud回执交给固件解析器。无真实MQTT/UART、Flash或电机，不代表板间交付。终态UART收发、Brain MQTT转发、Motion匹配回执清队列和main接线尚未完成，公开can_start仍false；默认v3及旧单槽事件路径不变。
 
+### Brain-only 仿真组件（尚未接入固件入口）
+
+`main-controller/src/brain_simulation.h`只模拟一个整体计时，默认关闭；冻结原宝宝、配方、事件身份和终态uptime，Stop生成失败而非成功。四条RAM结果容量包含当前动作预留，未上传的旧结果不阻止下一瓶，只有满容量才限制新请求。真实Cloud stored回执经解码并匹配后才移除对应结果；没有UART、运动或NVS接口，RAM结果不承诺掉电补传。
+
+`brain_simulation_console.h`是纯`SIM STATUS/ON/OFF`解析器，尚未挂入main/USB/网络，所以这些命令目前不能作为设备操作步骤。`tools/test_brain_simulation.py --sanitize`验证纯组件，不是实际App/Cloud闭环或实板验收。实际请求session/TTL及原身份由接线owner核验；模式切换不取消真实未知请求。模拟标识的跨端补充已确认但未接线，默认真机路径不变。
+
 ### Brain USB网络配置
 
 仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。
