@@ -513,6 +513,359 @@ struct HandlerCapture {
     void install() { network->setProductHandlers(command, stopCommand, this); }
 };
 
+using babytech::boardlink::ProductContext;
+
+ProductContext fullContext(bool maximum = false) {
+    ProductContext value;
+    std::strcpy(value.deviceId, kId);
+    value.profileVersion = 2147483647;
+    std::strcpy(value.babyId, "full-baby-identity");
+    std::strcpy(value.babyName, "Full baby name, not a display label");
+    std::strcpy(value.formulaBrand, "Full formula brand, not a display label");
+    if (maximum) {
+        // Maximum byte lengths with complete 3-/4-byte code points.
+        for (size_t i = 0; i < 96; i += 3) std::memcpy(value.babyId + i, "\xE5\xAE\x9D", 3);
+        value.babyId[96] = 0;
+        for (size_t i = 0; i < 320; i += 4) std::memcpy(value.babyName + i, "\xF0\x9F\x98\x80", 4);
+        value.babyName[320] = 0;
+        for (size_t i = 0; i < 480; i += 4) std::memcpy(value.formulaBrand + i, "\xF0\x9F\x8D\xBC", 4);
+        value.formulaBrand[480] = 0;
+    }
+    value.waterMl = 180;
+    value.temperatureC = 45;
+    value.powderGPer100Ml = 25.5000019f;
+    return value;
+}
+
+ProductContext tombstone() {
+    ProductContext value;
+    std::strcpy(value.deviceId, kId);
+    value.profileVersion = 72;
+    value.cleared = true;
+    return value;
+}
+
+std::string contextJson(const ProductContext& value) {
+    // Build existing Cloud JSON, including metadata the semantic decoder ignores.
+    DynamicJsonDocument doc(4096);
+    doc["type"] = "feeding_context";
+    doc["device_id"] = value.deviceId;
+    doc["profile_version"] = value.profileVersion;
+    doc["cleared"] = value.cleared;
+    doc["updated_at"] = "2026-10-07T12:00:00+08:00";
+    char powder[32]{};
+    if (!value.cleared) {
+        doc["baby_id"] = value.babyId;
+        doc["baby_name"] = value.babyName;
+        doc["formula_brand"] = value.formulaBrand;
+        doc["water_ml"] = value.waterMl;
+        doc["temp"] = value.temperatureC;
+        std::snprintf(powder, sizeof(powder), "%.9g", double(value.powderGPer100Ml));
+        doc["powder_g_per_100ml"] = serialized(static_cast<const char*>(powder));
+    }
+    std::string json;
+    serializeJson(doc, json);
+    return json;
+}
+
+struct ContextCapture {
+    std::vector<ProductContext> values;
+    std::vector<uint32_t> generations;
+    std::vector<uint32_t> times;
+    const ProductContext* scratch = nullptr;
+    std::vector<std::string>* order = nullptr;
+    static void context(void* owner, const ProductContext& value, uint32_t generation, uint32_t now) {
+        auto& self = *static_cast<ContextCapture*>(owner);
+        check(!fake::io.inWorker, "context callback escaped UI loop");
+        check(now == millis() && generation, "context callback lost poll clock/generation");
+        check(babytech::boardlink::validProductContext(value), "context callback received invalid data");
+        // Compare addresses only while the new reference is live, never retain
+        // or dereference the previous callback's borrowed data.
+        check(!self.scratch || self.scratch == &value, "context callback did not reuse member scratch");
+        self.scratch = &value;
+        self.values.push_back(value);
+        self.generations.push_back(generation);
+        self.times.push_back(now);
+        if (self.order) self.order->push_back("context");
+    }
+    void install(BrainNetwork& network) { network.setContextHandler(context, this); }
+    void matches(size_t index, const ProductContext& expected) const {
+        check(index < values.size() && babytech::boardlink::sameProductContext(values[index], expected),
+              "context callback truncated/changed full semantic fields");
+    }
+};
+
+void contextDelivery(const std::string& mode) {
+    BrainNetwork network;
+    ContextCapture capture;
+    if (mode != "readonly") capture.install(network);
+    begin(network);
+    const ProductContext expected = mode == "tombstone" ? tombstone() : fullContext(mode == "utf8-max");
+    const auto original = fake::io.preferences;
+    const size_t allocations = fake::io.allocationCalls;
+    const uint32_t opened = millis();
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) {
+            poll(network);
+            // Deliver via the real worker's MQTT callback before the next UI poll.
+            fake::io.incoming.push_back({kPrefix + "config", contextJson(expected)});
+        } else if (tick == 2) {
+            check(capture.values.empty(), "MQTT receive invoked context handler directly");
+            if (mode == "session-expired") fake::io.now = opened + babytech::cloud::kSessionLifetimeMs;
+            if (mode == "ttl-expired") fake::io.now += 5001u;
+            const unsigned sends = fake::io.queueSendCalls;
+            poll(network);
+            check(fake::io.queueSendCalls == sends, "context enqueued a fabricated ACK/publication");
+            if (mode == "readonly") {
+                receive("config", contextJson(tombstone()));
+                poll(network);
+                check(capture.values.empty(), "missing context handler mutated state");
+                capture.install(network);
+                poll(network);
+                check(capture.values.empty(), "registration replayed previously consumed context");
+                receive("config", contextJson(expected));
+                poll(network);
+            }
+            check(capture.values.size() == 1, "valid context not delivered exactly once");
+            capture.matches(0, expected);
+            poll(network);
+            check(capture.values.size() == 1, "context was replayed on next poll");
+            check(fake::io.allocationCalls == allocations, "context added RTOS queue/task/lock");
+            check(fake::io.preferences == original && ackPackets().empty(), "context wrote NVS/fabricated ACK");
+            if (mode == "offline") {
+                fake::io.clients.front()->dropConnection();
+                fake::io.connectOk = false;
+                return;
+            }
+            workerOnly();
+            stop();
+        } else {
+            check(mode == "offline" && !network.connected(), "offline context fixture did not disconnect");
+            poll(network);
+            check(capture.values.size() == 1 && ackPackets().empty(), "disconnect replayed/ACKed context");
+            capture.matches(0, expected);
+            workerOnly();
+            stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void contextWireBoundary() {
+    BrainNetwork network;
+    ContextCapture capture;
+    capture.install(network);
+    begin(network);
+    const auto expected = fullContext(true);
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            const auto base = contextJson(expected);
+            size_t delivered = 0;
+            for (size_t size : {size_t(1535), size_t(1536), size_t(2047), size_t(2048)}) {
+                check(base.size() < size, "context boundary fixture too large");
+                receive("config", std::string(size - base.size(), ' ') + base);
+                poll(network);
+                if (size < 2048) ++delivered;
+                check(capture.values.size() == delivered, "context wire boundary accepted/rejected wrong size");
+            }
+            check(capture.values.size() == 3, "context ingress lost exact 2047-byte boundary");
+            for (size_t i = 0; i < 3; ++i) capture.matches(i, expected);
+            check(ackPackets().empty(), "context boundary generated ACK");
+            stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void contextRejected(const std::string& mode) {
+    BrainNetwork network;
+    ContextCapture capture;
+    capture.install(network);
+    begin(network);
+    const auto expected = fullContext();
+    const auto base = contextJson(expected);
+    DynamicJsonDocument doc(4096);
+    check(!deserializeJson(doc, base), "bad context fixture");
+    std::string route = kPrefix + "config";
+    std::string bad;
+    if (mode == "device") doc["device_id"] = "other";
+    else if (mode == "topic") route = "devices/other/config";
+    else if (mode == "nested-topic") route = kPrefix + "nested/config";
+    else if (mode == "command-topic") route = kPrefix + "command";
+    else if (mode == "extra") doc["extra"] = true;
+    else if (mode == "missing") doc.remove("baby_id");
+    else if (mode == "type") doc["water_ml"] = "180";
+    else if (mode == "range") doc["powder_g_per_100ml"] = 51;
+    else if (mode == "version") doc["profile_version"] = 0;
+    else if (mode == "cleared") doc["cleared"] = "true";
+    else if (mode == "tombstone-fields") doc["cleared"] = true;
+    else if (mode == "name-long") doc["baby_name"] = std::string(321, 'n');
+    else if (mode == "brand-long") doc["formula_brand"] = std::string(481, 'b');
+    else if (mode == "utf8") doc["baby_name"] = std::string("\xF0\x9F\x98", 3);
+    else if (mode == "metadata") doc["updated_at"] = 123;
+    else if (mode == "duplicate") bad = base.substr(0, base.size() - 1) + ",\"water_ml\":200}";
+    else if (mode == "json") bad = "{bad";
+    else if (mode == "trailing") bad = base + "{}";
+    else if (mode == "nul") bad = base + std::string("\0hidden", 7);
+    else if (mode == "escaped-nul") doc["baby_name"] = std::string("a\0b", 3);
+    else throw std::runtime_error("unknown context rejection fixture");
+    if (bad.empty()) serializeJson(doc, bad);
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            fake::io.clients.front()->deliver(route, bad);
+            poll(network);
+            check(capture.values.empty() && ackPackets().empty(), "invalid context reached callback/ACK");
+            receive("config", base);
+            poll(network);
+            receive("config", contextJson(tombstone()));
+            poll(network);
+            check(capture.values.size() == 2, "invalid input blocked later valid context/tombstone");
+            capture.matches(0, expected);
+            capture.matches(1, tombstone());
+            stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void contextRegistration() {
+    BrainNetwork network;
+    ContextCapture first, replacement;
+    HandlerCapture products(network);
+    first.install(network);
+    products.install();
+    begin(network);
+    const auto expected = fullContext();
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            const auto session = token();
+            receive("config", contextJson(expected));
+            poll(network);
+            first.matches(0, expected);
+            receive("config", contextJson(tombstone()));
+            network.setContextHandler(nullptr, nullptr);
+            poll(network);
+            check(first.values.size() == 1, "unregistered handler still called");
+            receive("command", cloudCommand("clean", session, millis()));
+            poll(network);
+            check(products.commands.size() == 1, "context unregistration unbound product handler");
+            receive("config", contextJson(tombstone()));
+            replacement.install(network);
+            poll(network);
+            replacement.matches(0, tombstone());
+            check(first.values.size() == 1, "re-registration used previous callback owner");
+            network.setProductHandlers(nullptr, nullptr, nullptr);
+            receive("config", contextJson(expected));
+            poll(network);
+            replacement.matches(1, expected);
+            products.install();
+            receive("command", cloudCommand("stop", session, millis()));
+            receive("config", contextJson(tombstone()));
+            poll(network);
+            check(products.stops.size() == 1 && replacement.values.size() == 3,
+                  "product re-registration changed context binding");
+            replacement.matches(2, tombstone());
+            first.matches(0, expected); // copied data survives scratch reuse
+            check(ackPackets().empty(), "handler registration fabricated ACK");
+            stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void contextGeneration(bool deferred) {
+    BrainNetwork network;
+    ContextCapture capture;
+    capture.install(network);
+    begin(network);
+    const auto expected = fullContext();
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            receive("config", contextJson(expected));
+            poll(network);
+            check(capture.values.size() == 1, "initial context missing");
+            if (deferred) fake::io.deferNextQueueSend = true;
+            receive("config", contextJson(tombstone()));
+            fake::io.clients.front()->dropConnection();
+            fake::io.now += 5000u;
+        } else if (tick == 3) {
+            check(network.connected() && fake::io.connectCalls == 2, "context test did not reconnect");
+            if (deferred) fake::completeDeferredSends();
+            poll(network);
+            check(capture.values.size() == 1, "old-generation context/tombstone dispatched");
+            receive("config", contextJson(tombstone()));
+            poll(network);
+            check(capture.values.size() == 2 && capture.generations[0] != capture.generations[1],
+                  "new generation did not deliver context with original generation");
+            capture.matches(0, expected);
+            capture.matches(1, tombstone());
+            check(ackPackets().empty(), "generation handling fabricated context ACK");
+            stop();
+        }
+    };
+    fake::runWorker();
+}
+
+void contextPriority(bool tombstoneLast) {
+    BrainNetwork network;
+    ContextCapture capture;
+    HandlerCapture products(network);
+    std::vector<std::string> order;
+    capture.order = &order;
+    capture.install(network);
+    struct OrderedProducts {
+        HandlerCapture& capture;
+        std::vector<std::string>& order;
+        static void command(void* owner, const babytech::boardlink::CloudCommand& value,
+                            uint32_t generation, uint32_t now) {
+            auto& self = *static_cast<OrderedProducts*>(owner);
+            self.order.push_back("command");
+            HandlerCapture::command(&self.capture, value, generation, now);
+        }
+        static void stopCommand(void* owner, const babytech::boardlink::CloudStop& value,
+                                uint32_t generation, uint32_t now) {
+            auto& self = *static_cast<OrderedProducts*>(owner);
+            self.order.push_back("stop");
+            HandlerCapture::stopCommand(&self.capture, value, generation, now);
+        }
+    } ordered{products, order};
+    network.setProductHandlers(OrderedProducts::command, OrderedProducts::stopCommand, &ordered);
+    begin(network);
+    const auto expected = fullContext(true);
+    fake::io.onDelay = [&](unsigned tick) {
+        if (tick == 1) poll(network);
+        else if (tick == 2) {
+            const auto session = token();
+            receive("config", contextJson(tombstoneLast ? expected : tombstone()));
+            // Ordinary FIFO fills with a probe and commands. The second context
+            // must replace only the retained slot, never the queued probe/Stop.
+            receive("config", probe(session));
+            for (unsigned i = 0; i < 3; ++i)
+                receive("command", cloudCommand("clean", session, millis(), std::to_string(i + 1)));
+            receive("config", contextJson(tombstoneLast ? tombstone() : expected));
+            receive("command", cloudCommand("stop", session, millis()));
+            poll(network);
+            check(order == std::vector<std::string>{"stop", "context"} && products.commands.empty(),
+                  "Stop/config/probe priority or three-message poll budget changed");
+            check(capture.values.size() == 1, "retained slot delivered superseded context");
+            capture.matches(0, tombstoneLast ? tombstone() : expected);
+            poll(network);
+            check(order == std::vector<std::string>{"stop", "context", "command", "command", "command"},
+                  "context/probe displaced ordinary commands");
+        } else {
+            check(fake::io.published.size() == 2 && ackPackets().empty(), "context altered probe replies/generated ACK");
+            check(packet(1)["command_session_challenge"] == kChallenge, "retained context overwrote probe");
+            workerOnly();
+            stop();
+        }
+    };
+    fake::runWorker();
+}
+
 void productHandler(const std::string& fixture) {
     const size_t split = fixture.find('-');
     const std::string action = fixture.substr(0, split);
@@ -1692,6 +2045,14 @@ int main(int argc, char** argv) {
         else if (name == "send-expiry") sendExpiry();
         else if (name == "probe" || name == "probe-reject" || name == "probe-budget") probes(name);
         else if (name == "readonly") readonlyMessages();
+        else if (name == "context-wire-boundary") contextWireBoundary();
+        else if (name == "context-registration") contextRegistration();
+        else if (name == "context-priority" || name == "context-priority-tombstone")
+            contextPriority(name == "context-priority-tombstone");
+        else if (name == "context-generation-queued" || name == "context-generation-deferred")
+            contextGeneration(name == "context-generation-deferred");
+        else if (name.compare(0, 15, "context-reject-") == 0) contextRejected(name.substr(15));
+        else if (name.compare(0, 8, "context-") == 0) contextDelivery(name.substr(8));
         else if (name.compare(0, 19, "handler-generation-") == 0) handlerGeneration(name.substr(19));
         else if (name.compare(0, 15, "handler-reject-") == 0) commandRejected(name.substr(15), true);
         else if (name.compare(0, 8, "handler-") == 0) productHandler(name.substr(8));

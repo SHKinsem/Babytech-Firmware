@@ -4,6 +4,7 @@
 #if BABYTECH_BOARD_LINK_V4
 #include "CloudLink.h"
 #include "ProductBoardMessages.h"
+#include "ProductContext.h"
 #include "brain_station.h"
 #include <ArduinoJson.h>
 
@@ -15,12 +16,18 @@ class BrainNetwork {
 public:
     using CommandHandler = void(*)(void*, const boardlink::CloudCommand&, uint32_t generation, uint32_t nowMs);
     using StopHandler = void(*)(void*, const boardlink::CloudStop&, uint32_t generation, uint32_t nowMs);
+    using ContextHandler = void(*)(void*, const boardlink::ProductContext&, uint32_t generation, uint32_t nowMs);
     bool begin(const char* pairedDeviceId);
     // Handlers receive trusted Current/Expired requests on the UI loop. An
     // expired duplicate must not overwrite an earlier actual acceptance ACK.
     // Only Current requests may start; handlers own dedup/deadline/result ACK.
     // References last only during the callback; copy any retained request.
     void setProductHandlers(CommandHandler command, StopHandler stop, void* context);
+    // UI-loop delivery of validated full contexts/tombstones in the current
+    // connection generation, independent of command-session TTL/availability.
+    // No action, persistence or ACK is implied. Copy before the callback returns;
+    // registration/removal is UI-loop-owned and independent of product handlers.
+    void setContextHandler(ContextHandler handler, void* context);
     cloud::Freshness checkFreshness(const char* session, uint32_t generation,
                                    uint32_t sampledAtMs, uint16_t ttlMs);
     // Trusted runtime only: publish a determined original result, not a new
@@ -56,10 +63,13 @@ private:
     StaticJsonDocument<4096> status_;
     StaticJsonDocument<768> incomingJson_;
     CloudLink::Inbound inbound_;
+    boardlink::ProductContext contextScratch_;
     char payload_[2048]{};
     CommandHandler commandHandler_ = nullptr;
     StopHandler stopHandler_ = nullptr;
     void* productContext_ = nullptr;
+    ContextHandler contextHandler_ = nullptr;
+    void* contextOwner_ = nullptr;
     bool started_ = false;
     bool attempted_ = false;
     bool published_ = false;

@@ -4,7 +4,7 @@
 
 两块板固件统一在本仓库管理：`main-controller` 已迁入父项目 DisplayController 的屏幕/触摸/UART v3 基线、显示库与 N16R8 板型，`device-controller` 继续作为 Motion。Brain 已通过本地及不含父项目的临时副本构建、LVGL host UI 测试，尚未烧录或验证真实触摸。原 DisplayController 的源码/构建入口已退役，仅保留迁移说明；旧 Brain 网页及其专属配置/页面测试也已移除，历史实现从 Git 获取。
 
-默认 Brain 仍是 UART v3 屏幕角色；成对选择 v4 后已接 Wi-Fi/MQTT、状态投影、Cloud命令单次UART派发、优先Stop和屏幕本地持久请求。屏幕 Initialize 无需Cloud/宝宝缓存，Start使用已保存且与Motion匹配的有效缓存；两者由Motion最终机械准入。Motion v4 产品命令接收/持久执行和监督Stop已接验证路径，默认非食用产品开关仍为0，公开`can_start=false`保留。自动配置同步及双板记录桥接未完成。Motion默认路径仍直连Cloud，v4不启动产品MQTT，独立调试网页保留。完整迁移按父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md` B1–B4推进，不把构建成功写成产品迁移完成。
+默认 Brain 仍是 UART v3 屏幕角色；成对选择 v4 后已接 Wi-Fi/MQTT、状态投影、Cloud命令单次UART派发、优先Stop和屏幕本地持久请求。屏幕 Initialize 无需Cloud/宝宝缓存，Start使用已保存且与Motion匹配的有效缓存；两者由Motion最终机械准入。Motion v4 产品命令接收/持久执行和监督Stop已接验证路径，默认非食用产品开关仍为0，公开`can_start=false`保留。Brain自动配置缓存/同步已接，双板记录与Cloud回执桥接未完成。Motion默认路径仍直连Cloud，v4不启动产品MQTT，独立调试网页保留。完整迁移按父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md` B1–B4推进，不把构建成功写成产品迁移完成。
 
 App/屏幕文案唯一手写来源仍在父项目 `Shared/feeding_flow_ui/feeding_flow_ui.json`。父项目 `python3 Tools/generate_feeding_flow_ui.py` 自动更新本仓库生成 header，`--check` 检查内容及源哈希；生成物须随固件 commit 提交。独立 clone 编译锁定的 header，不读取父项目或下载文案，禁止手改 generated 文件。
 
@@ -185,9 +185,15 @@ Cloud Unknown最小放行已获用户2026-10-07确认：原TTL耗尽，过期后
 
 同一UART core及Brain Arduino/Controller adapter现提供显式`requestContext`，Motion main注册到同一`MotionProductRuntime / MotionStateStore`，v4不再读旧`productctx`作为RAM档案。CONTEXT复用完整feeding_context JSON；CONTEXT_RESULT严格包含`reply_to/device_id/profile_version/cleared/context_digest/status`。精确当前会话回复才完成传输，业务层还须检查`stored/unchanged`；busy/conflict/storage_fault或LINK_ACK都不是配置已保存。换boot或失联使旧确认失效，Stop可取消本配置传输，不擦缓存或重放运动。
 
-新版本在运动/维护忙碌时只观察版本/摘要，返回busy且不写Flash；下一次旧Prepare被阻止，已接受的快照不变，Initialize/Stop/独立调试不增加配置门禁。已停稳的清洁提示、故障或Complete显示保持不挡配置保存；同内容重发核对持久屏障并恢复空RAM，不重新写Flash。Brain自动MQTT分流/保存/重试owner及终态回执桥接尚未接通，公开can_start仍false，不宣布App全通。默认v3保持原行为。
+新版本在运动/维护忙碌时只观察版本/摘要，返回busy且不写Flash；下一次旧Prepare被阻止，已接受的快照不变，Initialize/Stop/独立调试不增加配置门禁。已停稳的清洁提示、故障或Complete显示保持不挡配置保存；同内容重发核对持久屏障并恢复空RAM，不重新写Flash。默认v3保持原行为。
+
+Brain v4现从既有MQTT配置槽解析完整档案/墓碑，回调只暂存最新合法版本；同一UI loop在紧急UART服务后保存到安装器共用的`BrainStateStore`，再由`BrainContextSync`发送。离线开机或UART换会话自动同步已保存缓存，不等待Cloud、不重配。精确stored/unchanged才允许新的Prepare；配置更新不修改已预留或已接受任务的快照。Busy/丢回执/超时等只重试幂等配置，间隔至少1秒，不重发动作。维护或Stop传输未决时暂缓配置Flash，合法非Prepare请求可抢占配置传输，Initialize不要求配置确认。终态/Cloud回执桥接仍未接通，公开can_start仍false，不宣布App全通。
 
 测试：`python3 tools/test_product_context_messages.py --sanitize`和`python3 tools/test_motion_product_runtime.py --sanitize`，后者可用`--case contexts`或`--case context_uart`限定范围。它们直接运行生产codec/store/core，Flash、机械和串口I/O为替身，不能证明实板或完整main/Cloud链路。
+
+自动同步专项：`python3 tools/test_brain_context_sync.py --sanitize`（同一Store、缓存/版本与双UART core/Motion runtime组合）和`python3 tools/test_brain_network.py --sanitize`（生产Network/CloudLink收件，SDK I/O替身）。两组不是实际MCU/broker或完整App验收；台架须核对保留NVS的冷启动、离线缓存、换宝宝/解绑、丢回复与Stop背压，不自行手写NVS绕过缺失/冲突。
+
+同版本不同内容会记录本次运行的版本冲突，仅暂停该版本的新Prepare；重发原内容不能解除，需Cloud更高版本保存并精确确认。低版本旧包不撤销有效缓存，Initialize/Stop/调试和已接受快照不受这个门禁影响。冲突观察只保存在RAM，不新加NVS格式，也不承诺断电后的跨板原子撤销；故障配置仍须受控核对。
 
 ### Brain USB网络配置
 

@@ -20,9 +20,10 @@ public:
 
     bool busy() const { return active_; }
     const char* reason() const { return reason_; }
+    void setPrepareReadyHandler(bool (*ready)()) { prepareReady_ = ready; }
 
     bool canStart(uint32_t nowMs, bool blocked = false) const {
-        if (!available(nowMs, blocked)) return false;
+        if (!available(nowMs, blocked) || (prepareReady_ && !prepareReady_())) return false;
         const auto& state = store_.state();
         const auto& status = *link_.lastTelemetry();
         return status.stationary && state.hasContext && !state.context.cleared &&
@@ -134,6 +135,7 @@ private:
     Link& link_;
     boardlink::BrainStateStore& store_;
     Clock clock_;
+    bool (*prepareReady_)() = nullptr;
     uint64_t sentSequence_ = 0;
     char sentCommandId_[129]{};
     char resultReason_[65]{};

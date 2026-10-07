@@ -13,6 +13,7 @@
 #include "brain_pending_recovery.h"
 #include "brain_cloud_dispatcher.h"
 #include "brain_local_dispatcher.h"
+#include "brain_context_sync.h"
 #include <esp_system.h>
 #endif
 
@@ -26,6 +27,9 @@ babytech::brain::BrainNetwork network;
 babytech::boardlink::MaintenanceUsbConsole commissioningSession;
 // Installation, local requests and result recovery share this single store.
 babytech::boardlink::BrainStateStore productState;
+babytech::brain::BrainContextSync<babytech::display::ControllerLink> contextSync(controllerLink, productState);
+bool contextReady() { return contextSync.canPrepare(); }
+void yieldConfiguration(uint32_t nowMs) { contextSync.yield(nowMs); }
 babytech::brain::BrainPendingRecovery<babytech::display::ControllerLink> pendingRecovery(
   controllerLink, productState);
 bool locallyInstalling() { return commissioningSession.active() && !controllerLink.intentPending(); }
@@ -43,6 +47,9 @@ babytech::brain::BrainCloudDispatcher<babytech::display::ControllerLink,
 void dispatchCloudCommand(void*, const babytech::boardlink::CloudCommand& command,
                           uint32_t generation, uint32_t nowMs) {
   cloudDispatcher.command(command, generation, nowMs);
+}
+void receiveCloudContext(void*, const babytech::boardlink::ProductContext& context, uint32_t, uint32_t) {
+  contextSync.receive(context);
 }
 void dispatchCloudStop(void*, const babytech::boardlink::CloudStop& stop,
                        uint32_t generation, uint32_t nowMs) {
@@ -113,6 +120,10 @@ void setup() {
     Serial.println("[Brain] Network unavailable; check pairing and resources");
   }
   network.setProductHandlers(dispatchCloudCommand, dispatchCloudStop, nullptr);
+  network.setContextHandler(receiveCloudContext, nullptr);
+  cloudDispatcher.setPrepareReadyHandler(contextReady);
+  cloudDispatcher.setConfigurationYieldHandler(yieldConfiguration);
+  localDispatcher.setPrepareReadyHandler(contextReady);
 #endif
 }
 
@@ -129,6 +140,8 @@ void loop() {
   pollCommissioningConsole();
   installer.poll(uint32_t(millis()));
   pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy() || localDispatcher.busy());
+  contextSync.poll(uint32_t(millis()), commissioningSession.active(),
+    cloudDispatcher.busy() || localDispatcher.busy());
   if (!commissioningSession.active()) controllerLink.releaseMaintenance(uint32_t(millis()));
 #endif
   if (!displayReady) {
@@ -169,6 +182,7 @@ void loop() {
     return;
   }
   if (hasIntent) {
+    if (intent == babytech::display::DisplayIntent::Initialize) contextSync.yield(uint32_t(millis()));
     if (!cloudDispatcher.yieldToLocal(uint32_t(millis()))) {
       Serial.println("[Brain] Local intent unavailable: busy");
     } else if (!localDispatcher.dispatch(intent, uint32_t(millis()), commissioningSession.active())) {

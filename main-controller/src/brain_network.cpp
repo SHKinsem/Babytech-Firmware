@@ -60,6 +60,11 @@ void BrainNetwork::setProductHandlers(CommandHandler command, StopHandler stop, 
     productContext_ = context;
 }
 
+void BrainNetwork::setContextHandler(ContextHandler handler, void* context) {
+    contextHandler_ = handler;
+    contextOwner_ = context;
+}
+
 cloud::Freshness BrainNetwork::checkFreshness(const char* session, uint32_t generation,
                                              uint32_t sampledAtMs, uint16_t ttlMs) {
     return cloud_.checkFreshness(session, generation, sampledAtMs, ttlMs);
@@ -160,12 +165,11 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
                         uint32_t motionReceivedAtMs, bool commandsEnabled, bool canStart) {
     if (!started_) return;
     cloud::SessionSnapshot current;
-    if (!cloud_.sessionSnapshot(current)) {
+    const bool hasSession = cloud_.sessionSnapshot(current);
+    if (!hasSession) {
         published_ = false;
         attempted_ = false;
-        return;
-    }
-    if (generation_ != current.generation) {
+    } else if (generation_ != current.generation) {
         generation_ = current.generation;
         published_ = false;
         attempted_ = false;
@@ -181,6 +185,15 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
             continue;
         }
         if (std::strcmp(suffix, "/config")) continue;
+        if (contextHandler_ && boardlink::decodeProductContext(
+                reinterpret_cast<const uint8_t*>(inbound_.payload), std::strlen(inbound_.payload),
+                device, contextScratch_)) {
+            // Decode may span a reconnect. Do not deliver an old generation;
+            // config delivery does not authorize commands or require their TTL.
+            if (inbound_.generation == cloud_.sessionGeneration())
+                contextHandler_(contextOwner_, contextScratch_, inbound_.generation, nowMs);
+            continue;
+        }
         incomingJson_.clear();
         if (deserializeJson(incomingJson_, inbound_.payload)) continue;
         if (!incomingJson_.is<JsonObject>() || incomingJson_.size() != 4) continue;
@@ -196,6 +209,7 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
                           commandsEnabled, canStart);
         // Other config messages cannot dispatch actions or mutate NVS here.
     }
+    if (!hasSession) return;
     if ((!published_ || uint32_t(nowMs - lastPublishedAtMs_) >= 2000) &&
         (!attempted_ || uint32_t(nowMs - lastAttemptAtMs_) >= 250)) {
         attempted_ = true;

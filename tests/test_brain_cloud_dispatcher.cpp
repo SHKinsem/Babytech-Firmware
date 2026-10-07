@@ -449,6 +449,42 @@ void stopRecoveryArbitration() {
 }
 
 void basics() {
+    scenario("configuration proof gates only new Prepare and rejected bytes cannot replay", [] {
+        Rig r;
+        r.d.setPrepareReadyHandler(+[] { return false; });
+        const auto c = command(); r.start(c);
+        CHECK(r.link.commands.empty() && r.net.acks.size() == 1);
+        ack(r.net.acks[0], c, false, "context_required");
+        r.d.setPrepareReadyHandler(+[] { return true; });
+        r.start(c);
+        CHECK(r.link.commands.empty());
+        r.start(command(ProductCommand::Prepare, 2));
+        CHECK(r.link.commands.size() == 1);
+    });
+    for (auto kind : {ProductCommand::Clean, ProductCommand::ResetError,
+                      ProductCommand::SetTargetTemp, ProductCommand::CheckFirmwareUpdate})
+        scenario("non-Prepare yields configuration without demanding proof / " + std::to_string(unsigned(kind)), [=] {
+            Rig r;
+            r.d.setPrepareReadyHandler(+[] { return false; });
+            r.link.allowCommand = false;
+            static FakeLink* yieldingLink;
+            yieldingLink = &r.link;
+            r.d.setConfigurationYieldHandler(+[](uint32_t at) {
+                CHECK(at == nowMs); yieldingLink->allowCommand = true;
+            });
+            const auto c = command(kind); r.start(c);
+            CHECK(r.link.commands.size() == 1);
+            r.link.allowCommand = false;
+            r.start(c); // Duplicate/expired commands must not cancel a new transfer.
+            CHECK(!r.link.allowCommand && r.link.commands.size() == 1);
+        });
+    scenario("expired non-Prepare never yields configuration", [] {
+        Rig r; r.d.setConfigurationYieldHandler(+[](uint32_t) { CHECK(false); });
+        nowMs = 5101;
+        r.start(command(ProductCommand::Clean));
+        CHECK(r.link.commands.empty());
+        ack(r.net.acks[0], command(ProductCommand::Clean), false, "request_expired");
+    });
     const ProductCommand kinds[] = {ProductCommand::Prepare, ProductCommand::Clean,
         ProductCommand::SetTargetTemp, ProductCommand::ResetError, ProductCommand::CheckFirmwareUpdate};
     const char* names[] = {"prepare", "clean", "set_target_temp", "reset_error", "check_firmware_update"};

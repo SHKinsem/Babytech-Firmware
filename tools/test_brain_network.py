@@ -52,6 +52,14 @@ CASES = [
     "ack-validation",
     *(f"ack-runtime-{kind}" for kind in ("accepted", "rejected", "boolean", "reconnect", "offline", "full", "deferred")),
     "status-flags",
+    *(f"context-{kind}" for kind in (
+        "full", "tombstone", "utf8-max", "readonly", "session-expired", "ttl-expired", "offline",
+        "wire-boundary", "registration", "priority", "priority-tombstone",
+        "generation-queued", "generation-deferred")),
+    *(f"context-reject-{kind}" for kind in (
+        "device", "topic", "nested-topic", "command-topic", "extra", "missing", "type", "range",
+        "version", "cleared", "tombstone-fields", "name-long", "brand-long", "utf8", "metadata",
+        "duplicate", "json", "trailing", "nul", "escaped-nul")),
     *(f"status-flags-{kind}" for kind in (
         "enabled", "operations", "disabled", "stale", "absent", "age1499", "age1500", "wrap", "send-expiry")),
 ]
@@ -100,6 +108,7 @@ def main():
                    "shared/BoardProtocol/src/BoardProtocol.cpp", "shared/BoardProtocol/src/BoardProtocolV4.cpp",
                    "shared/BoardProtocol/src/BoardSessionV4.cpp", "shared/ProductBoardLink/src/ProductBoardMessages.cpp",
                    "shared/ProductBoardLink/src/ProductRequest.cpp",
+                   "shared/ProductBoardLink/src/ProductContext.cpp",
                    "tests/fakes/brain_network/FakeBrainNvs.cpp", "tests/test_brain_network.cpp"):
         command.append(str(root / source))
     with tempfile.TemporaryDirectory(prefix="babytech-brain-network-") as directory:

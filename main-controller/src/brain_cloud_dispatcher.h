@@ -30,6 +30,8 @@ public:
     bool busy() const { return active_ || stopQuerying_; }
     bool resultPending() const { return replyPending_; }
     bool ordinaryBusy() const { return active_; }
+    void setPrepareReadyHandler(bool (*ready)()) { prepareReady_ = ready; }
+    void setConfigurationYieldHandler(void (*yield)(uint32_t)) { configurationYield_ = yield; }
     // A new explicit local operation has the same priority as a Cloud command;
     // informational Stop lookup never owns the mechanics or blocks new work.
     bool yieldToLocal(uint32_t nowMs) {
@@ -54,6 +56,8 @@ public:
         }
         if (active_ || replyPending_) { reject(incoming, "busy"); return; }
         if (const char* reason = admission_()) { reject(incoming, reason); return; }
+        if (incoming.request.command == boardlink::ProductCommand::Prepare &&
+            prepareReady_ && !prepareReady_()) { reject(incoming, "context_required"); return; }
         if (!link_.connected(clock_())) { reject(incoming, "link_lost"); return; }
         // Informational Stop recovery yields to a new independent ordinary request.
         if (stopQuerying_) retryStopQuery(clock_());
@@ -81,6 +85,8 @@ public:
             return;
         }
         outgoing.remainingTtlMs = uint16_t(incoming.ttlMs - sendElapsed);
+        if (outgoing.request.command != boardlink::ProductCommand::Prepare && configurationYield_)
+            configurationYield_(sendAt);
         if (!link_.requestCommand(outgoing, sendAt)) { reject(incoming, "busy"); return; }
         current_ = incoming;
         generation_ = generation;
@@ -361,6 +367,8 @@ private:
     Network& network_;
     Clock clock_;
     Admission admission_;
+    bool (*prepareReady_)() = nullptr;
+    void (*configurationYield_)(uint32_t) = nullptr;
     boardlink::CloudCommand current_{};
     boardlink::CommandResult result_{};
     boardlink::ResultQuery query_{};

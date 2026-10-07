@@ -25,6 +25,22 @@ class MaintenanceWiringTest(unittest.TestCase):
         cls.ota = (ROOT / "shared/WifiOta/src/WifiOta.cpp").read_text()
         cls.console = (ROOT / "shared/ProductBoardLink/src/MaintenanceUsbConsole.h").read_text()
 
+    def test_brain_context_owner_uses_shared_store_after_urgent_io_without_global_gate(self):
+        self.assertIn("contextSync(controllerLink, productState)", self.brain)
+        callback = function_body(self.brain, "void receiveCloudContext(")
+        self.assertIn("contextSync.receive(context)", callback)
+        self.assertNotIn("saveContext", callback)
+        setup = function_body(self.brain, "void setup()")
+        self.assertIn("network.setContextHandler(receiveCloudContext, nullptr)", setup)
+        self.assertIn("cloudDispatcher.setPrepareReadyHandler(contextReady)", setup)
+        self.assertIn("localDispatcher.setPrepareReadyHandler(contextReady)", setup)
+        loop = function_body(self.brain, "void loop()")
+        self.assertLess(loop.index("network.poll("), loop.index("contextSync.poll("))
+        self.assertLess(loop.index("controllerLink.poll(uint32_t(millis()))"), loop.index("contextSync.poll("))
+        self.assertLess(loop.index("pendingRecovery.poll("), loop.index("contextSync.poll("))
+        self.assertNotIn("contextReady()", loop[loop.index("intentPending = intentPending"):loop.index("view.update")])
+        self.assertIn("DisplayIntent::Initialize) contextSync.yield", loop)
+
     def test_motion_mutating_routes_have_gate_except_safety_stop(self):
         safety = {
             "/api/stop": "handleStop",

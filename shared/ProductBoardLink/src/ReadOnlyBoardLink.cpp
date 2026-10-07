@@ -500,6 +500,14 @@ void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
         receipt(frame.messageId, false);
         return;
     }
+    // Brain's single sender may yield an idempotent configuration to an explicit
+    // ordinary operation. Release only that older configuration, never a command.
+    if (role_ == Role::Motion && frame.kind == Kind::Command && !frame.offset &&
+        receivedContextId_ && frame.messageId > receivedContextId_) {
+        assembler_.cancelMessage(Kind::Context, frame.senderBoot, frame.receiverBoot, receivedContextId_);
+        if (contextReplyPending_ && contextResult_.replyTo == receivedContextId_) contextReplyPending_ = false;
+        receivedContextId_ = 0;
+    }
     assembler_.expire(nowMs);
     const bool starting = frame.kind == Kind::Command && !frame.offset && !assembler_.active();
     const bool startingContext = frame.kind == Kind::Context && !frame.offset && !assembler_.active();

@@ -208,6 +208,18 @@ void rebootPending(const BrainState& expected) {
 }
 
 void basics() {
+    scenario("unconfirmed configuration prevents local Prepare without reserving evidence", [] {
+        Rig rig;
+        rig.d.setPrepareReadyHandler(+[] { return false; });
+        unchanged(rig, [&] { CHECK(!rig.d.canStart(nowMs) && !rig.start()); });
+        rig.d.setPrepareReadyHandler(+[] { return true; });
+        CHECK(rig.d.canStart(nowMs) && rig.start());
+    });
+    scenario("local Initialize does not require configuration transfer proof", [] {
+        Rig rig(true);
+        rig.d.setPrepareReadyHandler(+[] { return false; });
+        CHECK(rig.d.canInitialize(nowMs) && rig.start(true));
+    });
     for (bool initialize : {false, true}) scenario(initialize ? "offline Initialize once" : "offline Prepare once", [=] {
         Rig rig(initialize);
         CHECK(initialize ? rig.d.canInitialize(nowMs) : rig.d.canStart(nowMs));
