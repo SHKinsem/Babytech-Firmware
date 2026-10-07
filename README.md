@@ -127,7 +127,11 @@ Brain v4唯一loop已接`BrainInstaller`。本地维护期间，`PAIR INSTALL <d
 
 该入口仅供已授权安全台架上的首次迁移，不是MQTT/普通启动入口。确认词表示操作者已停止旧Motion产品会话并完成一次性账号撤销/换密与Brain配置，不能用“Motion v4不连MQTT”代替。`PAIR INSTALL STATUS`返回阶段、实际失败类别及`writes_may_have_persisted`，`PAIR INSTALL CANCEL`尽力结束预约；失败/超时不擦NVS、不自动重发。同boot显式重试保留原预期身份/完整配置，先做受控恢复读取：允许尚未写配对或已完整写入同一配对，仍拒绝外来记录，不借重试清除可能已写入的提示。普通诊断读取保持原发现匹配规则。安装中原支持写操作/网络改配暂拒绝，退出本地维护会终止协调并释放预约，Motion Stop/读取不受影响。正常启动不调用安装器。
 
-`persisted_restart_required reason=activation_pending`仅表示双板持久记录已核对，**不代表运行切换或产品控制已完成**。当前不能把该流程用于生产迁移；自动激活、App动作及结果桥接仍待接入。此子项不发送重启或运动命令。软件回归`tools/test_brain_installer.py --sanitize`与两套SDK构建不代替真实Flash/UART/机械/堆栈验收。
+`persisted_restart_required reason=activation_pending`仅表示双板持久记录已核对，**不代表产品控制已完成**。2026-10-07已确认采用最简首次激活流程：成功后退出维护，整机停稳时用户让 **Brain和Motion一起断电再上电一次**（USB不能让单板保持供电），保留全部NVS；两板随后读取原配对/业务状态，通过现有HELLO/STATUS自动连接。只连接Brain USB，无需Motion USB、FINALIZE、重启回执或双板重启协调协议。
+
+**日常开机和保留NVS的重新烧录不需要重新配对或人工双板校验**；换板、记录缺失/损坏或身份冲突仍按既有受控恢复处理，不清空或静默认领。失败/超时不能报安装完成或用重新上电代替核对，先保留证据按同身份恢复。此决定替代原自动运行切换要求，不新增固件重启或运动命令。
+
+当前不能把该流程用于生产迁移；最终单USB工具、重启联调、App动作及结果桥接仍待完成。软件回归`tools/test_brain_installer.py --sanitize`与两套SDK构建不代替真实Flash/UART/机械/堆栈验收；实际烧录/整机断电/生产操作仍需另行授权。
 
 ### Brain USB网络配置
 
