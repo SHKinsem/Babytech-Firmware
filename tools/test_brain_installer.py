@@ -3,7 +3,9 @@
 FakeLink adapts UART I/O and read-only MaintenanceExport snapshots. Discovery,
 maintenance, Motion installation/target and both commissioning stores are the
 production implementations. No network, device, PlatformIO or new dependencies.
-Simulated NVS failures do not establish real Flash or mechanical safety.
+persisted-restart adds production MAC-checked pairing/Store loads and two
+ReadOnlyLink cores after simulated whole/single-board resets; it does not run
+the Arduino adapter/main or prove physical power cuts, Flash or mechanical safety.
 """
 import argparse
 import os
@@ -36,14 +38,16 @@ def main():
                 root / "shared/BoardProtocol/src", root / "shared/ProductBoardLink/src",
                 root / "shared/BabytechDisplayCore/src", root / "main-controller/src")
     sources = [root / "shared/BoardProtocol/src" / name for name in
-               ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp")]
+               ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
                 ("BoardCommissioning.cpp", "BoardPairingRecord.cpp", "BoardPairingStore.cpp",
                  "BrainStateRecord.cpp", "BrainStateStore.cpp", "MotionStateRecord.cpp",
                  "MotionStateStore.cpp", "LegacyContextStore.cpp", "ProductContext.cpp",
                  "ProductRequest.cpp", "ProductDigest.cpp", "BoardDiscovery.cpp",
                  "BoardMaintenance.cpp", "BoardInstall.cpp", "MaintenanceExport.cpp",
-                 "MotionExportSnapshot.cpp", "BoardExportTransfer.cpp")]
+                 "MotionExportSnapshot.cpp", "BoardExportTransfer.cpp", "ReadOnlyBoardLink.cpp",
+                 "ProductBoardMessages.cpp", "ProductCommandResult.cpp", "ProductContextMessages.cpp",
+                 "ProductResultQuery.cpp", "ProductEventMessages.cpp")]
     sources += [root / path for path in (
         "tests/fakes/brain_state_store/FakeBrainNvs.cpp",
         "tests/fakes/commissioning/FakeCommissioning.cpp",

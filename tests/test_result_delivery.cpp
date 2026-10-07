@@ -239,6 +239,9 @@ Fixture* owner = nullptr;
 bool receiveTerminal(const v4::Message&, const TerminalEvent&, uint32_t);
 bool receiveReceipt(const CloudReceipt&, uint32_t);
 bool receiveCommand(const CommandMessage&, uint32_t, CommandResult&);
+bool runtimeResultReady(CommandResult&);
+bool runtimeStop(const v4::StopRequest&, uint32_t);
+bool storedQuery(const ResultQuery&, QueriedResult&);
 
 struct Fixture {
     // The fixture itself is heap-owned; no large production Store/link object
@@ -253,9 +256,12 @@ struct Fixture {
     Wire toMotion, toBrain;
     Status status;
     uint32_t now = 0;
+    unsigned stepMs = 5;
     uint64_t brainBoot = 11, motionBoot = 22;
     unsigned receiptCalls = 0, commandCalls = 0;
-    bool stationary = true, motionMaintenance = false, brainMaintenance = false;
+    motion::MotionProductRuntime* runtime = nullptr;
+    bool stationary = true, slotClearAllowed = true;
+    bool motionMaintenance = false, brainMaintenance = false;
     bool telemetry = true;
     explicit Fixture(bool initial = true, uint32_t clock = 0) : now(clock) {
         if (initial) seed();
@@ -283,16 +289,16 @@ struct Fixture {
         status.stationary = stationary;
         if (owners) {
             relay->poll(now, brainMaintenance);
-            delivery->poll(now, stationary, motionMaintenance);
+            delivery->poll(now, stationary && slotClearAllowed, motionMaintenance);
         }
         brain.poll(now, toMotion);
         motion.poll(now, toBrain, telemetry ? &status : nullptr);
         toMotion.deliver(motion, now, dropToMotion);
         toBrain.deliver(brain, now, dropToBrain);
-        now += 5;
+        now += stepMs;
     }
     void run(unsigned duration, bool owners = true, bool dropToMotion = false, bool dropToBrain = false) {
-        for (unsigned elapsed = 0; elapsed < duration; elapsed += 5)
+        for (unsigned elapsed = 0; elapsed < duration; elapsed += stepMs)
             step(owners, dropToMotion, dropToBrain);
     }
     void add(v4::Source source, uint64_t seq, bool completed, bool archived = true) {
@@ -335,10 +341,22 @@ bool receiveReceipt(const CloudReceipt& receipt, uint32_t) {
     ++owner->receiptCalls;
     return owner->delivery->receipt(receipt);
 }
-bool receiveCommand(const CommandMessage&, uint32_t, CommandResult&) {
+bool receiveCommand(const CommandMessage& command, uint32_t now, CommandResult& result) {
     CHECK(owner);
     ++owner->commandCalls;
-    return false;
+    return owner->runtime && owner->runtime->command(command, now, result);
+}
+bool runtimeResultReady(CommandResult& result) {
+    CHECK(owner && owner->runtime);
+    return owner->runtime->resultReady(result);
+}
+bool runtimeStop(const v4::StopRequest& stop, uint32_t now) {
+    CHECK(owner && owner->runtime);
+    return owner->runtime->stop(stop, now);
+}
+bool storedQuery(const ResultQuery& query, QueriedResult& result) {
+    CHECK(owner);
+    return queryMotionResult(*owner->store, query, result);
 }
 CloudReceipt receipt(const std::string& id) {
     CloudReceipt r;
@@ -441,7 +459,7 @@ struct RuntimeHarness {
     motion::ProductSession product{flow};
     RuntimeHardware hardware;
     motion::MotionProductRuntime runtime;
-    RuntimeHarness(MotionStateStore& store, uint32_t now)
+    RuntimeHarness(MotionStateStore& store, uint32_t now, bool initialize = true)
         : hardware(executor, now), runtime(store, product, flow, hardware) {
         motion::DemoConfig config;
         config.configured = true;
@@ -454,13 +472,15 @@ struct RuntimeHarness {
         CHECK(result.status == ContextStatus::Unchanged);
         product.setExecutionAuthorized(true);
         product.resources(true, false, true, 300, now);
-        CHECK(product.initialize(now - 3));
-        flow.tick(now - 2);
-        executor.state = motion::DemoExecution::Done;
-        executor.confirm();
-        flow.tick(now - 1);
-        product.tick(now - 1);
-        CHECK(flow.startEnabled() && product.canStart());
+        if (initialize) {
+            CHECK(product.initialize(now - 3));
+            flow.tick(now - 2);
+            executor.state = motion::DemoExecution::Done;
+            executor.confirm();
+            flow.tick(now - 1);
+            product.tick(now - 1);
+            CHECK(flow.startEnabled() && product.canStart());
+        }
         executor.starts = executor.stops = 0;
     }
     CommandResult command(const ProductRequest& request, uint32_t now) {
@@ -529,8 +549,9 @@ void runtimeOwnership() {
                 const unsigned writes = fake::count(Op::Set);
                 r->executor.confirm();
                 CHECK(r->hardware.stationary() && r->runtime.active());
-                f->stationary = !r->runtime.active() && r->hardware.stationary();
-                CHECK(!f->stationary);
+                f->stationary = r->hardware.stationary();
+                f->slotClearAllowed = !r->runtime.active();
+                CHECK(f->stationary && !f->slotClearAllowed);
                 f->run(1000);
                 CHECK(cloudInput(*f, receipt(slot.eventId)));
                 f->run(1000);
@@ -543,8 +564,9 @@ void runtimeOwnership() {
                 CHECK(fake::count(Op::Set) == writes + 1);
                 const auto archived = f->store->state().pendingResults[0];
                 CHECK(expectedJson(f->store->state(), archived) == expectedJson(f->store->state(), slot));
-                f->stationary = !r->runtime.active() && r->hardware.stationary();
-                f->delivery->poll(f->now, f->stationary);
+                f->stationary = r->hardware.stationary();
+                f->slotClearAllowed = !r->runtime.active();
+                f->delivery->poll(f->now, f->stationary && f->slotClearAllowed);
                 CHECK(f->store->state().pendingResultCount == 0 && fake::count(Op::Set) == writes + 2);
                 r->tick(f->now + 4000);
                 CHECK(r->flow.startEnabled());
@@ -601,8 +623,9 @@ void recoveryOwnership() {
                 const unsigned writes = fake::count(Op::Set);
                 hardware->confirm();
                 CHECK(!recovery->motionPending() && recovery->executionPending() && hardware->stationary());
-                f->stationary = !recovery->executionPending() && hardware->stationary();
-                CHECK(!f->stationary);
+                f->stationary = hardware->stationary();
+                f->slotClearAllowed = !recovery->executionPending();
+                CHECK(f->stationary && !f->slotClearAllowed);
                 // Complete the new-boot handshake before injecting a stored
                 // receipt; otherwise the old Brain session can lose it on wire.
                 f->run(1000);
@@ -613,8 +636,9 @@ void recoveryOwnership() {
                 recovery->poll();
                 CHECK(!recovery->executionPending() && !recovery->motionPending());
                 CHECK(f->store->state().pendingResultCount == 1 && fake::count(Op::Set) == writes + 1);
-                f->stationary = !recovery->executionPending() && hardware->stationary();
-                f->delivery->poll(f->now, f->stationary);
+                f->stationary = hardware->stationary();
+                f->slotClearAllowed = !recovery->executionPending();
+                f->delivery->poll(f->now, f->stationary && f->slotClearAllowed);
                 CHECK(f->receiptCalls > 0);
                 CHECK(f->store->state().pendingResultCount == 0 && fake::count(Op::Set) == writes + 2);
                 CHECK(hardware->stops == 1);
@@ -643,13 +667,283 @@ void fullQueueRuntime() {
             CHECK(runtime->executor.starts == 1 && !runtime->hardware.stationary());
             const auto frozen = nonOutbox(f->store->state());
             const auto original = f->store->state().pendingResults[0];
-            f->stationary = !runtime->runtime.active() && runtime->hardware.stationary();
-            CHECK(!f->stationary && cloudInput(*f, receipt(original.eventId)));
+            f->stationary = runtime->hardware.stationary();
+            f->slotClearAllowed = !runtime->runtime.active();
+            CHECK(!f->stationary && !f->slotClearAllowed && cloudInput(*f, receipt(original.eventId)));
             f->run(1000);
             CHECK(f->store->state().pendingResultCount == 2);
             CHECK(nonOutbox(f->store->state()) == frozen);
             CHECK(runtime->runtime.active() && runtime->executor.starts == 1);
         });
+}
+
+struct SessionRecoveryHardware : motion::MotionRecoveryHardware {
+    RuntimeHarness& device;
+    explicit SessionRecoveryHardware(RuntimeHarness& runtime) : device(runtime) {}
+    void supervisedStop(uint32_t now) override { device.product.recoverAfterRestart(now); }
+    bool stationary() const override {
+        return device.hardware.stationary() && !device.flow.busy() && !device.product.ownsMotion();
+    }
+};
+
+void bindRuntime(Fixture& f, RuntimeHarness& device) {
+    f.runtime = &device.runtime;
+    CHECK(f.motion.setCommandReadyHandler(runtimeResultReady));
+    CHECK(f.motion.setStopHandler(runtimeStop));
+    CHECK(f.motion.setResultQueryHandler(storedQuery));
+}
+void runtimeLoop(Fixture& f, RuntimeHarness& device, motion::MotionStateRecovery* recovery = nullptr) {
+    // Match pollDemo's production ownership order, with only feedback/I/O
+    // substituted. This harness does not compile or execute main.cpp.
+    device.hardware.clock = f.now;
+    device.flow.tick(f.now);
+    device.product.tick(f.now);
+    if (recovery) recovery->poll();
+    device.runtime.poll(f.now);
+    f.stationary = device.hardware.stationary();
+    f.slotClearAllowed = !device.runtime.active() && (!recovery || !recovery->executionPending());
+    f.status.snapshot = device.product.displaySnapshot();
+    f.status.motionBusy = device.runtime.ownsMotion() || device.product.ownsMotion() || device.flow.busy();
+    device.runtime.project(f.status, f.motion.connected(f.now));
+    f.step();
+}
+void runRuntime(Fixture& f, RuntimeHarness& device, unsigned duration,
+                motion::MotionStateRecovery* recovery = nullptr) {
+    for (unsigned elapsed = 0; elapsed < duration; elapsed += f.stepMs) runtimeLoop(f, device, recovery);
+}
+CommandResult uartCommand(Fixture& f, RuntimeHarness& device, const ProductRequest& request,
+                          motion::MotionStateRecovery* recovery = nullptr) {
+    CommandMessage command;
+    command.request = request;
+    command.remainingTtlMs = 5000;
+    CHECK(f.brain.requestCommand(command, f.now));
+    for (unsigned elapsed = 0; elapsed < 4000 && f.brain.commandSendState() == CommandSendState::Pending;
+         elapsed += f.stepMs) runtimeLoop(f, device, recovery);
+    CHECK(f.brain.commandSendState() == CommandSendState::Complete);
+    const auto result = f.brain.commandResponse();
+    CHECK(result.source == request.source && result.sequence == request.sequence);
+    CHECK(!std::strcmp(result.commandId, request.commandId));
+    return result;
+}
+QueriedResult uartQuery(Fixture& f, RuntimeHarness& device, const ProductRequest& request,
+                       motion::MotionStateRecovery* recovery = nullptr) {
+    ResultQuery query;
+    query.source = request.source;
+    query.sequence = request.sequence;
+    std::strcpy(query.deviceId, request.deviceId);
+    std::strcpy(query.commandId, request.commandId);
+    CHECK(f.brain.requestResult(query, f.now));
+    for (unsigned elapsed = 0; elapsed < 4000 && f.brain.resultLookupState() == ResultLookupState::Pending;
+         elapsed += f.stepMs) runtimeLoop(f, device, recovery);
+    CHECK(f.brain.resultLookupState() == ResultLookupState::Complete);
+    const auto result = f.brain.resultQueryResponse();
+    CHECK(sameResultQuery(result.query, query));
+    return result;
+}
+const MotionExecutionSlot* archivedResult(const MotionState& state, const std::string& eventId) {
+    for (size_t i = 0; i < state.pendingResultCount; ++i)
+        if (state.pendingResults[i].eventId == eventId) return &state.pendingResults[i];
+    return nullptr;
+}
+void assertWatermarksAndDecisions(const MotionState& actual, const MotionState& original) {
+    auto expected = original;
+    expected.slot = actual.slot;
+    CHECK(nonOutbox(actual) == nonOutbox(expected));
+}
+
+void activeHistoryFaults() {
+    for (const auto oldSource : {v4::Source::CloudCommand, v4::Source::LocalTouch})
+        for (const auto newSource : {v4::Source::CloudCommand, v4::Source::LocalTouch})
+            for (unsigned fault = 0; fault < 6; ++fault) for (bool stop : {false, true})
+                scenario("active Runtime/history receipt fault old=" + std::to_string(unsigned(oldSource)) +
+                         " new=" + std::to_string(unsigned(newSource)) + " fault=" + std::to_string(fault) +
+                         " stop=" + std::to_string(stop), [&] {
+                    auto f = std::make_unique<Fixture>();
+                    // 17-byte short writes at 1 ms meet the real 50 ms Command
+                    // first-frame budget; the existing terminal suites use 5 ms.
+                    f->stepMs = 1;
+                    f->add(oldSource, 1, true);
+                    f->add(oldSource == v4::Source::CloudCommand ? v4::Source::LocalTouch :
+                           v4::Source::CloudCommand, 1, false);
+                    const auto old = f->store->state().pendingResults[0];
+                    const auto sibling = f->store->state().pendingResults[1];
+                    const auto oldJson = expectedJson(f->store->state(), old);
+                    const auto siblingJson = expectedJson(f->store->state(), sibling);
+                    auto device = std::make_unique<RuntimeHarness>(*f->store, f->now);
+                    bindRuntime(*f, *device);
+                    auto next = request(2, newSource);
+                    next.waterMl = 210;
+                    next.temperatureC = 41;
+                    const auto accepted = uartCommand(*f, *device, next);
+                    CHECK(accepted.accepted && !std::strcmp(accepted.reason, "accepted"));
+                    runRuntime(*f, *device, 1500);
+                    CHECK(device->runtime.active() && device->runtime.ownsMotion() && device->product.active());
+                    CHECK(device->executor.starts == 1 && device->executor.stops == 0 && device->hardware.generated == 1);
+                    CHECK(!device->hardware.stationary() && !f->stationary);
+                    CHECK(f->commandCalls == 1);
+                    CHECK(messages(f->toMotion.history, v4::Kind::Command).size() == 1);
+                    bool publishedOld = false;
+                    for (const auto& capture : f->network.published) if (capture.eventId == old.eventId) {
+                        assertPayload(capture, old, oldJson);
+                        publishedOld = true;
+                    }
+                    CHECK(publishedOld);
+                    const auto originalQuery = uartQuery(*f, *device, next);
+                    CHECK(originalQuery.status == ResultQueryStatus::Known && originalQuery.accepted);
+                    CHECK(originalQuery.outcome == MotionOutcome::None && std::strlen(originalQuery.requestDigestHex) == 64);
+                    const auto original = f->store->state();
+                    const auto ram = encode(original), disk = durable(), frozen = nonOutbox(original);
+                    CHECK(original.slot.kind == MotionSlotKind::Intent && sameProductRequest(original.slot.request, next));
+                    const unsigned sets = fake::count(Op::Set), commits = fake::count(Op::Commit);
+                    // Faults target only deletion of the archived result. Runtime
+                    // remains physically active, so no terminal write can race it.
+                    if (fault < 2) fake::fail(Op::Set, sets + 1, ESP_FAIL, fault == 1);
+                    else if (fault < 4) fake::fail(Op::Commit, commits + 1, ESP_FAIL, fault == 3);
+                    else if (fault == 4) {
+                        io.durableOnSet = true;
+                        fake::fail(Op::Commit, commits + 1);
+                    } else fake::fail(Op::Read, fake::count(Op::Read) + 3);
+                    const bool persisted = fault == 1 || fault >= 3;
+                    const unsigned received = f->receiptCalls;
+                    const auto receiptFrames = messages(f->toMotion.history, v4::Kind::CloudReceipt).size();
+                    CHECK(cloudInput(*f, receipt(old.eventId)));
+                    for (unsigned elapsed = 0; elapsed < 2000 && !f->store->faulted(); elapsed += f->stepMs)
+                        runtimeLoop(*f, *device);
+                    CHECK(f->receiptCalls == received + 1 && f->store->faulted() && !f->store->ready());
+                    runtimeLoop(*f, *device); // Project the fault on the following owner tick.
+                    audit();
+                    const auto receipts = messages(f->toMotion.history, v4::Kind::CloudReceipt);
+                    CHECK(receipts.size() == receiptFrames + 1);
+                    v4::Message encodedReceipt;
+                    CHECK(encodeCloudReceipt(receipt(old.eventId), encodedReceipt));
+                    CHECK(json(receipts.back()) == json(encodedReceipt));
+                    CHECK(encode(f->store->state()) == ram && nonOutbox(f->store->state()) == frozen);
+                    CHECK(fake::count(Op::Set) == sets + 1);
+                    CHECK(fake::count(Op::Commit) == commits + (fault >= 2 ? 1 : 0));
+                    CHECK(device->executor.starts == 1 && device->executor.stops == 0 && device->hardware.generated == 1);
+                    CHECK(device->runtime.active() && device->runtime.ownsMotion() && device->product.active());
+                    CHECK(!f->status.executionAuthorized && !f->status.snapshot.startEnabled);
+                    auto onDisk = std::make_unique<MotionState>();
+                    const auto written = durable();
+                    CHECK(decodeMotionState(written.data(), written.size(), *onDisk));
+                    CHECK(nonOutbox(*onDisk) == frozen);
+                    CHECK((written != disk) == persisted);
+                    CHECK(onDisk->pendingResultCount == (persisted ? 1 : 2));
+                    CHECK((archivedResult(*onDisk, old.eventId) == nullptr) == persisted);
+                    const auto* retainedSibling = archivedResult(*onDisk, sibling.eventId);
+                    CHECK(retainedSibling && expectedJson(*onDisk, *retainedSibling) == siblingJson);
+                    const size_t calls = io.calls.size();
+                    // No fabricated replacement Store and no hidden auto-Stop:
+                    // exercise the real flow's completion or explicit Stop path.
+                    if (stop) {
+                        v4::StopRequest request;
+                        request.source = v4::Source::LocalTouch;
+                        request.scope = v4::StopScope::Product;
+                        for (size_t i = 0; i < 16; ++i) {
+                            unsigned byte = 0;
+                            CHECK(std::sscanf(original.slot.executionId + 2 * i, "%2x", &byte) == 1);
+                            request.executionId[i] = uint8_t(byte);
+                        }
+                        CHECK(f->brain.requestStop(request, f->now));
+                        for (unsigned elapsed = 0; elapsed < 2000 && f->brain.stopSendState() == StopSendState::Pending;
+                             elapsed += f->stepMs) runtimeLoop(*f, *device);
+                        CHECK(f->brain.stopSendState() == StopSendState::Received);
+                        CHECK(device->executor.stops == 1 && device->executor.starts == 1);
+                        CHECK(device->product.active() && device->runtime.ownsMotion());
+                        runRuntime(*f, *device, 100);
+                        CHECK(device->product.active()); // Stop receipt is not stationary evidence.
+                        device->executor.confirm();
+                        runtimeLoop(*f, *device);
+                    } else {
+                        for (unsigned stage = 0; stage < 5; ++stage) {
+                            device->executor.state = motion::DemoExecution::Done;
+                            if (stage == 4) device->executor.confirm();
+                            runtimeLoop(*f, *device);
+                            if (stage < 4) runtimeLoop(*f, *device);
+                        }
+                    }
+                    CHECK(!device->product.active() && !device->runtime.ownsMotion());
+                    CHECK(device->runtime.active()); // Faulted Store cannot archive the retained Intent.
+                    CHECK(f->stationary && f->status.stationary && !f->slotClearAllowed);
+                    CHECK(device->executor.starts == (stop ? 1u : 5u));
+                    CHECK(device->executor.stops == (stop ? 1u : 0u) && device->hardware.generated == 1);
+                    CHECK(!device->product.eventPending());
+                    CHECK(io.calls.size() == calls && encode(f->store->state()) == ram && durable() == written);
+                    runRuntime(*f, *device, 500);
+                    const auto failedQuery = uartQuery(*f, *device, next);
+                    CHECK(failedQuery.status == ResultQueryStatus::StorageFault && !failedQuery.accepted);
+                    const auto rejected = uartCommand(*f, *device, next);
+                    CHECK(!rejected.accepted && !std::strcmp(rejected.reason, "storage_fault"));
+                    CHECK(device->executor.starts == (stop ? 1u : 5u) && device->hardware.generated == 1);
+                    CHECK(io.calls.size() == calls && encode(f->store->state()) == ram && durable() == written);
+
+                    f->runtime = nullptr;
+                    device.reset();
+                    f->motionReset();
+                    CHECK(encode(f->store->state()) == written && f->store->state().slot.kind == MotionSlotKind::Intent);
+                    device = std::make_unique<RuntimeHarness>(*f->store, f->now, false);
+                    bindRuntime(*f, *device);
+                    auto hardware = std::make_unique<SessionRecoveryHardware>(*device);
+                    auto recovery = std::make_unique<motion::MotionStateRecovery>(*f->store, *hardware);
+                    const uint32_t rebootAt = f->now;
+                    CHECK(recovery->begin(f->store->state().pairing, rebootAt) == MotionLoad::Ready);
+                    CHECK(recovery->motionPending() && recovery->executionPending());
+                    CHECK(device->executor.stops == 1 && device->executor.starts == 0 && device->hardware.generated == 0);
+                    f->network.published.clear();
+                    runRuntime(*f, *device, 1000, recovery.get());
+                    CHECK(recovery->motionPending() && recovery->executionPending());
+                    CHECK(!fake::count(Op::Set) && !fake::count(Op::Commit));
+                    CHECK(encode(f->store->state()) == written && durable() == written);
+                    const auto pendingQuery = uartQuery(*f, *device, next, recovery.get());
+                    CHECK(pendingQuery.status == ResultQueryStatus::Known && pendingQuery.accepted);
+                    CHECK(pendingQuery.outcome == MotionOutcome::None);
+                    CHECK(!std::strcmp(pendingQuery.requestDigestHex, originalQuery.requestDigestHex));
+                    const auto duplicate = uartCommand(*f, *device, next, recovery.get());
+                    CHECK(duplicate.accepted && !std::strcmp(duplicate.reason, "accepted"));
+                    CHECK(device->executor.starts == 0 && device->hardware.generated == 0 && !device->runtime.active());
+                    CHECK(encode(f->store->state()) == written && durable() == written);
+                    CHECK(!fake::count(Op::Set) && !fake::count(Op::Commit));
+                    device->executor.confirm();
+                    runtimeLoop(*f, *device, recovery.get());
+                    CHECK(!recovery->motionPending() && !recovery->executionPending());
+                    CHECK(device->executor.starts == 0 && device->executor.stops == 1 && device->hardware.generated == 0);
+                    CHECK(f->store->state().slot.kind == MotionSlotKind::Empty);
+                    CHECK(fake::count(Op::Set) == 2 && fake::count(Op::Commit) == 2);
+                    CHECK(f->store->state().pendingResultCount == (persisted ? 2 : 3));
+                    assertWatermarksAndDecisions(f->store->state(), *onDisk);
+                    const auto* failed = archivedResult(f->store->state(), original.slot.eventId);
+                    CHECK(failed && !failed->completed && sameProductRequest(failed->request, next));
+                    CHECK(!std::memcmp(failed->digest, original.slot.digest, sizeof(failed->digest)));
+                    CHECK(!std::strcmp(failed->executionId, original.slot.executionId));
+                    CHECK(!std::strcmp(failed->reason, "reboot_during_feed"));
+                    CHECK(!std::strcmp(failed->errorCode, "E_REBOOT_DURING_FEED") && failed->uptimeMs == rebootAt);
+                    const auto recoveredSlot = *failed;
+                    const auto recoveredJson = expectedJson(f->store->state(), recoveredSlot);
+                    const auto recoveredBytes = encode(f->store->state());
+                    runRuntime(*f, *device, 6000, recovery.get());
+                    std::set<std::string> ids;
+                    for (const auto& capture : f->network.published) {
+                        ids.insert(capture.eventId);
+                        if (capture.eventId == old.eventId) assertPayload(capture, old, oldJson);
+                        else if (capture.eventId == sibling.eventId) assertPayload(capture, sibling, siblingJson);
+                        else {
+                            CHECK(capture.eventId == recoveredSlot.eventId);
+                            assertPayload(capture, recoveredSlot, recoveredJson);
+                        }
+                    }
+                    CHECK(ids.count(sibling.eventId) && ids.count(recoveredSlot.eventId));
+                    CHECK(ids.count(old.eventId) == (persisted ? 0u : 1u));
+                    const auto recoveredQuery = uartQuery(*f, *device, next, recovery.get());
+                    CHECK(recoveredQuery.status == ResultQueryStatus::Known && recoveredQuery.accepted);
+                    CHECK(recoveredQuery.outcome == MotionOutcome::Failed);
+                    CHECK(!std::strcmp(recoveredQuery.requestDigestHex, originalQuery.requestDigestHex));
+                    CHECK(uartCommand(*f, *device, next, recovery.get()).accepted);
+                    CHECK(!device->runtime.active() && !device->product.active());
+                    CHECK(device->executor.starts == 0 && device->executor.stops == 1 && device->hardware.generated == 0);
+                    CHECK(encode(f->store->state()) == recoveredBytes && durable() == recoveredBytes);
+                    CHECK(fake::count(Op::Set) == 2 && fake::count(Op::Commit) == 2);
+                    f->runtime = nullptr;
+                });
 }
 
 void roundtrip() {
@@ -1071,7 +1365,7 @@ int main(int argc, char** argv) {
         {"pending-maintenance", maintenanceAndPending}, {"storage-faults", storageFaults},
         {"recovery", recovery}, {"fairness-wrap", fairnessAndWrap},
         {"runtime-owner", runtimeOwnership}, {"recovery-owner", recoveryOwnership},
-        {"full-queue-runtime", fullQueueRuntime}
+        {"full-queue-runtime", fullQueueRuntime}, {"active-history-faults", activeHistoryFaults}
     };
     bool selected = false;
     for (const auto& group : groups) if (argc == 1 || group.first == std::string(argv[1])) {
@@ -1083,7 +1377,7 @@ int main(int argc, char** argv) {
     if (!selected || argc > 2) {
         std::fprintf(stderr, "Usage: result_delivery [roundtrip|intent-capacity|active|invalid|"
                              "pending-maintenance|storage-faults|recovery|fairness-wrap|"
-                             "runtime-owner|recovery-owner|full-queue-runtime]\n");
+                             "runtime-owner|recovery-owner|full-queue-runtime|active-history-faults]\n");
         return 2;
     }
     std::printf("%s %u dynamic result-delivery scenarios, %u failures\n",

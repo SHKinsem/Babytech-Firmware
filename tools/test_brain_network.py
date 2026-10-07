@@ -27,6 +27,7 @@ CASES = [
         "wrong-epoch", "invalid-physical", "local-command", "oversized", "empty", "invalid-json", "extra", "duplicate",
         "missing", "range", "type", "sequence", "powder", "trailing", "nul", "escaped-nul", "utf8")),
     "simulation-complete", "simulation-stop", "simulation-offline", "simulation-switch", "simulation-context-batch",
+    *("simulation-receipts-" + kind for kind in ("on", "off", "queued", "deferred")),
     "configure-wifi", "configure-mqtt", "configure-mqtt-failure", "configure-unpaired",
     "configure-unpaired-failure", "configure-unpaired-begin-failure", "configure-other-owner",
     *(f"station-{kind}" for kind in (

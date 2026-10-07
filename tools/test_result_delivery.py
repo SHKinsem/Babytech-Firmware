@@ -1,7 +1,8 @@
 """Dynamic host tests of production result delivery, Store, codecs and two links.
 
 NVS, clock, byte sinks, executor/feedback and Network I/O are replaced. Network captures the
-original JSON; this is not a Network SDK, broker, physical Flash/board or full
+original JSON. Includes active Runtime/history-ack NVS faults, real Recovery,
+and UART query/dedup after reboot; this is not a Network SDK, broker, physical Flash/board or full
 main-loop E2E test. No dependencies are installed or downloaded.
 """
 import argparse
@@ -17,7 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--mbedtls-major", choices=("2", "3", "both"), default="both")
-    parser.add_argument("--case", help="Run one named C++ test group")
+    parser.add_argument("--case", help="Run one named C++ test group, e.g. active-history-faults")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     json_dir = root / "device-controller/.pio/libdeps/motion/ArduinoJson/src"

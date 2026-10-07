@@ -5,6 +5,7 @@
 #include "brain_network_console.h"
 #include "brain_simulation_dispatcher.h"
 #include "brain_simulation_console.h"
+#include "brain_result_delivery.h"
 #include "FakeBrainNvs.h"
 #include "FakeCloudIo.h"
 #include "WiFi.h"
@@ -1859,9 +1860,24 @@ void simulationPath(const std::string& mode) {
     context.temperatureC = 45;
     context.powderGPer100Ml = 25.5f;
     owner.setContext(&context, true, true);
+    // Production owners and MQTT ingress; only the final UART I/O is captured.
+    // The actual main callback's branch is also checked by the wiring suite.
+    struct ReceiptLink {
+        const babytech::v4::Pairing& pairing;
+        std::vector<CloudReceipt> forwarded;
+        const babytech::v4::Pairing* verifiedPairing() const { return &pairing; }
+        bool forwardCloudReceipt(const CloudReceipt& receipt, uint32_t) {
+            forwarded.push_back(receipt);
+            return true;
+        }
+    } link{pairing, {}};
+    using Relay = babytech::brain::BrainResultDelivery<ReceiptLink, BrainNetwork>;
+    Relay relay(link, network);
     struct Route {
         Owner& owner;
+        Relay& relay;
         size_t realCalls = 0;
+        size_t receiptCalls = 0;
         static void command(void* ptr, const CloudCommand& value, uint32_t generation, uint32_t now) {
             auto& self = *static_cast<Route*>(ptr);
             if (self.owner.enabled()) self.owner.command(value, generation, now);
@@ -1873,14 +1889,17 @@ void simulationPath(const std::string& mode) {
             else ++self.realCalls;
         }
         static void receipt(void* ptr, const CloudReceipt& value) {
-            static_cast<Route*>(ptr)->owner.receipt(value);
+            auto& self = *static_cast<Route*>(ptr);
+            ++self.receiptCalls;
+            if (self.owner.receipt(value)) return;
+            self.relay.receipt(value);
         }
         static void contextReceived(void* ptr, const ProductContext&, uint32_t, uint32_t) {
             // The main callback refreshes cache usability immediately: pending
             // persistence cannot authorize a later command in the same batch.
             static_cast<Route*>(ptr)->owner.setContext(nullptr, false, true);
         }
-    } route{owner};
+    } route{owner, relay};
     network.setProductHandlers(Route::command, Route::stopCommand, &route);
     network.setReceiptHandler(Route::receipt, &route);
     network.setContextHandler(Route::contextReceived, &route);
@@ -1888,13 +1907,16 @@ void simulationPath(const std::string& mode) {
     check(babytech::brain::BrainSimulationConsole::handle("SIM ON", owner, false, output, sizeof(output)),
           "actual owner did not handle USB simulation command");
     check(owner.enabled() && std::string(output) == "[simulation] on\n", "USB mode did not enable owner");
-    std::string session, original;
+    std::string session, original, simulatedStored, realStored, realEventId;
+    const bool mixed = mode.compare(0, 9, "receipts-") == 0;
+    size_t receiptsBeforeReconnect = 0;
     unsigned phase = 0, waits = 0;
     const auto ui = [&] {
         const bool worker = fake::io.inWorker;
         fake::io.inWorker = false;
         network.poll(nullptr, false, millis(), 0, false, false, owner.enabled() ? &owner.status() : nullptr);
         owner.poll(millis());
+        relay.poll(millis());
         fake::io.inWorker = worker;
     };
     const auto findTopic = [&](const char* suffix) {
@@ -1986,6 +2008,44 @@ void simulationPath(const std::string& mode) {
             receive("command", stored);
             ui();
             check(owner.resultCount() == 1, "wrong topic cleared simulated result");
+            check(link.forwarded.empty(), "wrong topic forwarded a Cloud receipt to Motion");
+            if (mixed) {
+                simulatedStored = stored;
+                check(babytech::boardlink::makeProductEventId(pairing,
+                      babytech::v4::Source::CloudCommand, 41, receipt.eventId), "real receipt ID fixture failed");
+                realEventId = receipt.eventId;
+                check(encodeCloudReceipt(receipt, message), "real receipt fixture encoding failed");
+                realStored.assign(reinterpret_cast<const char*>(message.payload), message.length);
+                // A real historical receipt must continue to Motion in SIM ON;
+                // it must not delete or otherwise mutate the simulated result.
+                if (mode == "receipts-on") {
+                    receive("config", realStored);
+                    ui();
+                    check(owner.resultCount() == 1 && link.forwarded.size() == 1 &&
+                          realEventId == link.forwarded[0].eventId,
+                          "SIM ON swallowed real receipt or cleared simulated evidence");
+                    receive("config", simulatedStored);
+                    ui();
+                    check(owner.resultCount() == 0 && link.forwarded.size() == 1,
+                          "matching simulation receipt reached Motion");
+                    noSideEffects(); workerOnly(); stop();
+                }
+                receiptsBeforeReconnect = route.receiptCalls;
+                if (mode == "receipts-off") {
+                    check(owner.setEnabled(false, false) == babytech::brain::SimulationModeResult::Changed,
+                          "pending result blocked SIM OFF");
+                } else {
+                    if (mode == "receipts-deferred") fake::io.deferNextQueueSend = true;
+                    receive("config", simulatedStored);
+                    receive("config", realStored);
+                    fake::io.clients.front()->dropConnection();
+                }
+                check(owner.resultCount() == 1 && link.forwarded.empty(), "unconsumed receipt deleted a result");
+                waits = 0;
+                phase = 7;
+                fake::io.now += 5000;
+                return;
+            }
             if (mode == "switch") {
                 // Both pre-toggle queued and post-toggle old-session bytes
                 // must never be delivered to the real hardware route.
@@ -2021,6 +2081,25 @@ void simulationPath(const std::string& mode) {
                   "pending context falsely restored simulation readiness");
             workerOnly();
             stop();
+        }
+        if (phase == 7) {
+            if (!network.connected()) { fake::io.now += 5000; ui(); return; }
+            if (mode == "receipts-deferred") fake::completeDeferredSends();
+            ui();
+            check(route.receiptCalls == receiptsBeforeReconnect && owner.resultCount() == 1 && link.forwarded.empty(),
+                  "old MQTT generation deleted a result or reached Motion relay");
+            receive("config", realStored);
+            ui();
+            check(owner.resultCount() == 1 && link.forwarded.size() == 1 &&
+                  realEventId == link.forwarded[0].eventId,
+                  "current real receipt did not recover after MQTT generation change");
+            receive("config", simulatedStored);
+            ui();
+            check(owner.resultCount() == 0 && link.forwarded.size() == 1,
+                  "current simulated receipt leaked to Motion or was lost in SIM OFF");
+            check(owner.enabled() == (mode != "receipts-off"), "receipt changed simulation mode");
+            check(route.realCalls == 0, "receipt/reconnect accidentally dispatched real movement");
+            noSideEffects(); workerOnly(); stop();
         }
     };
     fake::runWorker();

@@ -2,6 +2,7 @@
 #include "brain_install_console.h"
 #include "MotionInstallTarget.h"
 #include "MaintenanceExport.h"
+#include "ReadOnlyBoardLink.h"
 #include "FakeCommissioning.h"
 #include "FakeProductCrypto.h"
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -617,6 +619,198 @@ void success() {
     });
     CHECK(fresh.size() == 3);
     CHECK(fresh[0] != fresh[1] && fresh[0] != fresh[2] && fresh[1] != fresh[2]);
+}
+
+class BootWire final : public v4::ByteSink {
+public:
+    fake::Bytes pending, history;
+    bool idle() const override { return pending.empty(); }
+    size_t available() const override { return 64 - pending.size(); }
+    size_t write(const uint8_t* bytes, size_t length) override {
+        CHECK(length <= available());
+        length = std::min(length, size_t(17));
+        pending.insert(pending.end(), bytes, bytes + length);
+        history.insert(history.end(), bytes, bytes + length);
+        return length;
+    }
+    void deliver(ReadOnlyLink& receiver) {
+        for (const auto byte : pending) receiver.receive(byte, currentNow);
+        pending.clear();
+    }
+    void clear() { pending.clear(); history.clear(); }
+    void verify(const v4::Pairing& pairing, uint64_t boot, uint64_t peerBoot) const {
+        v4::Parser parser;
+        v4::Assembler assembler;
+        v4::Frame frame;
+        v4::Message message;
+        unsigned hellos = 0, replies = 0, frames = 0;
+        for (const auto byte : history) if (parser.push(byte, currentNow, frame)) {
+            ++frames;
+            CHECK(frame.kind == v4::Kind::Hello || frame.kind == v4::Kind::HelloAck ||
+                  frame.kind == v4::Kind::Heartbeat);
+            CHECK(frame.senderBoot == boot);
+            if (frame.kind == v4::Kind::Heartbeat) continue;
+            const auto assembled = assembler.accept(frame, currentNow, message);
+            CHECK(assembled == v4::AssemblyResult::Incomplete || assembled == v4::AssemblyResult::Complete);
+            if (assembled != v4::AssemblyResult::Complete) continue;
+            v4::Hello hello;
+            CHECK(decodeHello(message, hello));
+            CHECK(hello.role == pairing.role && !std::strcmp(hello.deviceId, pairing.deviceId) &&
+                  !std::strcmp(hello.epoch, pairing.epoch) &&
+                  !std::strcmp(hello.physicalId, pairing.localPhysicalId));
+            if (frame.kind == v4::Kind::Hello) {
+                CHECK(frame.receiverBoot == 0 && hello.replyTo == 0);
+                ++hellos;
+            } else {
+                CHECK(frame.receiverBoot == peerBoot && hello.replyTo != 0);
+                ++replies;
+            }
+        }
+        CHECK(hellos && replies && frames);
+        wireFrames += frames;
+    }
+};
+
+// Cold boot reuses persisted bytes, but no installer, pairing installer,
+// adapter or application owner is run. Only production loads and UART cores.
+struct RuntimeBoot {
+    Fixture& fixture;
+    std::unique_ptr<BrainStateStore> brainStore;
+    std::unique_ptr<MotionStateStore> motionStore;
+    std::unique_ptr<ReadOnlyLink> brainLink, motionLink;
+    v4::Pairing brainPair, motionPair;
+    BootWire toMotion, toBrain;
+    uint64_t brainBoot = kBrainBoot, motionBoot = kMotionBoot;
+
+    explicit RuntimeBoot(Fixture& f) : fixture(f) {}
+    void restart(bool brain, bool motion) {
+        CHECK(brain || motion);
+        // A power cut drops volatile byte buffers, not either board's NVS.
+        toMotion.clear(); toBrain.clear();
+        if (brain) {
+            brainStore.reset(); brainLink.reset();
+            fake::reboot();
+            io.before = [&f = fixture](const fake::Call& c) { f.observed(false, c); };
+        }
+        if (motion) {
+            MotionScope scope(fixture.motionDb);
+            motionStore.reset(); motionLink.reset();
+            fake::reboot();
+            io.before = [&f = fixture](const fake::Call& c) { f.observed(true, c); };
+        }
+        fixture.resetTrace();
+        const unsigned macCalls = extra::macCalls;
+        if (brain) {
+            CHECK(extra::mac == kBrainMac);
+            CHECK(loadBoardPairing(v4::Role::Brain, brainPair) == PairingLoad::Ready);
+            brainStore = std::make_unique<BrainStateStore>();
+            CHECK(brainStore->load(brainPair) == BrainLoad::Ready);
+            brainLink = std::make_unique<ReadOnlyLink>();
+            CHECK(brainLink->begin(brainPair, ++brainBoot));
+        }
+        if (motion) {
+            MotionScope scope(fixture.motionDb);
+            CHECK(extra::mac == kMotionMac);
+            CHECK(loadBoardPairing(v4::Role::Motion, motionPair) == PairingLoad::Ready);
+            motionStore = std::make_unique<MotionStateStore>();
+            CHECK(motionStore->load(motionPair) == MotionLoad::Ready);
+            motionLink = std::make_unique<ReadOnlyLink>();
+            CHECK(motionLink->begin(motionPair, ++motionBoot));
+        }
+        CHECK(extra::macCalls == macCalls + unsigned(brain) + unsigned(motion));
+        for (unsigned elapsed = 0; elapsed < 3000; elapsed += 5) {
+            brainLink->poll(currentNow, toMotion);
+            motionLink->poll(currentNow, toBrain);
+            toMotion.deliver(*motionLink);
+            toBrain.deliver(*brainLink);
+            currentNow += 5;
+        }
+        CHECK(brainLink->healthy() && motionLink->healthy());
+        CHECK(brainLink->connected(currentNow) && motionLink->connected(currentNow));
+        CHECK(!brainLink->freshStatus(currentNow) && !motionLink->freshStatus(currentNow));
+        CHECK(brainLink->commandSendState() == CommandSendState::Idle &&
+              motionLink->commandSendState() == CommandSendState::Idle);
+        toMotion.verify(brainPair, brainBoot, motionBoot);
+        toBrain.verify(motionPair, motionBoot, brainBoot);
+        fixture.noWrites();
+    }
+};
+
+ProductRequest installedCommand(const v4::Pairing& pairing, bool cloud, bool prepare, uint64_t seq) {
+    auto request = command(cloud, prepare, seq);
+    if (!cloud) CHECK(makeLocalCommandId(pairing, seq, request.commandId));
+    return request;
+}
+
+void persistedRestart() {
+    for (int kind : {0, 1, 2}) for (unsigned topology = 0; topology < 3; ++topology)
+        scenario("installed readonly cold boot and later restart context/topology=" +
+                 std::to_string(kind) + "/" + std::to_string(topology), [=](Fixture& f) {
+            f.seedLegacy(kind);
+            f.run();
+            f.verifyPersisted(kind);
+            const auto installedBrain = f.brainStore.state();
+            const auto installedMotion = f.link.motionStore.state();
+            const auto initialBrainDisk = io.disk, initialMotionDisk = f.motionDb.disk;
+            const unsigned installs = f.link.installs, discoveries = f.link.discoveries, reads = f.link.reads;
+            const auto savedEpochs = epochs;
+            const unsigned savedEpochCalls = epochCalls;
+            auto boot = std::make_unique<RuntimeBoot>(f);
+            boot->restart(true, true);
+            CHECK(sameBrainState(boot->brainStore->state(), installedBrain));
+            CHECK(sameMotionState(boot->motionStore->state(), installedMotion));
+            CHECK(io.disk == initialBrainDisk && f.motionDb.disk == initialMotionDisk);
+
+            if (kind == 1) {
+                const auto local = installedCommand(boot->brainPair, false, true, 1);
+                CHECK(boot->brainStore->reserveLocal(local) == BrainWrite::Stored);
+                {
+                    MotionScope scope(f.motionDb);
+                    const auto cloud = installedCommand(boot->brainPair, true, true, 12);
+                    CHECK(boot->motionStore->recordDecision(cloud, true, "accepted", kExecution) == MotionWrite::Stored);
+                    CHECK(boot->motionStore->finishFeeding(kExecution, true, "", "", 111) == MotionWrite::Stored);
+                    CHECK(boot->motionStore->archiveFeeding(true) == MotionWrite::Stored);
+                    constexpr char localExecution[] = "b123456789abcdefa123456789abcdef";
+                    CHECK(boot->motionStore->recordDecision(local, true, "accepted", localExecution) == MotionWrite::Stored);
+                    CHECK(boot->motionStore->finishFeeding(localExecution, false, "stopped", "E_STOPPED", 222) == MotionWrite::Stored);
+                    CHECK(boot->motionStore->archiveFeeding(true) == MotionWrite::Stored);
+                }
+                // The real Motion decision is known; its lost terminal receipt
+                // must remain independent of Brain acceptance-in-flight.
+                CHECK(boot->brainStore->clearPending(local) == BrainWrite::Stored);
+            }
+            const auto pending = installedCommand(boot->brainPair, false, false, kind == 1 ? 2 : 1);
+            CHECK(boot->brainStore->reserveLocal(pending) == BrainWrite::Stored);
+            {
+                MotionScope scope(f.motionDb);
+                CHECK(boot->motionStore->recordDecision(pending, false, "integration_not_ready") == MotionWrite::Stored);
+                const auto active = installedCommand(boot->brainPair, true, false, 27);
+                constexpr char activeExecution[] = "c123456789abcdefa123456789abcdef";
+                CHECK(boot->motionStore->recordDecision(active, true, "accepted", activeExecution) == MotionWrite::Stored);
+            }
+            const auto brainEvidence = boot->brainStore->state();
+            const auto motionEvidence = boot->motionStore->state();
+            const auto brainDisk = io.disk, motionDisk = f.motionDb.disk;
+            const auto* oldBrainStore = boot->brainStore.get();
+            const auto* oldMotionStore = boot->motionStore.get();
+            const uint64_t oldBrainBoot = boot->brainBoot, oldMotionBoot = boot->motionBoot;
+            const bool restartBrain = topology != 1, restartMotion = topology != 0;
+            boot->restart(restartBrain, restartMotion);
+            if (!restartBrain) CHECK(boot->brainStore.get() == oldBrainStore);
+            if (!restartMotion) CHECK(boot->motionStore.get() == oldMotionStore);
+            CHECK(boot->brainBoot == oldBrainBoot + unsigned(restartBrain));
+            CHECK(boot->motionBoot == oldMotionBoot + unsigned(restartMotion));
+            CHECK(sameBrainState(boot->brainStore->state(), brainEvidence));
+            CHECK(sameMotionState(boot->motionStore->state(), motionEvidence));
+            CHECK(brainEvidence.pending && brainEvidence.localSequence == pending.sequence);
+            CHECK(motionEvidence.localSequence == pending.sequence && motionEvidence.cloudSequence == 27);
+            CHECK(motionEvidence.slot.kind == MotionSlotKind::Intent);
+            CHECK(motionEvidence.pendingResultCount == (kind == 1 ? 2 : 0));
+            CHECK(io.disk == brainDisk && f.motionDb.disk == motionDisk);
+            CHECK(epochCalls == savedEpochCalls && epochs == savedEpochs);
+            CHECK(f.link.installs == installs && f.link.discoveries == discoveries && f.link.reads == reads);
+            CHECK(f.installer.stage() == Stage::Persisted);
+        });
 }
 
 void resume() {
@@ -1329,16 +1523,21 @@ int main(int argc, char** argv) {
         {"success", success}, {"resume", resume}, {"used", used}, {"conflicts", conflicts},
         {"gates", gates}, {"interruptions", interruptions}, {"post-read", postRead}, {"faults", storageFaults},
         {"console", consoleTests}, {"transfer", transfer}, {"lease-nvs", leaseDuringNvs}, {"warnings", warnings},
-        {"recovery", recovery}
+        {"recovery", recovery}, {"persisted-restart", persistedRestart}
     };
     bool selected = false;
     for (const auto& group : groups) if (argc == 1 || !std::strcmp(argv[1], group.first)) {
         selected = true;
+        const unsigned before = scenarios, bad = failures;
         try { group.second(); }
         catch (const std::exception& e) { ++failures; std::fprintf(stderr, "FAIL group %s: %s\n", group.first, e.what()); }
+        std::printf("%s: %u scenarios, %u failures\n", group.first, scenarios - before, failures - bad);
     }
     if (argc > 2 || !selected) { std::fprintf(stderr, "Unknown test group\n"); return 2; }
     std::printf("BrainInstaller: %u scenarios, %u failures, %u real UART frames; isolated Brain/Motion NVS; "
                 "Persisted is activation_pending, not runtime/network activation\n", scenarios, failures, wireFrames);
+    std::puts("Boundary: production installer/commissioning, MAC-checked pairing loads, Stores and two "
+              "ReadOnlyLink cores; fake NVS/MAC/clock/byte I/O. No actual Arduino adapter/main, "
+              "Cloud, physical power cut, Flash atomicity or mechanical recovery validation.");
     return failures ? 1 : 0;
 }
