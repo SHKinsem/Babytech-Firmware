@@ -24,7 +24,7 @@ Brain v4 已接本地USB Wi-Fi/MQTT配置，见下方“Brain USB网络配置”
 
 `ReadOnlyLink` 为单 owner、非重入对象，约 8 KiB，不能放在 MCU loop 局部栈中；共享完整消息 scratch，短回执用紧凑帧。35 字段 STATUS 的 GCC8.4/14.2 静态接收调用链（receive/handle/decodeStatus）约 4 KiB，尚未包含外层适配器和 JSON 库调用余量；接入设备后仍须检查实际任务栈高水位，不能让网络回调并发操作链路。
 
-当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1 只读入口：Brain 使用 `BABYTECH_BOARD_LINK_V4=1`，Motion 使用 `MOTION_UART_PEER=4`。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC，缺失或损坏即不可用，不自动认领陌生对端。受控配对写入和旧配置导入尚未完成，不能靠烧录这两个镜像直接完成迁移。
+当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1 只读入口：Brain 使用 `BABYTECH_BOARD_LINK_V4=1`，Motion 使用 `MOTION_UART_PEER=4`。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC；缺失或损坏不能进入正常握手、联网或产品操作，但可选v4入口允许仅打开UART诊断发现。不自动认领陌生对端。受控配对写入和旧配置导入尚未完成，不能靠烧录这两个镜像直接完成迁移。
 
 只读 v4 不启动 Motion 产品 MQTT，也不开放屏幕 Initialize/Start；Motion 独立 Wi-Fi、HTTP 调试网页及本地 OTA 保留。旧 `formulaevt/payload` 仅用只读方式检查，有记录或读取异常时保留原数据、标记待处理并监督停机，不调用会改写旧 journal 的 Outbox 初始化。新记录的开机读取/恢复已接入，接受新动作和两板补传仍未接入；只读状态不授予运动权限。默认 v3 行为不变。
 
@@ -38,7 +38,7 @@ pio run -d main-controller -e brain
 pio run -d device-controller -e motion
 ```
 
-共享协议运行 `python3 tools/test_protocol.py --sanitize`，配对记录运行 `python3 tools/test_pairing_record.py --sanitize`。先构建 Motion 获取 ArduinoJson 后运行 `python3 tools/test_board_messages.py --sanitize`、`python3 tools/test_board_link.py --sanitize`、`python3 tools/test_board_arduino.py --sanitize`。最后一个链接生产 MCU 适配器，仅用替身替换 NVS/UART/MAC；它不代表真实 Flash、UART 线速或 Stop 时限验证。CI 编译两套默认与迁移入口；WSL 默认目标仍只导出默认镜像。
+共享协议运行 `python3 tools/test_protocol.py --sanitize`，配对记录运行 `python3 tools/test_pairing_record.py --sanitize`，只读发现运行`python3 tools/test_board_discovery.py --sanitize`。先构建 Motion 获取 ArduinoJson 后运行 `python3 tools/test_board_messages.py --sanitize`、`python3 tools/test_board_link.py --sanitize`、`python3 tools/test_board_arduino.py --sanitize`。最后一个链接生产 MCU 适配器，仅用替身替换 NVS/UART/MAC；它不代表真实 Flash、UART 线速或 Stop 时限验证。CI 编译两套默认与迁移入口；WSL 默认目标仍只导出默认镜像。
 
 ## B1.2 共享网络基础（2026-10-06）
 
@@ -102,6 +102,8 @@ STATUS读取真实持久水位、执行/event ID及配置屏障/墓碑；存储�
 Motion v4统一读取USB并保留`OTA CODE`，避免两处抢读；默认固件仍使用原OTA命令入口。命令限767个ASCII字符，每loop最多读64 bytes；超长、控制字符或2秒读取间隔的输入整行丢弃到换行，不执行后缀。已处理或拒绝的行缓冲清零，未知输入不回显。`OTA CODE`是既有本地管理员恢复功能，不要分享其输出。
 
 ### Brain USB网络配置
+
+Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`。Motion经同一UART自动返回实际MAC及配对状态，无需第二USB；独立发现请求域、1000ms截止、无NVS写入/动作。`found`不创建配对或授予Start，损坏/读错/冲突不冒充Missing；超时可重试。该入口仅为支持工具及后续单Brain自动安装的基础，不是新的日常验证步骤。完整安装/运行切换仍未完成，旧正常配对使用轻量HELLO自动复用。
 
 仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。
 

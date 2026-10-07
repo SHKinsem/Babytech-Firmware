@@ -1,7 +1,9 @@
 """Test production ControllerLink + Arduino adapter/session using SDK I/O fakes.
 
-No PIO, network, MCU, or copied production logic. Does not validate physical
-UART timing, MCU stacks or the Main/BrainNetwork outbound integration.
+No PIO, network, MCU, or copied production logic. Includes the production PAIR
+console template instantiated with ControllerLink. No CloudLink is linked, so
+this suite cannot prove network-task isolation or Main/BrainNetwork integration.
+Does not validate physical UART timing or MCU stacks.
 """
 import argparse
 import os
@@ -38,7 +40,7 @@ def main():
     sources = [root / "shared/BoardProtocol/src" / name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
-                ("BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
+                ("BoardDiscovery.cpp", "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
                  "BoardLinkArduino.cpp")]
     sources += [stubs / "FakeBoardIo.cpp", root / "main-controller/src/controller_link.cpp",
                 root / "test/test_brain_controller.cpp"]

@@ -214,7 +214,9 @@ void goldenAndKinds() {
     assert(isControl(Kind::LinkAck) && isControl(Kind::LinkReject));
     assert(!isControl(Kind::Command) && !isControl(Kind::Context));
 
-    for (unsigned kind = 1; kind <= 16; ++kind) {
+    assert(!isControl(Kind::Discovery));
+    static_assert(uint8_t(Kind::Discovery) == 17, "Discovery wire kind");
+    for (unsigned kind = 1; kind <= 17; ++kind) {
         Frame value = frame(static_cast<Kind>(kind));
         value.payload[0] = '{'; value.payload[1] = '}';
         if (value.kind == Kind::Heartbeat || value.kind == Kind::StatusQuery)
@@ -224,7 +226,7 @@ void goldenAndKinds() {
             value.total = value.length = static_cast<uint16_t>(payload.size());
             std::memcpy(value.payload, payload.data(), payload.size());
         }
-        if (value.kind == Kind::Hello) value.receiverBoot = 0;
+        if (value.kind == Kind::Hello || value.kind == Kind::Discovery) value.receiverBoot = 0;
         assert(validFrame(value));
         Parser parser;
         Frame output;
@@ -255,7 +257,7 @@ void goldenAndKinds() {
 
 void invalidHeadersAndCapacity() {
     Frame bad = frame(); bad.kind = static_cast<Kind>(0); rejectedFrame(bad);
-    bad = frame(); bad.kind = static_cast<Kind>(17); rejectedFrame(bad);
+    bad = frame(); bad.kind = static_cast<Kind>(18); rejectedFrame(bad);
     bad = frame(); bad.kind = static_cast<Kind>(255); rejectedFrame(bad);
     bad = frame(); bad.senderBoot = 0; rejectedFrame(bad);
     bad = frame(); bad.receiverBoot = 0; rejectedFrame(bad);
@@ -361,6 +363,37 @@ void parserStreaming() {
         assert(ready == (i + 1 == wire.size()));
         if (!ready) sameFrame(output, before, true);
     }
+}
+
+void discoveryFrames() {
+    for (uint64_t receiver : {UINT64_C(0), UINT64_C(0xfedcba9876543210)}) {
+        Frame input = frame(Kind::Discovery, kMaxFragment);
+        input.receiverBoot = receiver;
+        const Bytes wire = encoded(input);
+        Parser parser;
+        Frame output;
+        assert(feed(parser, wire, 0, output) == 1);
+        sameFrame(output, input);
+        for (size_t i = 0; i < wire.size(); ++i) {
+            for (unsigned bit = 0; bit < 8; ++bit) {
+                Bytes corrupt = wire;
+                corrupt[i] ^= uint8_t(1u << bit);
+                rejectedWire(corrupt);
+            }
+        }
+    }
+    // Discovery is not control traffic and cannot bypass an active assembly.
+    Assembler assembler;
+    Message output;
+    const Message context = message(321);
+    accept(assembler, part(context, 0), 0, output, AssemblyResult::Incomplete);
+    Frame discovery = frame(Kind::Discovery);
+    discovery.receiverBoot = 0;
+    ++discovery.messageId;
+    accept(assembler, discovery, 1, output, AssemblyResult::Busy);
+    assert(assembler.active());
+    assembler.reset();
+    accept(assembler, discovery, 2, output, AssemblyResult::Complete);
 }
 
 void fragmentsAndAssembly() {
@@ -613,6 +646,7 @@ int main() {
     goldenAndKinds();
     invalidHeadersAndCapacity();
     parserStreaming();
+    discoveryFrames();
     fragmentsAndAssembly();
     assemblyRejectionsAndControls();
     assemblyDeadlines();

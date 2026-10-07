@@ -9,8 +9,11 @@ namespace babytech { namespace boardlink {
 // Keep this ~8 KiB object off the MCU task stack (static/member storage).
 class ReadOnlyLink {
 public:
+    void reset();
     bool begin(const v4::Pairing& pairing, uint64_t boot);
     void receive(uint8_t byte, uint32_t nowMs);
+    void receiveFrame(const v4::Frame& frame, uint32_t nowMs);
+    bool queueDiscovery(const v4::Frame& frame);
     void poll(uint32_t nowMs, v4::ByteSink& sink, const Status* localStatus = nullptr);
     bool connected(uint32_t nowMs) const { return session_.connected(nowMs); }
     bool freshStatus(uint32_t nowMs) const { return session_.freshStatus(nowMs); }

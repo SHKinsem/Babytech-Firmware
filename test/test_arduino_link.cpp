@@ -293,10 +293,11 @@ Message expectedHello() {
     return hello;
 }
 
-void rxBudget() {
+void rxBudget(bool enableDiscovery = false, bool missing = false) {
     setup();
+    if (missing) io.openError = ESP_ERR_NVS_NOT_FOUND;
     ArduinoBoardLink adapter;
-    assert(adapter.begin(Role::Brain, 44, 43));
+    assert(adapter.begin(Role::Brain, 44, 43, 115200, enableDiscovery));
     io.writeRoom = 0;
     io.rx.assign(600, 0);
     adapter.poll(0);
@@ -457,10 +458,428 @@ void drainTx(ArduinoBoardLink& adapter, uint32_t now) {
     for (unsigned i = 0; i < 20; ++i) adapter.poll(now);
 }
 
-void readOnlySession() {
+std::vector<Frame> frames(const Bytes& bytes) {
+    Parser parser;
+    Frame frame;
+    Bytes reconstructed;
+    std::vector<Frame> result;
+    for (uint8_t byte : bytes) {
+        if (!parser.push(byte, 0, frame)) continue;
+        uint8_t encoded[kMaxFrame];
+        const size_t size = encode(frame, encoded, sizeof(encoded));
+        assert(size);
+        reconstructed.insert(reconstructed.end(), encoded, encoded + size);
+        result.push_back(frame);
+    }
+    // A permissive parser alone would hide dropped/interleaved UART bytes.
+    assert(reconstructed == bytes);
+    return result;
+}
+
+Bytes discoveryBytes(const Bytes& bytes) {
+    Bytes result;
+    for (const auto& frame : frames(bytes)) {
+        if (frame.kind != Kind::Discovery) continue;
+        assert(!isControl(frame.kind) && frame.offset == 0 && frame.length == frame.total);
+        uint8_t encoded[kMaxFrame];
+        const size_t size = encode(frame, encoded, sizeof(encoded));
+        result.insert(result.end(), encoded, encoded + size);
+    }
+    return result;
+}
+
+void storageState(PairingLoad state) {
+    switch (state) {
+        case PairingLoad::Ready: break;
+        case PairingLoad::Missing: io.openError = ESP_ERR_NVS_NOT_FOUND; break;
+        case PairingLoad::Corrupt: io.blob[0] ^= 1; break;
+        case PairingLoad::IoError: io.openError = ESP_FAIL; break;
+        case PairingLoad::IdentityMismatch: io.mac[5] ^= 1; break;
+        default: assert(false);
+    }
+}
+
+const char* physical(Role role, PairingLoad state) {
+    if (role == Role::Brain)
+        return state == PairingLoad::IdentityMismatch ? "112233445567" : "112233445566";
+    return state == PairingLoad::IdentityMismatch ? "aabbccddeefe" : "aabbccddeeff";
+}
+
+void pairingBoundary(const ArduinoBoardLink& adapter, Role role, PairingLoad state, uint32_t now) {
+    assert(adapter.pairingState() == state);
+    assert(bool(adapter.verifiedPairing()) == (state == PairingLoad::Ready));
+    assert(adapter.link().configured() == (state == PairingLoad::Ready));
+    if (state == PairingLoad::Ready) {
+        equalFields(*adapter.verifiedPairing(), pairing(role));
+        assert(std::strcmp(adapter.deviceId(), pairing(role).deviceId) == 0);
+    } else {
+        assert(!adapter.deviceId()[0] && !adapter.link().healthy());
+    }
+    assert(!adapter.link().connected(now) && !adapter.link().freshStatus(now));
+    assert(!adapter.link().peerStatus().snapshot.startEnabled);
+    assert(!adapter.link().peerStatus().executionAuthorized);
+}
+
+// HardwareSerial stubs use one global I/O state. Switch only that state, never
+// copy either production adapter/session/discovery object between boards.
+template<class Action>
+void onBoard(fake::State& state, Action action) {
+    fake::assertReadOnly();
+    io = state;
+    action();
+    fake::assertReadOnly();
+    state = io;
+}
+
+void discoveryRoundTrips() {
+    constexpr PairingLoad states[] = {PairingLoad::Missing, PairingLoad::Ready,
+        PairingLoad::Corrupt, PairingLoad::IoError, PairingLoad::IdentityMismatch};
+    constexpr DiscoveryPairState diagnostics[] = {DiscoveryPairState::Missing,
+        DiscoveryPairState::Ready, DiscoveryPairState::Corrupt,
+        DiscoveryPairState::IoError, DiscoveryPairState::IdentityMismatch};
+    constexpr auto found = DiscoveryState::Found;
+    constexpr auto unavailable = DiscoveryState::Unavailable;
+    constexpr DiscoveryState outcomes[5][5] = {
+        {found, found, unavailable, unavailable, unavailable},
+        {DiscoveryState::Conflict, found, unavailable, unavailable, unavailable},
+        {unavailable, unavailable, unavailable, unavailable, unavailable},
+        {unavailable, unavailable, unavailable, unavailable, unavailable},
+        {unavailable, unavailable, unavailable, unavailable, unavailable},
+    };
+    for (unsigned b = 0; b < 5; ++b) {
+        for (unsigned m = 0; m < 5; ++m) {
+            setup();
+            storageState(states[b]);
+            ArduinoBoardLink brain;
+            assert(brain.begin(Role::Brain, 44, 43, 115200, true));
+            assertUartConfigured();
+            assert(io.macReads == (states[b] == PairingLoad::IdentityMismatch ? 2u : 1u));
+            pairingBoundary(brain, Role::Brain, states[b], 0);
+            assert(brain.requestDiscovery(pairing().deviceId, 0));
+            assert(!brain.requestDiscovery(pairing().deviceId, 0));
+            drainTx(brain, 0);
+            const Bytes query = discoveryBytes(io.tx);
+            const auto queryFrames = frames(query);
+            assert(queryFrames.size() == 1 && query[5] == 17);
+            const auto& q = queryFrames[0];
+            assert(q.senderBoot == kLocalBoot && !q.receiverBoot && q.messageId == 1);
+            assert(q.payload[0] == 1 && q.payload[1] == std::strlen(pairing().deviceId));
+            assert(q.length == 14 + std::strlen(pairing().deviceId));
+            assert(!std::memcmp(q.payload + 2, pairing().deviceId, q.payload[1]));
+            assert(!std::memcmp(q.payload + 2 + q.payload[1], physical(Role::Brain, states[b]), 12));
+            if (states[b] != PairingLoad::Ready) assert(io.tx == query);
+            fake::State brainIo = io;
+
+            setup(Role::Motion);
+            storageState(states[m]);
+            io.randomWords = {0, uint32_t(kPeerBoot)};
+            ArduinoBoardLink motion;
+            assert(motion.begin(Role::Motion, 44, 43, 115200, true));
+            assertUartConfigured();
+            assert(io.macReads == (states[m] == PairingLoad::IdentityMismatch ? 2u : 1u));
+            pairingBoundary(motion, Role::Motion, states[m], 0);
+            assert(!motion.requestDiscovery(pairing().deviceId, 0));
+            // Deliver the actual encoded query in two RX chunks, not a core receive call.
+            io.rx.insert(io.rx.end(), query.begin(), query.end() - 1);
+            motion.poll(10);
+            assert(discoveryBytes(io.tx).empty());
+            io.rx.push_back(query.back());
+            Status local;
+            local.sampleUptimeMs = 10;
+            local.executionAuthorized = local.snapshot.startEnabled = true;
+            for (unsigned i = 0; i < 20; ++i) motion.poll(10, &local);
+            const Bytes reply = discoveryBytes(io.tx);
+            const auto replyFrames = frames(reply);
+            assert(replyFrames.size() == 1);
+            const auto& r = replyFrames[0];
+            assert(r.senderBoot == kPeerBoot && r.receiverBoot == kLocalBoot);
+            assert(r.messageId == q.messageId && r.payload[0] == 2);
+            assert(!std::memcmp(r.payload + 1, physical(Role::Motion, states[m]), 12));
+            assert(r.payload[13] == uint8_t(diagnostics[m]));
+            if (states[m] == PairingLoad::Ready) {
+                Pairing peer;
+                assert(decodePairingRecord(r.payload + 15, r.payload[14], peer));
+                equalFields(peer, pairing(Role::Motion));
+            } else {
+                assert(r.length == 15 && r.payload[14] == 0);
+                assert(io.tx == reply);
+            }
+            pairingBoundary(motion, Role::Motion, states[m], 10);
+            fake::State motionIo = io;
+
+            onBoard(brainIo, [&] {
+                io.rx.insert(io.rx.end(), reply.begin(), reply.end());
+                brain.poll(20);
+                const auto& result = brain.discoveryResult();
+                assert(result.state == outcomes[b][m] && result.peerBoot == kPeerBoot);
+                assert(result.pairingState == diagnostics[m]);
+                assert(std::strcmp(result.physicalId, physical(Role::Motion, states[m])) == 0);
+                if (states[m] == PairingLoad::Ready) equalFields(result.pairing, pairing(Role::Motion));
+                else assert(!result.pairing.deviceId[0]);
+                // Discovery is not a HELLO_ACK, normal status or execution permission.
+                inject(brain, peerHello(Kind::HelloAck, 1, 40), 21);
+                inject(brain, heartbeat(41), 21);
+                inject(brain, peerStatus(21, 42), 21);
+                if (states[b] != PairingLoad::Ready)
+                    pairingBoundary(brain, Role::Brain, states[b], 21);
+                assert(io.blob == brainIo.blob && io.mutations == 0);
+            });
+            onBoard(motionIo, [&] {
+                assert(io.blob == motionIo.blob && io.mutations == 0);
+                pairingBoundary(motion, Role::Motion, states[m], 21);
+            });
+            std::printf("PASS actual UART discovery brain=%u motion=%u diagnostic=%u outcome=%u\n",
+                        b, m, unsigned(diagnostics[m]), unsigned(outcomes[b][m]));
+        }
+    }
+}
+
+void discoveryTxArbitration() {
+    for (bool paired : {false, true}) {
+        setup();
+        if (!paired) storageState(PairingLoad::Missing);
+        ArduinoBoardLink adapter;
+        assert(adapter.begin(Role::Brain, 44, 43, 115200, true));
+        Bytes helloBytes;
+        if (paired) {
+            helloBytes = wire(expectedHello());
+            io.maxWrite = 7;
+            adapter.poll(0);
+            assert(io.tx.size() == 7);
+        }
+        assert(adapter.requestDiscovery(pairing().deviceId, 1));
+        io.maxWrite = 7;
+        io.writeRoom = 19;
+        if (paired) {
+            io.idleResult = ESP_ERR_TIMEOUT;
+            const unsigned checks = io.idleChecks;
+            Frame first;
+            assert(fragment(expectedHello(), 0, first));
+            const size_t size = kHeaderSize + first.length + 2;
+            for (unsigned i = 0; io.tx.size() < size && i < 100; ++i) {
+                adapter.poll(1);
+                assert(io.idleChecks == checks);
+                assert(std::equal(io.tx.begin(), io.tx.end(), helloBytes.begin()));
+            }
+            assert(io.tx.size() == size);
+            const size_t sent = io.tx.size();
+            adapter.poll(2);
+            assert(io.tx.size() == sent);
+            io.idleResult = ESP_OK;
+            for (unsigned i = 0; io.tx.size() < helloBytes.size() && i < 100; ++i) adapter.poll(2);
+            assert(io.tx == helloBytes);
+        }
+        for (esp_err_t error : {ESP_ERR_TIMEOUT, ESP_FAIL}) {
+            io.idleResult = error;
+            adapter.poll(3);
+            assert(io.tx == helloBytes);
+        }
+        io.idleResult = ESP_OK;
+        for (int room : {0, -1}) {
+            io.writeRoom = room;
+            adapter.poll(4);
+            assert(io.tx == helloBytes);
+        }
+        io.writeRoom = 512;
+        io.maxWrite = 0;
+        adapter.poll(5);
+        assert(io.tx == helloBytes);
+        io.roomScript = {64, 0};
+        io.maxWrite = SIZE_MAX;
+        adapter.poll(6);
+        assert(io.tx == helloBytes && io.writeRequests.back() == 0);
+        io.roomScript = {64, 3};
+        adapter.poll(7);
+        assert(io.tx.size() == helloBytes.size() + 3);
+        io.maxWrite = 7;
+        io.writeRoom = 19;
+        io.idleResult = ESP_ERR_TIMEOUT;
+        const unsigned checks = io.idleChecks;
+        const size_t querySize = kHeaderSize + 14 + std::strlen(pairing().deviceId) + 2;
+        for (unsigned i = 0; io.tx.size() < helloBytes.size() + querySize && i < 100; ++i) {
+            adapter.poll(8);
+            assert(io.idleChecks == checks);
+        }
+        assert(io.tx.size() == helloBytes.size() + querySize);
+        const Bytes query = discoveryBytes(io.tx);
+        assert(frames(query).size() == 1 && query.size() == querySize);
+        assert(std::equal(helloBytes.begin(), helloBytes.end(), io.tx.begin()));
+        const auto writes = io.writeCalls;
+        adapter.poll(9);
+        assert(io.writeCalls == writes);
+        assert(adapter.discoveryResult().state == DiscoveryState::Pending);
+        assert(io.begins == 1 && io.constructors == 1 && io.txConfigs == 0);
+        fake::assertReadOnly();
+    }
+    std::puts("PASS discovery shares ordinary TX slot with HELLO; idle/room/zero/short writes never interleave frames");
+}
+
+void discoveryStartupFailures() {
+    for (bool paired : {false, true}) {
+        for (unsigned failure = 0; failure < 10; ++failure) {
+            setup();
+            if (!paired) storageState(PairingLoad::Missing);
+            int rx = 44, tx = 43;
+            uint32_t baud = 115200;
+            if (failure == 0) rx = -1;
+            if (failure == 1) tx = -1;
+            if (failure == 2) tx = rx;
+            if (failure == 3) baud = 9600;
+            if (failure == 4) io.randomWords = {0, 0};
+            if (failure == 5) io.macError = ESP_FAIL;
+            if (failure == 6) io.rxResult = 0;
+            if (failure == 7) io.rxResult = 255;
+            if (failure == 8) io.rxResult = 257;
+            if (failure == 9) io.serialReady = false;
+            ArduinoBoardLink adapter;
+            assert(!adapter.begin(Role::Brain, rx, tx, baud, true));
+            const bool verified = paired && failure != 5;
+            assert(bool(adapter.verifiedPairing()) == verified);
+            if (verified) {
+                equalFields(*adapter.verifiedPairing(), pairing());
+                assert(std::strcmp(adapter.deviceId(), pairing().deviceId) == 0);
+            } else assert(!adapter.deviceId()[0]);
+            assert(adapter.pairingState() == (failure == 4 || failure == 5
+                ? PairingLoad::IoError : PairingLoad::UartError));
+            assert(!adapter.requestDiscovery(pairing().deviceId, 0));
+            noPollIo(adapter);
+        }
+        for (const auto words : {std::array<uint32_t, 2>{{0, 1}}, std::array<uint32_t, 2>{{1, 0}}}) {
+            setup();
+            if (!paired) storageState(PairingLoad::Missing);
+            io.randomWords = {words[0], words[1]};
+            ArduinoBoardLink adapter;
+            assert(adapter.begin(Role::Brain, 44, 43, 115200, true));
+            assert(adapter.requestDiscovery(pairing().deviceId, 0));
+            drainTx(adapter, 0);
+            const auto emitted = frames(discoveryBytes(io.tx));
+            assert(emitted.size() == 1);
+            assert(emitted[0].senderBoot == ((uint64_t(words[0]) << 32) | words[1]));
+            fake::assertReadOnly();
+        }
+    }
+    setup();
+    storageState(PairingLoad::Missing);
+    io.mac.fill(0);
+    ArduinoBoardLink zeroMac;
+    assert(!zeroMac.begin(Role::Brain, 44, 43, 115200, true));
+    assert(zeroMac.pairingState() == PairingLoad::IoError && !zeroMac.verifiedPairing());
+    assert(io.begins == 0 && io.rxConfigs == 0);
+    noPollIo(zeroMac);
+    std::puts("PASS discovery startup MAC/random/pin/baud/RX/bool failures remain read-only; SDK failure preserves verified pair");
+}
+
+void discoveryReplyShortWrites() {
+    setup();
+    storageState(PairingLoad::Missing);
+    ArduinoBoardLink brain;
+    assert(brain.begin(Role::Brain, 44, 43, 115200, true));
+    assert(brain.requestDiscovery(pairing().deviceId, 0));
+    drainTx(brain, 0);
+    Bytes query = io.tx;
+    assert(frames(query).size() == 1);
+    fake::State brainIo = io;
+    for (bool paired : {false, true}) {
+        setup(Role::Motion);
+        if (!paired) storageState(PairingLoad::Missing);
+        io.randomWords = {0, uint32_t(kPeerBoot)};
+        ArduinoBoardLink motion;
+        assert(motion.begin(Role::Motion, 44, 43, 115200, true));
+        drainTx(motion, 0);
+        io.tx.clear();
+        io.rx.insert(io.rx.end(), query.begin(), query.end());
+        io.idleResult = ESP_ERR_TIMEOUT;
+        motion.poll(10);
+        assert(io.rx.empty() && io.tx.empty());
+        io.idleResult = ESP_OK;
+        io.maxWrite = 0;
+        motion.poll(11);
+        assert(io.tx.empty());
+        io.maxWrite = 3;
+        motion.poll(12);
+        assert(io.tx.size() == 3);
+        io.idleResult = ESP_ERR_TIMEOUT;
+        io.maxWrite = 7;
+        io.writeRoom = 19;
+        const unsigned checks = io.idleChecks;
+        const size_t replySize = kHeaderSize + 15 + (paired ? record(pairing(Role::Motion)).size() : 0) + 2;
+        for (unsigned i = 0; io.tx.size() < replySize && i < 100; ++i) {
+            motion.poll(13);
+            assert(io.idleChecks == checks);
+        }
+        const Bytes reply = io.tx;
+        assert(reply.size() == replySize);
+        const auto emitted = frames(reply);
+        assert(emitted.size() == 1 && emitted[0].kind == Kind::Discovery);
+        assert(emitted[0].payload[13] == uint8_t(paired ? DiscoveryPairState::Ready : DiscoveryPairState::Missing));
+        assert(io.constructors == 1 && io.begins == 1 && io.txConfigs == 0);
+        onBoard(brainIo, [&] {
+            io.rx.insert(io.rx.end(), reply.begin(), reply.end());
+            brain.poll(paired ? 40 : 20);
+            assert(brain.discoveryResult().state == DiscoveryState::Found);
+            assert(uint8_t(brain.discoveryResult().pairingState) == emitted[0].payload[13]);
+        });
+        if (!paired) {
+            onBoard(brainIo, [&] {
+                // Bind the second round trip to a new actual Brain query.
+                assert(brain.requestDiscovery(pairing().deviceId, 30));
+                io.tx.clear();
+                drainTx(brain, 30);
+                query = io.tx;
+            });
+        }
+    }
+    std::puts("PASS Motion discovery reply uses same idle/short-write transmitter and decodes at actual Brain RX");
+}
+
+void failedInitRetry() {
+    for (bool enableDiscovery : {false, true}) {
+        for (PairingLoad state : {PairingLoad::Missing, PairingLoad::Corrupt,
+                                 PairingLoad::IoError, PairingLoad::IdentityMismatch}) {
+            for (bool rxFailure : {false, true}) {
+                setup();
+                if (rxFailure) io.rxResult = 255;
+                else io.serialReady = false;
+                ArduinoBoardLink adapter;
+                assert(!adapter.begin(Role::Brain, 44, 43, 115200, true));
+                assert(adapter.verifiedPairing());
+                equalFields(*adapter.verifiedPairing(), pairing());
+                assert(!adapter.requestDiscovery(pairing().deviceId, 0));
+                noPollIo(adapter);
+
+                // Reset only the simulated SDK state to permit another begin;
+                // retain the failed production object to exercise its retry path.
+                setup();
+                storageState(state);
+                io.randomWords = {0, 77};
+                const Bytes stored = io.blob;
+                assert(adapter.begin(Role::Brain, 44, 43, 115200, enableDiscovery) == enableDiscovery);
+                assert(!adapter.verifiedPairing() && !adapter.deviceId()[0]);
+                assert(adapter.discoveryResult().state == DiscoveryState::Idle);
+                if (enableDiscovery) {
+                    assert(adapter.requestDiscovery(pairing().deviceId, 20));
+                    drainTx(adapter, 20);
+                    assert(io.tx == discoveryBytes(io.tx));
+                    const auto emitted = frames(io.tx);
+                    assert(emitted.size() == 1 && emitted[0].senderBoot == 77);
+                    pairingBoundary(adapter, Role::Brain, state, 20);
+                } else {
+                    assert(!adapter.requestDiscovery(pairing().deviceId, 20));
+                    noPollIo(adapter);
+                }
+                assert(!adapter.link().configured());
+                assert(io.blob == stored);
+                fake::assertReadOnly();
+            }
+        }
+    }
+    std::puts("PASS failed SDK init retry cannot retain old verified pair/device/discovery or transmit old HELLO");
+}
+
+void readOnlySession(bool enableDiscovery = false) {
     setup();
     ArduinoBoardLink adapter;
-    assert(adapter.begin(Role::Brain, 44, 43));
+    assert(adapter.begin(Role::Brain, 44, 43, 115200, enableDiscovery));
     drainTx(adapter, 0);
     assert(io.tx == wire(expectedHello()));
     inject(adapter, peerStatus(1, 9), 1);
@@ -537,6 +956,33 @@ void readOnlySession() {
     }
     assert(sawHeartbeat && sawStatusAck);
 
+    if (enableDiscovery) {
+        io.tx.clear();
+        assert(adapter.requestDiscovery(pairing().deviceId, 33));
+        io.maxWrite = 7;
+        adapter.poll(33);
+        assert(io.tx.size() == 7);
+        io.idleResult = ESP_ERR_TIMEOUT;
+        const unsigned checks = io.idleChecks;
+        inject(adapter, peerStatus(33, 14), 33);
+        assert(adapter.link().peerStatus().sampleUptimeMs == 33);
+        const size_t querySize = kHeaderSize + 14 + std::strlen(pairing().deviceId) + 2;
+        for (unsigned i = 0; io.tx.size() < querySize && i < 100; ++i) adapter.poll(33);
+        assert(io.tx.size() == querySize && io.idleChecks == checks);
+        const auto queryFrames = frames(io.tx);
+        assert(queryFrames.size() == 1 && queryFrames[0].kind == Kind::Discovery);
+        adapter.poll(33);
+        assert(io.tx.size() == querySize);  // Queued STATUS ACK cannot splice into discovery.
+        io.idleResult = ESP_OK;
+        io.maxWrite = SIZE_MAX;
+        drainTx(adapter, 33);
+        const auto sent = frames(io.tx);
+        assert(sent.size() == 2 && sent[1].kind == Kind::LinkAck);
+        assert(adapter.link().connected(33) && adapter.link().freshStatus(33));
+        assert(adapter.discoveryResult().state == DiscoveryState::Pending);
+        std::puts("PASS paired STATUS RX/ACK remains live during partial discovery TX, with no frame-byte interleaving");
+    }
+
     Message before;
     assert(encodeStatus(adapter.link().peerStatus(), before));
     uint32_t id = 50;
@@ -565,12 +1011,13 @@ void readOnlySession() {
     Message stale = peerStatus(100, 100);
     ++stale.senderBoot;
     inject(adapter, stale, 41);
-    assert(adapter.link().peerStatus().sampleUptimeMs == 32);
+    assert(adapter.link().peerStatus().sampleUptimeMs == (enableDiscovery ? 33u : 32u));
     // Real heartbeat keeps the session alive but does not refresh old status.
     inject(adapter, heartbeat(101), 1400);
     drainTx(adapter, 1400);
-    adapter.poll(1532);
-    assert(adapter.link().connected(1532) && !adapter.link().freshStatus(1532));
+    const uint32_t expiresAt = enableDiscovery ? 1533 : 1532;
+    adapter.poll(expiresAt);
+    assert(adapter.link().connected(expiresAt) && !adapter.link().freshStatus(expiresAt));
     fake::assertReadOnly();
     std::puts("PASS real HELLO/ACK/heartbeat/STATUS UART session, wrong identity and no-action rejects");
 }
@@ -583,6 +1030,14 @@ int main() {
     txBackpressure();
     invalidWriteCount();
     readOnlySession();
+    readOnlySession(true);
+    rxBudget(true);
+    rxBudget(true, true);
+    discoveryRoundTrips();
+    discoveryTxArbitration();
+    discoveryStartupFailures();
+    discoveryReplyShortWrites();
+    failedInitRetry();
     fake::assertReadOnly();
     std::puts("PASS Arduino adapter host suite (real core + pair codec; I/O fakes only)");
 }

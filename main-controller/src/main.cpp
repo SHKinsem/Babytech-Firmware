@@ -7,6 +7,7 @@
 #if BABYTECH_BOARD_LINK_V4
 #include <MaintenanceUsbConsole.h>
 #include "brain_network_console.h"
+#include "brain_pairing_console.h"
 #include <esp_system.h>
 #endif
 
@@ -23,7 +24,9 @@ void pollCommissioningConsole() {
   // Local UI lock only; neither this lock nor an export authorizes an import.
   commissioningSession.poll(Serial, millis(), !controllerLink.intentPending(),
     [](const char* line, char* output, size_t capacity) {
-      return babytech::brain::BrainNetworkConsole::handle(
+      return babytech::brain::BrainPairingConsole::handle(
+        line, commissioningSession.active(), controllerLink, millis(), output, capacity) ||
+        babytech::brain::BrainNetworkConsole::handle(
         line, commissioningSession.active(), network, output, capacity);
     });
 }

@@ -5,19 +5,25 @@
 #include <driver/uart.h>
 #include "ReadOnlyBoardLink.h"
 #include "BoardPairingStore.h"
+#include "BoardDiscovery.h"
 
 namespace babytech { namespace boardlink {
 
 // One instance owns UART1; use static storage and call only from the loop task.
 class ArduinoBoardLink {
 public:
-    bool begin(v4::Role role, int rxPin, int txPin, uint32_t baud = 115200);
+    bool begin(v4::Role role, int rxPin, int txPin, uint32_t baud = 115200,
+               bool enableDiscovery = false);
     void poll(uint32_t nowMs, const Status* localStatus = nullptr);
     const ReadOnlyLink& link() const { return link_; }
     PairingLoad pairingState() const { return pairingState_; }
     const char* deviceId() const { return deviceId_; }
     // Local recovery must still run if the separately initialized UART fails.
     const v4::Pairing* verifiedPairing() const { return pairingVerified_ ? &pairing_ : nullptr; }
+    bool requestDiscovery(const char* deviceId, uint32_t nowMs) {
+        return started_ && discoveryEnabled_ && discovery_.request(deviceId, nowMs);
+    }
+    const DiscoveryResult& discoveryResult() const { return discovery_.result(); }
 private:
     class Sink : public v4::ByteSink {
     public:
@@ -31,11 +37,14 @@ private:
     HardwareSerial serial_{1};
     Sink sink_{serial_};
     ReadOnlyLink link_{};
+    v4::Parser parser_{};
+    BoardDiscovery discovery_{};
     PairingLoad pairingState_ = PairingLoad::Missing;
     v4::Pairing pairing_{};
     char deviceId_[65]{};
     bool pairingVerified_ = false;
     bool started_ = false;
+    bool discoveryEnabled_ = false;
 };
 
 } }

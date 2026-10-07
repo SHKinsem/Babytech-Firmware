@@ -122,6 +122,7 @@ jobs:
           python -m unittest discover -s tests -p test_capture_board_export.py
           python -m unittest discover -s tests -p test_maintenance_wiring.py
           python tools/test_board_link.py --sanitize
+          python tools/test_board_discovery.py --sanitize
           python tools/test_board_arduino.py --sanitize
           python tools/test_brain_controller.py --sanitize
           python tools/test_brain_network.py --sanitize

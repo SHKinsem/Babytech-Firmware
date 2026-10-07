@@ -1,12 +1,14 @@
 #include "ReadOnlyBoardLink.h"
 
 #include <ArduinoJson.h>
+#include <cstring>
 
 namespace babytech { namespace boardlink {
 using namespace v4;
 
-bool ReadOnlyLink::begin(const Pairing& pairing, uint64_t boot) {
+void ReadOnlyLink::reset() {
     parser_.reset(); assembler_.reset(); tx_.reset();
+    session_ = Session{};
     peerStatus_ = Status{};
     nextId_ = 1;
     lastHelloAt_ = lastHeartbeatAt_ = lastStatusAt_ = 0;
@@ -16,6 +18,12 @@ bool ReadOnlyLink::begin(const Pairing& pairing, uint64_t boot) {
     helloAckPending_ = statusRequested_ = false;
     probeRequired_ = false;
     peerSample_ = 0; peerSampleSeen_ = false;
+    role_ = Role::Brain;
+    configured_ = false;
+}
+
+bool ReadOnlyLink::begin(const Pairing& pairing, uint64_t boot) {
+    reset();
     role_ = pairing.role;
     configured_ = session_.begin(pairing, boot);
     return configured_;
@@ -99,9 +107,14 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
 
 void ReadOnlyLink::receive(uint8_t byte, uint32_t nowMs) {
     if (!healthy()) return;
-    session_.poll(nowMs);
     Frame frame;
     if (!parser_.push(byte, nowMs, frame)) return;
+    receiveFrame(frame, nowMs);
+}
+
+void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
+    if (!healthy() || !validFrame(frame) || frame.kind == Kind::Discovery) return;
+    session_.poll(nowMs);
     if (frame.kind == Kind::Heartbeat) {
         session_.heartbeat(frame, nowMs);
         return;
@@ -114,7 +127,20 @@ void ReadOnlyLink::receive(uint8_t byte, uint32_t nowMs) {
     if (result == AssemblyResult::Complete) handle(scratch_, nowMs);
 }
 
+bool ReadOnlyLink::queueDiscovery(const Frame& frame) {
+    if ((configured_ && !healthy()) || frame.kind != Kind::Discovery ||
+        !validFrame(frame) || frame.offset || frame.total != frame.length) return false;
+    scratch_.kind = frame.kind;
+    scratch_.senderBoot = frame.senderBoot;
+    scratch_.receiverBoot = frame.receiverBoot;
+    scratch_.messageId = frame.messageId;
+    scratch_.length = frame.length;
+    std::memcpy(scratch_.payload, frame.payload, frame.length);
+    return tx_.enqueue(scratch_);
+}
+
 void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatus) {
+    if (!configured_) { tx_.pump(sink); return; }
     if (!healthy()) return;
     session_.poll(nowMs);
     assembler_.expire(nowMs);

@@ -1,9 +1,11 @@
 #include "controller_link.h"
+#include "brain_pairing_console.h"
 #include "BoardPairingRecord.h"
 #include "FakeBoardIo.h"
 #include "nvs.h"
 
 #include <cassert>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -355,13 +357,247 @@ void receiptTimeAndRollover() {
 void failedBegin() {
     fake::reset();
     io.openError = ESP_ERR_NVS_NOT_FOUND;
+    io.macError = ESP_FAIL;
     display::ControllerLink controller;
     assert(!controller.begin());
     controller.poll(123);
     assert(!controller.lastTelemetry() && controller.lastTelemetryReceivedAtMs() == 0);
     assert(!controller.connected(123) && !controller.hasSnapshot());
     fake::assertReadOnly();
-    std::puts("PASS failed begin has no telemetry");
+    std::puts("PASS failed discovery MAC begin has no telemetry");
+}
+
+Bytes record(const Pairing& value) {
+    Bytes result(kPairingRecordMaxSize);
+    const size_t length = encodePairingRecord(value, result.data(), result.size());
+    assert(length);
+    result.resize(length);
+    return result;
+}
+
+template<class Action>
+void onBoard(fake::State& state, Action action) {
+    fake::assertReadOnly();
+    io = state;
+    action();
+    fake::assertReadOnly();
+    state = io;
+}
+
+Frame onlyDiscovery(const Bytes& bytes) {
+    Parser parser;
+    Frame decoded, result;
+    unsigned count = 0;
+    size_t consumed = 0;
+    for (uint8_t byte : bytes) {
+        if (!parser.push(byte, 0, decoded)) continue;
+        consumed += kHeaderSize + decoded.length + 2;
+        assert(decoded.kind == Kind::Discovery && decoded.offset == 0 && decoded.length == decoded.total);
+        result = decoded;
+        ++count;
+    }
+    assert(count == 1 && consumed == bytes.size());
+    return result;
+}
+
+void discoveryOffline(const display::ControllerLink& controller, uint32_t now) {
+    assert(!controller.connected(now) && !controller.hasSnapshot());
+    assert(!controller.protocolIncompatible(now));
+    assert(controller.snapshot().stage == display::DisplayStage::NotReady);
+    assert(!controller.snapshot().startEnabled && !controller.snapshot().cloudConnected);
+    assert(!controller.lastTelemetry() && !controller.lastTelemetryReceivedAtMs());
+    assert(!controller.intentPending());
+}
+
+std::string console(const char* command, bool maintenance,
+                    display::ControllerLink& controller, uint32_t now) {
+    std::array<char, 256> output;
+    output.fill('#');
+    assert(brain::BrainPairingConsole::handle(command, maintenance, controller, now,
+                                             output.data(), output.size()));
+    const std::string result(output.data());
+    // Exact expected replies below also preclude any extra configuration dump.
+    for (const char* forbidden : {"password", "secret", "baby", "formula", "powder",
+                                 "0123456789abcdef0123456789abcdef", "paired"})
+        assert(result.find(forbidden) == std::string::npos);
+    return result;
+}
+
+void discoveryStorage(DiscoveryPairState state) {
+    switch (state) {
+        case DiscoveryPairState::Missing: io.openError = ESP_ERR_NVS_NOT_FOUND; break;
+        case DiscoveryPairState::Ready: break;
+        case DiscoveryPairState::Corrupt: io.blob[0] ^= 1; break;
+        case DiscoveryPairState::IoError: io.openError = ESP_FAIL; break;
+        case DiscoveryPairState::IdentityMismatch: io.mac[5] ^= 1; break;
+    }
+}
+
+void consoleDiscoveryRoundTrip(DiscoveryPairState brainState, DiscoveryPairState motionState) {
+    assert(brainState != DiscoveryPairState::Ready);
+    const bool motionPaired = motionState == DiscoveryPairState::Ready;
+    const bool unavailable = brainState != DiscoveryPairState::Missing ||
+        (motionState != DiscoveryPairState::Missing && !motionPaired);
+    fake::reset();
+    io.blob = record(pairing());
+    discoveryStorage(brainState);
+    io.randomWords = {0x12345678, 0x12345678};
+    display::ControllerLink controller;
+    assert(controller.begin());
+    assert(io.begins == 1 && io.constructors == 1 && io.rxConfigs == 1);
+    assert(io.macReads == (brainState == DiscoveryPairState::IdentityMismatch ? 2u : 1u));
+    assert(controller.deviceId() && !controller.deviceId()[0]);
+    discoveryOffline(controller, 0);
+    const auto before = io;
+    assert(console("PAIR STATUS", false, controller, 0) == "[pair] idle motion=unknown pairing=0\n");
+    assert(console("PAIR DISCOVER bt-brain-controller-test", false, controller, 0) ==
+           "[pair] maintenance_required\n");
+    assert(controller.discoveryResult().state == DiscoveryState::Idle);
+    assert(io.opens == before.opens && io.writeCalls == before.writeCalls && io.byteReads == before.byteReads);
+    assert(console("PAIR DISCOVER bt-brain-controller-test", true, controller, 10) ==
+           "[pair] discovery_pending\n");
+    assert(console("PAIR DISCOVER bt-brain-controller-test", true, controller, 10) ==
+           "[pair] discovery_unavailable\n");
+    assert(console("PAIR STATUS", false, controller, 10) == "[pair] pending motion=unknown pairing=0\n");
+    for (unsigned i = 0; i < 32; ++i) controller.poll(10);
+    const Bytes query = io.tx;
+    const auto q = onlyDiscovery(query);
+    assert(q.senderBoot == kLocalBoot && q.receiverBoot == 0 && q.payload[0] == 1);
+    assert(!controller.sendIntent(display::DisplayIntent::StartFeeding, 10));
+    assert(!controller.sendIntent(display::DisplayIntent::Initialize, 10));
+    discoveryOffline(controller, 10);
+    fake::State brainIo = io;
+
+    fake::reset();
+    io.mac = {{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}};
+    io.randomWords = {0, uint32_t(kPeerBoot)};
+    auto peer = pairing();
+    peer.role = Role::Motion;
+    std::strcpy(peer.localPhysicalId, "aabbccddeeff");
+    std::strcpy(peer.peerPhysicalId, "112233445566");
+    io.blob = record(peer);
+    discoveryStorage(motionState);
+    ArduinoBoardLink motion;
+    assert(motion.begin(Role::Motion, 44, 43, 115200, true));
+    const Bytes stored = io.blob;
+    io.rx.insert(io.rx.end(), query.begin(), query.end());
+    motion.poll(20);
+    // On the first poll the single ordinary slot sends the discovery reply,
+    // before a paired Motion can enqueue its normal HELLO on subsequent polls.
+    const Bytes reply = io.tx;
+    const auto r = onlyDiscovery(reply);
+    assert(r.receiverBoot == kLocalBoot && r.senderBoot == kPeerBoot && r.messageId == q.messageId);
+    assert(r.payload[0] == 2 && r.payload[13] == uint8_t(motionState));
+    assert(io.blob == stored && io.mutations == 0);
+    assert(io.constructors == 1 && io.begins == 1 && io.txConfigs == 0);
+    fake::assertReadOnly();
+
+    onBoard(brainIo, [&] {
+        const Bytes storedBrain = io.blob;
+        io.rx.insert(io.rx.end(), reply.begin(), reply.end() - 1);
+        controller.poll(30);
+        assert(controller.discoveryResult().state == DiscoveryState::Pending);
+        io.rx.push_back(reply.back());
+        controller.poll(31);
+        const auto expectedState = unavailable ? DiscoveryState::Unavailable : DiscoveryState::Found;
+        assert(controller.discoveryResult().state == expectedState);
+        assert(controller.discoveryResult().peerBoot == kPeerBoot);
+        assert(controller.discoveryResult().pairingState == motionState);
+        const char* physical = motionState == DiscoveryPairState::IdentityMismatch
+            ? "aabbccddeefe" : "aabbccddeeff";
+        assert(std::strcmp(controller.discoveryResult().physicalId, physical) == 0);
+        const auto writes = io.writeCalls, opens = io.opens, reads = io.byteReads;
+        const std::string expected = std::string("[pair] ") +
+            (unavailable ? "pairing_record_unavailable" : "found") +
+            " motion=" + physical + " pairing=" + std::to_string(unsigned(motionState)) + "\n";
+        assert(console("PAIR STATUS", false, controller, 31) == expected);
+        assert(io.writeCalls == writes && io.opens == opens && io.byteReads == reads);
+        assert(!controller.deviceId()[0]);
+        // A discovered paired Motion still cannot install identity or telemetry
+        // on an unpaired Brain, even if it later sends normal-session traffic.
+        const Bytes status = wire(telemetry("NONE", 31, 40));
+        const Bytes ack = wire(hello(Kind::HelloAck, kPeerBoot, 41, 1));
+        io.rx.insert(io.rx.end(), ack.begin(), ack.end());
+        io.rx.insert(io.rx.end(), status.begin(), status.end());
+        for (unsigned i = 0; i < 32; ++i) controller.poll(32);
+        discoveryOffline(controller, 32);
+        assert(!controller.sendIntent(display::DisplayIntent::StartFeeding, 32));
+        assert(!controller.sendIntent(display::DisplayIntent::Initialize, 32));
+        assert(!controller.deviceId()[0] && io.tx == query);
+        assert(controller.discoveryResult().state == expectedState);
+        assert(io.blob == storedBrain && io.opens == opens && io.mutations == 0);
+    });
+    std::printf("PASS real PAIR console/ControllerLink UART brain=%u motion=%u -> %s; never paired/ready/action\n",
+                unsigned(brainState), unsigned(motionState),
+                unavailable ? "pairing_record_unavailable" : "found");
+}
+
+void consoleTimeoutAndRetry() {
+    fake::reset();
+    io.openError = ESP_ERR_NVS_NOT_FOUND;
+    io.randomWords = {0x12345678, 0x12345678};
+    display::ControllerLink controller;
+    assert(controller.begin());
+    char output[32] = "untouched";
+    assert(!brain::BrainPairingConsole::handle("NET STATUS", false, controller, 0, output, sizeof(output)));
+    assert(!std::strcmp(output, "untouched"));
+    assert(console("PAIR UNKNOWN", true, controller, 0) == "[pair] unknown_command\n");
+    for (const std::string& invalid : {std::string(""), std::string("bad/id"), std::string("bad id"),
+                                     std::string("valid "), std::string(65, 'a')}) {
+        assert(console(("PAIR DISCOVER " + invalid).c_str(), true, controller, 0) ==
+               "[pair] discovery_unavailable\n");
+        assert(controller.discoveryResult().state == DiscoveryState::Idle);
+    }
+    assert(console("PAIR DISCOVER bt-brain-controller-test", true, controller, 10) == "[pair] discovery_pending\n");
+    controller.poll(10);
+    const Bytes first = io.tx;
+    const Frame firstFrame = onlyDiscovery(first);
+    const auto opens = io.opens, macReads = io.macReads;
+    controller.poll(1009);
+    assert(console("PAIR STATUS", false, controller, 1009) == "[pair] pending motion=unknown pairing=0\n");
+    // STATUS only reads; timeouts are advanced by the runtime poll owner.
+    assert(console("PAIR STATUS", false, controller, 1010) == "[pair] pending motion=unknown pairing=0\n");
+    controller.poll(1010);
+    assert(console("PAIR STATUS", false, controller, 1010) == "[pair] timed_out motion=unknown pairing=0\n");
+    assert(io.tx == first && io.opens == opens && io.macReads == macReads);
+    assert(console("PAIR DISCOVER bt-brain-controller-test", false, controller, 1010) == "[pair] maintenance_required\n");
+    assert(controller.discoveryResult().state == DiscoveryState::TimedOut);
+    assert(console("PAIR DISCOVER bt-brain-controller-test", true, controller, 1010) == "[pair] discovery_pending\n");
+    controller.poll(1010);
+    const Frame retry = onlyDiscovery(Bytes(io.tx.begin() + first.size(), io.tx.end()));
+    assert(retry.messageId != firstFrame.messageId && retry.senderBoot == firstFrame.senderBoot);
+    assert(retry.length == firstFrame.length && !std::memcmp(retry.payload, firstFrame.payload, retry.length));
+    controller.poll(2010);
+    assert(controller.discoveryResult().state == DiscoveryState::TimedOut);
+    assert(io.opens == opens && io.macReads == macReads && io.mutations == 0);
+    discoveryOffline(controller, 2010);
+    fake::assertReadOnly();
+    std::puts("PASS PAIR maintenance gate, read-only STATUS, exact 1000ms timeout and explicit retry; invalid IDs do not start discovery");
+}
+
+void pairedConsoleDoesNotDegradeStatus() {
+    Fixture f;
+    f.handshake(0);
+    const Message status = telemetry("E_CAN_FAULT", 100, 12);
+    f.inject(status, 100);
+    f.expectStatus(status, 100);
+    assert(f.controller.connected(100));
+    assert(console("PAIR DISCOVER wrong-device", true, f.controller, 101) == "[pair] discovery_unavailable\n");
+    assert(console("PAIR DISCOVER bt-brain-controller-test", false, f.controller, 101) == "[pair] maintenance_required\n");
+    assert(console("PAIR STATUS", false, f.controller, 101) == "[pair] idle motion=unknown pairing=0\n");
+    assert(console("PAIR DISCOVER bt-brain-controller-test", true, f.controller, 101) == "[pair] discovery_pending\n");
+    f.drain(101);
+    f.expectStatus(status, 100);
+    assert(f.controller.connected(101) && f.controller.hasSnapshot());
+    assert(std::strcmp(f.controller.deviceId(), pairing().deviceId) == 0);
+    assert(!f.controller.sendIntent(display::DisplayIntent::StartFeeding, 101));
+    f.inject(telemetry("NONE", 101, 13), 102);
+    f.expect("NONE", 102);
+    f.drain(1101);
+    assert(console("PAIR STATUS", false, f.controller, 1101) == "[pair] timed_out motion=unknown pairing=0\n");
+    f.expect("NONE", 102);
+    assert(f.controller.connected(1101) && !f.controller.snapshot().startEnabled);
+    std::puts("PASS paired ControllerLink STATUS/cache still updates during discovery and after timeout");
 }
 }  // namespace
 
@@ -374,5 +610,14 @@ int main() {
     longOfflineFaultAcrossRollover();
     receiptTimeAndRollover();
     failedBegin();
+    consoleDiscoveryRoundTrip(DiscoveryPairState::Missing, DiscoveryPairState::Missing);
+    consoleDiscoveryRoundTrip(DiscoveryPairState::Missing, DiscoveryPairState::Ready);
+    for (DiscoveryPairState fault : {DiscoveryPairState::Corrupt, DiscoveryPairState::IoError,
+                                     DiscoveryPairState::IdentityMismatch}) {
+        consoleDiscoveryRoundTrip(fault, DiscoveryPairState::Ready);
+        consoleDiscoveryRoundTrip(DiscoveryPairState::Missing, fault);
+    }
+    consoleTimeoutAndRetry();
+    pairedConsoleDoesNotDegradeStatus();
     std::puts("PASS production ControllerLink cache/receipt-time suite (SDK I/O fakes only)");
 }

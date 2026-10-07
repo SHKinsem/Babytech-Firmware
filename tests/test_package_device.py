@@ -80,7 +80,7 @@ class SourceArchiveTest(unittest.TestCase):
                 self.assertTrue((extracted / name).is_file())
             self.assertTrue((extracted / "tools/test_display_view.py").is_file())
             for name in ("test_protocol.py", "test_board_messages.py", "test_board_link.py",
-                         "test_pairing_record.py", "test_board_arduino.py",
+                         "test_pairing_record.py", "test_board_arduino.py", "test_board_discovery.py",
                          "test_cloud_contract.py", "test_cloud_session.py", "test_cloud_link.py",
                          "test_brain_network.py", "test_brain_station.py", "test_brain_controller.py",
                          "prepare_board_pairing.py", "test_pairing_store.py",

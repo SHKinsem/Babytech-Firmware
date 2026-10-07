@@ -1813,7 +1813,7 @@ void setup() {
     endpoint.begin(boot);
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
     commissioningSession.begin(babytech::v4::Role::Motion, boot);
-    if (!productBoardLink.begin(babytech::v4::Role::Motion, kLinkRxPin, kLinkTxPin, kLinkBaud))
+    if (!productBoardLink.begin(babytech::v4::Role::Motion, kLinkRxPin, kLinkTxPin, kLinkBaud, true))
         Serial.printf("[uart] v4 unavailable, pairing state=%u\n",
                       unsigned(productBoardLink.pairingState()));
 #else

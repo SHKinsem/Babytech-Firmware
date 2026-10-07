@@ -29,7 +29,7 @@ def main():
     sources = [root / "shared/BoardProtocol/src" / name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
-                ("BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
+                ("BoardDiscovery.cpp", "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
                  "BoardLinkArduino.cpp")]
     sources += [stubs / "FakeBoardIo.cpp", root / "test/test_arduino_link.cpp"]
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-DARDUINO=10819"]

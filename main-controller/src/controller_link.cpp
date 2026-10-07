@@ -19,7 +19,7 @@ bool ControllerLink::begin() {
   snapshot_.stage = DisplayStage::NotReady;
   ready_ = boardLink_.begin(babytech::v4::Role::Brain,
                            kControllerUartRxPin, kControllerUartTxPin,
-                           kControllerUartBaud);
+                           kControllerUartBaud, true);
   return ready_;
 }
 
