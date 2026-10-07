@@ -109,6 +109,7 @@ for project in "${projects[@]}"; do
         python3 tools/test_brain_station.py
         python3 tools/test_brain_network_console.py
         python3 -m unittest discover -s tests -p test_configure_brain_network.py
+        python3 -m unittest discover -s tests -p test_install_brain.py
         python3 -m unittest discover -s tests -p test_package_ota.py
     fi
     elapsed=$(( $(date +%s) - started ))

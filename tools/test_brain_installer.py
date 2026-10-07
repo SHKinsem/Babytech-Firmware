@@ -6,6 +6,8 @@ production implementations. No network, device, PlatformIO or new dependencies.
 persisted-restart adds production MAC-checked pairing/Store loads and two
 ReadOnlyLink cores after simulated whole/single-board resets; it does not run
 the Arduino adapter/main or prove physical power cuts, Flash or mechanical safety.
+Full runs also connect install_brain.py through pipes to the production bounded
+USB console/installer for four record cases; role probe and SDK I/O remain fake.
 """
 import argparse
 import os
@@ -80,6 +82,11 @@ def main():
             result = subprocess.run([str(binary), *([args.case] if args.case else [])],
                                     env=environment, check=False)
             failed = failed or result.returncode != 0
+            if not args.case and result.returncode == 0:
+                print("Single Brain USB host tool / production core / mbedTLS " + major, flush=True)
+                result = subprocess.run([sys.executable, str(root / "tests/check_install_brain_core.py"), str(binary)],
+                                        env=environment, check=False)
+                failed = failed or result.returncode != 0
     return int(failed)
 
 

@@ -24,7 +24,7 @@ Brain v4 已接本地USB Wi-Fi/MQTT配置，见下方“Brain USB网络配置”
 
 `ReadOnlyLink` 为单 owner、非重入对象，约 8 KiB，不能放在 MCU loop 局部栈中；共享完整消息 scratch，短回执用紧凑帧。旧35字段版本的 GCC8.4/14.2 静态接收调用链（receive/handle/decodeStatus）约4 KiB；这是历史预算参考，不是36字段版本的栈测量。尚未包含外层适配器和 JSON 库调用余量；接入设备后仍须检查实际任务栈高水位，不能让网络回调并发操作链路。
 
-当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1：Brain使用 `BABYTECH_BOARD_LINK_V4=1`，Motion使用 `MOTION_UART_PEER=4`。Brain已接Cloud/触控owner，Motion已注册产品接收/Stop回调。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC；缺失或损坏不能进入正常握手、联网或产品操作，但可选v4入口允许仅打开UART诊断发现。不自动认领陌生对端。受控配对写入和旧配置导入已接单Brain持久安装，首次激活采用下文已批准的整机手动重新上电一次；动作/配置/结果桥接已接，最终工具、组合恢复和实机验收未完成，不能靠烧录这两个镜像直接完成迁移。
+当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1：Brain使用 `BABYTECH_BOARD_LINK_V4=1`，Motion使用 `MOTION_UART_PEER=4`。Brain已接Cloud/触控owner，Motion已注册产品接收/Stop回调。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC；缺失或损坏不能进入正常握手、联网或产品操作，但可选v4入口允许仅打开UART诊断发现。不自动认领陌生对端。受控配对写入和旧配置导入及单USB工具已接单Brain持久安装，首次激活采用下文已批准的整机手动重新上电一次；动作/配置/结果桥接已接，完整组合恢复和实机验收未完成，不能靠烧录这两个镜像直接完成迁移。
 
 v4不启动Motion产品MQTT；屏幕Initialize/Start使用下方本地owner，Motion独立Wi-Fi、HTTP调试网页及本地OTA保留。旧`formulaevt/payload`仅只读检查，有记录或读取异常时保留数据、标记待处理并监督停机，不调用旧Outbox初始化。新记录开机恢复、Motion动作接收及Brain Cloud/触控派发、两板结果补传已接源码；遥测本身不授予运动权限。默认v3行为不变。
 
@@ -105,7 +105,7 @@ Motion v4统一读取USB并保留`OTA CODE`，避免两处抢读；默认固件�
 
 ### Brain UART安装前读取
 
-Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`。Motion经同一UART自动返回实际MAC及配对状态，无需第二USB；独立发现请求域、1000ms截止、无NVS写入/动作。`found`不创建配对或授予Start，损坏/读错/冲突不冒充Missing；超时可重试。自动持久安装已内部调用此路径，该支持入口不是额外安装或日常验证步骤。最终工具/实板联调仍未完成，正常配对使用轻量HELLO自动复用。
+Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`。Motion经同一UART自动返回实际MAC及配对状态，无需第二USB；独立发现请求域、1000ms截止、无NVS写入/动作。`found`不创建配对或授予Start，损坏/读错/冲突不冒充Missing；超时可重试。自动持久安装已内部调用此路径，该支持入口不是额外安装或日常验证步骤。单USB工具已接，实板联调仍未完成，正常配对使用轻量HELLO自动复用。
 
 发现成功后，维护内`PAIR READ <device_id>`使用同一UART逐块拉取既有`MaintenanceExport`完整快照；只读`PAIR RECORDS`报告idle/pending/complete/invalid/unavailable/timed_out，不打印宝宝数据或密码。协议kind18，每块155 bytes、1秒截止，整体5秒；旧查询ID不能推进来源。同一Brain新的显式读取可用新挑战、递增ID和offset0立即替换丢包后的旧捕获，不重试动作。Brain最多临时分配16KiB+NUL字节区、另分配完整快照与codec解析区，失败局部返回，不写NVS或影响Motion调试；实际堆峰值/时序仍须实板测量。完整UTF-8上下文/墓碑、水位和四结果队列保留，读取状态不冒充Missing；complete仍不是安装授权。真实自动安装将内部调用此路径，而不是要求用户执行多条支持命令。
 
@@ -115,7 +115,7 @@ Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`�
 
 Discovery成功后，可选支持命令`PAIR HOLD <device_id>`在Brain本地维护内明确请求Motion预约；`PAIR HOLD`只读查看，`PAIR RELEASE`或Brain `MAINT END`经同一UART结束，不需要Motion USB。kind19绑定双方boot、Brain MAC、设备、nonce和递增ID。Motion复用当前静止/无工作条件，并与USB维护/OTA互斥；网页冲突写入/运动、网络改配和OTA启动暂拒绝，HTTP Stop/Stop all/queue cancel、合法原始Stop/Interrupt/disable和读取继续可用，CAN监督照常。Motion产品接收/Stop已接入，但Brain派发和完整产品入口仍未开放。
 
-Brain仅为显式预约每500ms续期，响应截止1秒，Motion预约3秒到期自动释放；普通启动、配网、读取和冲奶不自动预约。release无需Ready/传感器/Cloud恢复，迟到或同nonce请求不重新打开已结束会话，失败不自动acquire。到期只释放RAM预约，不回滚Flash。核心`tools/test_board_maintenance.py --sanitize`和实际adapter/controller主机测试不替代UART/HTTP/Flash实机验收；自动安装仍待接入。这些命令只是支持入口，最终安装流程内部调用。
+Brain仅为显式预约每500ms续期，响应截止1秒，Motion预约3秒到期自动释放；普通启动、配网、读取和冲奶不自动预约。release无需Ready/传感器/Cloud恢复，迟到或同nonce请求不重新打开已结束会话，失败不自动acquire。到期只释放RAM预约，不回滚Flash。核心`tools/test_board_maintenance.py --sanitize`和实际adapter/controller主机测试不替代UART/HTTP/Flash实机验收；自动安装已内部调用此路径。这些命令只是支持入口，不是额外安装步骤。
 
 ### Motion UART持久安装入口
 
@@ -133,7 +133,17 @@ Brain v4唯一loop已接`BrainInstaller`。本地维护期间，`PAIR INSTALL <d
 
 **日常开机和保留NVS的重新烧录不需要重新配对或人工双板校验**；换板、记录缺失/损坏或身份冲突仍按既有受控恢复处理，不清空或静默认领。失败/超时不能报安装完成或用重新上电代替核对，先保留证据按同身份恢复。此决定替代原自动运行切换要求，不新增固件重启或运动命令。
 
-当前不能把该流程用于生产迁移；最终单USB工具、重启联调、App动作及结果桥接仍待完成。软件回归`tools/test_brain_installer.py --sanitize`与两套SDK构建不代替真实Flash/UART/机械/堆栈验收；实际烧录/整机断电/生产操作仍需另行授权。
+2026-10-08已加入最终电脑端单Brain USB入口（在本子仓库根目录执行）：
+
+```bash
+python3 tools/install_brain.py --port /dev/cu.usbmodemBRAIN --device-id DEVICE_ID
+```
+
+需要兼容的成对v4固件、可信UART/USB、停稳且已授权的台架及安装了pyserial的Python。替换端口和已有整机Device ID，关闭其他串口监视器。先在broker完成旧Motion产品会话退役及账号撤销/换密；输入`INSTALL`仅确认这次交接，不代表工具验证了broker。可以在同一USB会话隐藏输入Wi-Fi/MQTT凭据，也可保留原配置。工具一次发起安装、只读查询阶段并退出维护，不需Motion USB或手动支持命令；不发送运动、擦除、FINALIZE、自动重试或复位命令。
+
+成功仅为`persisted_restart_required / activation_pending`及本地维护退出，随后用户按上文让整机（含USB供电）手动重新上电一次。失败、超时或取消可能已有网络/配对/业务记录保存，不是跨板回滚：保留NVS，必要时在Brain USB查看`PAIR INSTALL STATUS`、`MAINT END`，核对后仅明确重试原身份。已有安装在运行或等待重新上电时，工具不重新发起、不取消原安装。普通开机、保留NVS的烧录不运行本工具；串口打开仍可能被驱动复位。
+
+工具与运行桥接已有软件实现，但不能直接用于生产迁移；真实账号交接、重新上电、main/broker组合恢复及整机验收仍待完成。`python3 -m unittest discover -s tests -p test_install_brain.py`检查电脑端假USB故障；完整`tools/test_brain_installer.py --sanitize`额外让电脑工具通过管道操作生产USB解析器/协调器和双NVS替身（空档案、活动档案、墓碑、旧事件拒绝），不是实际Arduino main、无线网络、Flash、UART电气或机械验收。CI/WSL/源码包包含工具；本次未运行远端CI/WSL、烧录、整机断电或生产操作。
 
 ### 只读请求结果查询与重启恢复
 
@@ -227,7 +237,7 @@ SIM OFF
 
 状态明确为`hardware_profile=simulation`、`motion_connected=false`，水温、水量、余粉及物理有效性仍未知/false。Cloud和新App仅对这一完整v4 Brain模式采用显式commands_enabled/can_start决定启动，不放宽真实固件。MQTT模拟终态包含`execution_mode=brain_simulation`并保存原宝宝、配方和uptime；不修改UART kind12/13或SQLite schema。仅用于隔离测试家庭/数据库，模拟记录不是实际喂养。结果在RAM中，断网时继续计时、重连补传并等待真实stored回执；Brain复位会丢失计时/结果，Cloud的completed_at仍为首次接收时间，不承诺离线真实UTC完成时间。
 
-测试：`tools/test_brain_simulation.py --sanitize`、`tools/test_brain_simulation_dispatcher.py --sanitize`及`tools/test_brain_network.py --sanitize`，父仓库另运行`Test/brain_event_contract_check.py --sanitize --brain-simulation`。生产组件加SDK/网络I/O替身验证软件契约，不等于实板USB、真实broker、App操作或机械验收。真实终态UART桥接和整机迁移仍未完成。
+测试：`tools/test_brain_simulation.py --sanitize`、`tools/test_brain_simulation_dispatcher.py --sanitize`及`tools/test_brain_network.py --sanitize`，父仓库另运行`Test/brain_event_contract_check.py --sanitize --brain-simulation`。生产组件加SDK/网络I/O替身验证软件契约，不等于实板USB、真实broker、App操作或机械验收。真实终态UART桥接已接源码与限定验证，整机迁移验收仍未完成。
 
 ### Brain USB网络配置
 

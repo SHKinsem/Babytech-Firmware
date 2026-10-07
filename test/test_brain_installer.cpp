@@ -3,6 +3,7 @@
 #include "MotionInstallTarget.h"
 #include "MaintenanceExport.h"
 #include "ReadOnlyBoardLink.h"
+#include "MaintenanceUsbConsole.h"
 #include "FakeCommissioning.h"
 #include "FakeProductCrypto.h"
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <random>
 #include <stdexcept>
@@ -1122,11 +1124,69 @@ void postRead() {
 }
 
 bool console(Fixture& f, const char* line, std::string& output) {
-    std::array<char, 192> bytes{};
+    // Production USB response_ is 96 bytes, with one leading newline.
+    std::array<char, 95> bytes{};
     const bool handled = babytech::brain::BrainInstallConsole::handle(
         line, f.installer, currentNow, bytes.data(), bytes.size());
     output = bytes.data();
     return handled;
+}
+
+// Pipe-driven host-tool fixture: run the production bounded USB parser and
+// installer, not canned PAIR replies. NET STATUS is a role-probe substitute;
+// network credential writes and the Arduino main loop are not executed here.
+struct ToolUsb {
+    std::string input, output;
+    size_t readAt = 0;
+    int available() const { return int(input.size() - readAt); }
+    int read() { return available() ? uint8_t(input[readAt++]) : -1; }
+    int availableForWrite() const { return 7; }
+    size_t write(const uint8_t* data, size_t size) {
+        const size_t written = std::min(size, size_t(7));
+        output.append(reinterpret_cast<const char*>(data), written);
+        return written;
+    }
+};
+Fixture* toolFixture = nullptr;
+bool toolCommand(const char* line, char* output, size_t capacity) {
+    if (!std::strcmp(line, "NET STATUS")) {
+        std::snprintf(output, capacity, "[network] brain_unpaired\n");
+        return true;
+    }
+    return babytech::brain::BrainInstallConsole::handle(
+        line, toolFixture->installer, currentNow, output, capacity);
+}
+int usbToolFixture(int kind) {
+    fake::reset(); extra::reset(); extra::mac = kBrainMac; currentNow = 100;
+    localMaintenance = false; stationary = epochAvailable = true;
+    epochCalls = 0; epochs.clear(); clockHook = {};
+    Fixture f;
+    toolFixture = &f;
+    if (kind < 3) f.seedLegacy(kind);
+    else f.motionDb.disk["formulaevt"]["payload"] = textValue("{pending-event}");
+    MaintenanceUsbConsole usb;
+    usb.begin(v4::Role::Brain, kBrainBoot);
+    ToolUsb port;
+    unsigned starts = 0;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.find("PAIR INSTALL ") == 0 && line.find("HANDOFF_CONFIRMED") != std::string::npos) ++starts;
+        port.input = line + "\n"; port.readAt = 0;
+        // Fixed fake time and I/O steps; not a real-time scheduler proof.
+        for (unsigned n = 0; n < 64; ++n) {
+            ++currentNow;
+            usb.poll(port, currentNow, true, toolCommand);
+            localMaintenance = usb.active();
+            f.step();
+        }
+        std::cout << port.output << std::flush;
+        port.output.clear();
+    }
+    CHECK(starts == 1 && !usb.active());
+    if (kind < 3) f.verifyPersisted(kind);
+    else { f.failed("legacy_event_pending"); f.noWrites(); }
+    f.audit();
+    return 0;
 }
 
 void consoleTests() {
@@ -1519,6 +1579,15 @@ void recovery() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 3 && !std::strcmp(argv[1], "--usb-tool-fixture")) {
+        try {
+            CHECK(std::strlen(argv[2]) == 1 && argv[2][0] >= '0' && argv[2][0] <= '3');
+            return usbToolFixture(argv[2][0] - '0');
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "FAIL USB tool fixture: %s\n", e.what());
+            return 1;
+        }
+    }
     const std::pair<const char*, void (*)()> groups[] = {
         {"success", success}, {"resume", resume}, {"used", used}, {"conflicts", conflicts},
         {"gates", gates}, {"interruptions", interruptions}, {"post-read", postRead}, {"faults", storageFaults},
