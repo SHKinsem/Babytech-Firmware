@@ -897,6 +897,27 @@ void cancelUnseenSameOwnerSession() {
     CHECK(s.evidence.acquireChecks == 2 && s.evidence.releaseChecks == 1);
 }
 
+void confirmedLeaseCannotOutliveMotion() {
+    for (const uint32_t start : {0u, UINT32_MAX - 500u}) {
+        Session s;
+        const Frame first = s.request(start);
+        deliver(s.motion, first, start);
+        const Frame ack = take(s.motion);
+        // A delayed but valid ACK does not grant its transport delay as extra lease time.
+        deliver(s.brain, ack, start + 900);
+        CHECK(s.brain.state() == BoardMaintenanceState::Active);
+        s.brain.poll(start + 2999);
+        CHECK(s.brain.state() == BoardMaintenanceState::Active);
+        const Frame renewal = take(s.brain, false);
+        s.motion.poll(start + 3000);
+        s.brain.poll(start + 3000);
+        CHECK(!s.motion.active());
+        CHECK(s.brain.state() == BoardMaintenanceState::TimedOut && !s.brain.outgoing());
+        deliver(s.brain, response(renewal), start + 3001);
+        CHECK(s.brain.state() == BoardMaintenanceState::TimedOut && !s.brain.outgoing());
+    }
+}
+
 struct Case { const char* name; void (*run)(); };
 const Case cases[] = {
     {"default_explicit_only", defaultAndExplicitOnly},
@@ -921,6 +942,7 @@ const Case cases[] = {
     {"crc_streaming_loss", crcAndStreamingLoss},
     {"cancel_reordered", cancelReordered},
     {"cancel_unseen_same_owner", cancelUnseenSameOwnerSession},
+    {"confirmed_lease_expiry", confirmedLeaseCannotOutliveMotion},
 };
 } // namespace
 

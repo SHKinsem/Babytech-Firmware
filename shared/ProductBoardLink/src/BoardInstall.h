@@ -50,6 +50,7 @@ public:
     BoardInstallState state() const { return state_; }
     uint64_t boot() const { return boot_; }
     const char* physicalId() const { return physical_; }
+    bool matchesRequestedPair(const v4::Pairing& expected) const;
     // Meaningful only after Complete (or Motion's Unavailable response).
     // TimedOut does not establish whether any durable write occurred.
     CommissioningResult result() const { return result_; }

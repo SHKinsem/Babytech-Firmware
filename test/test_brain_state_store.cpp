@@ -104,11 +104,13 @@ fake::Database protectedData() {
     }
     return disk;
 }
-void scenario(const std::string& name, const std::function<void()>& run, bool space = true) {
+void scenario(const std::string& name, const std::function<void()>& run, bool space = true,
+              bool pairSpace = true) {
     fake::reset();
     fake_product_crypto::reset();
     for (const char* name : {"productpair", "productstate", "productctx", "outbox",
                              "wifi-cfg", "actuatorcfg", "sensorcfg"}) {
+        if (!pairSpace && !std::strcmp(name, "productpair")) continue;
         io.disk[name]["record"] = {{0, 0xff, 0x7f, 1}, fake::Type::Blob};
         io.disk[name]["payload"] = {{'o', 'l', 'd', 0}, fake::Type::String};
     }
@@ -137,6 +139,10 @@ void latched(BrainStateStore& store, const Bytes& before) {
     const auto loadResult = store.load(pairing());
     assert(loadResult != BrainLoad::Ready && loadResult != BrainLoad::Missing);
     assert(store.load(v4::Pairing{}) == loadResult);
+    auto output = state();
+    const auto outputBefore = raw(output);
+    assert(store.inspectForCommissioning(output) == loadResult);
+    assert(raw(output) == outputBefore);
     assert(store.installInitial(pairing()) == BrainWrite::StorageFault);
     assert(store.saveContext(context(99)) == BrainWrite::StorageFault);
     assert(store.reserveLocal(request()) == BrainWrite::StorageFault);
@@ -262,6 +268,241 @@ void basics() {
         }
         noWrites();
     });
+}
+
+void commissioning() {
+    for (bool space : {false, true}) {
+        scenario("commissioning Missing preserves output without readiness or writes", [] {
+            BrainStateStore store;
+            const auto before = raw(store.state());
+            auto output = state(true);
+            const auto outputBefore = raw(output);
+            const auto disk = io.disk;
+            for (unsigned i = 0; i < 3; ++i) {
+                assert(store.inspectForCommissioning(output) == BrainLoad::Missing);
+                assert(raw(output) == outputBefore);
+                assert(!store.ready() && !store.faulted());
+            }
+            assert(store.saveContext(context()) == BrainWrite::StorageFault);
+            assert(store.reserveLocal(request()) == BrainWrite::StorageFault);
+            assert(store.clearPending(request()) == BrainWrite::StorageFault);
+            assert(raw(store.state()) == before && io.disk == disk);
+            noWrites();
+            assert(store.installInitial(pairing()) == BrainWrite::Stored);
+            assert(store.inspectForCommissioning(output) == BrainLoad::Ready);
+            assert(sameBrainState(output, store.state()) && store.ready());
+        }, space, false);
+    }
+    for (unsigned kind = 0; kind < 8; ++kind) {
+        scenario("commissioning reads isolated full/used/pending evidence " + std::to_string(kind), [&] {
+            auto stored = state(kind >= 4 && kind <= 6);
+            if (kind == 0) { stored = BrainState{}; stored.pairing = pairing(); }
+            if (kind == 1) stored.localSequence = 0;
+            if (kind == 3) stored.context = context(11, true);
+            if (kind == 5) stored.context = context(11);
+            if (kind == 6) stored.context = context(11, true);
+            if (kind == 7) {
+                stored.pairing.localPhysicalId[0] = 'a';
+                stored.pairing.peerPhysicalId[0] = 'b';
+                stored.pairing.epoch[0] = 'c';
+            }
+            seed(stored);
+            assert(!io.disk.count("productpair"));
+            const auto disk = io.disk;
+            BrainStateStore store;
+            const auto before = raw(store.state());
+            BrainState output;
+            for (unsigned i = 0; i < 2; ++i) {
+                assert(store.inspectForCommissioning(output) == BrainLoad::Ready);
+                assert(sameBrainState(output, stored));
+                assert(!std::memcmp(output.pendingDigest, stored.pendingDigest, kProductDigestSize));
+                assert(raw(store.state()) == before && !store.ready() && !store.faulted());
+            }
+            assert(store.saveContext(context(99)) == BrainWrite::StorageFault);
+            assert(store.reserveLocal(request(stored.localSequence + 1)) == BrainWrite::StorageFault);
+            assert(store.clearPending(request()) == BrainWrite::StorageFault);
+            if (kind >= 2) {
+                const auto imported = stored.context;
+                assert(store.installInitial(stored.pairing, &imported) == BrainWrite::Conflict);
+                assert(!store.ready() && !store.faulted());
+            }
+            assert(io.disk == disk);
+            noWrites();
+            assert(store.load(stored.pairing) == BrainLoad::Ready);
+            assert(store.ready() && sameBrainState(store.state(), stored));
+            const auto loaded = raw(store.state());
+            assert(store.inspectForCommissioning(output) == BrainLoad::Ready);
+            assert(store.ready() && raw(store.state()) == loaded && io.disk == disk);
+            noWrites();
+        }, true, false);
+    }
+    scenario("inspection does not bind identity or snapshot before verified load", [] {
+        seed(state());
+        BrainStateStore store;
+        const auto before = raw(store.state());
+        BrainState output;
+        assert(store.inspectForCommissioning(output) == BrainLoad::Ready);
+        io.disk["brainstate"].erase("record");
+        const auto previousOutput = raw(output);
+        assert(store.inspectForCommissioning(output) == BrainLoad::Missing);
+        assert(raw(output) == previousOutput && !store.faulted());
+        auto changed = state();
+        changed.localSequence = 9;
+        changed.pairing.localPhysicalId[0] = 'a';
+        changed.pairing.peerPhysicalId[0] = 'b';
+        seed(changed);
+        assert(store.inspectForCommissioning(output) == BrainLoad::Ready);
+        assert(sameBrainState(output, changed));
+        assert(raw(store.state()) == before && !store.ready() && !store.faulted());
+        assert(store.load(pairing()) == BrainLoad::IdentityMismatch);
+        latched(store, before);
+        noWrites();
+    });
+    for (unsigned kind = 0; kind < 12; ++kind) {
+        scenario("ready inspection latches external change like load " + std::to_string(kind), [&] {
+            seed(state(true));
+            BrainStateStore store;
+            assert(store.load(pairing()) == BrainLoad::Ready);
+            const auto before = raw(store.state());
+            if (kind == 0) io.disk["brainstate"].erase("record");
+            else {
+                auto changed = state(true);
+                if (kind == 1) changed = state();
+                if (kind == 2) changed.context = context(11);
+                if (kind == 3) changed.context = context(11, true);
+                if (kind == 4) changed.pairing.peerPhysicalId[0] = 'a';
+                if (kind == 5) changed.context.babyName[0] = 'X';
+                if (kind == 6) changed.pairing.localPhysicalId[0] = 'a';
+                if (kind == 7) {
+                    changed.pairing.epoch[0] = 'a';
+                    assert(makeLocalCommandId(changed.pairing, changed.localSequence,
+                                              changed.pendingRequest.commandId));
+                    assert(requestDigest(changed.pendingRequest, changed.pendingDigest));
+                }
+                if (kind == 8) { changed = state(); changed.localSequence++; }
+                if (kind == 9) {
+                    changed.pendingRequest.waterMl++;
+                    assert(requestDigest(changed.pendingRequest, changed.pendingDigest));
+                }
+                auto bytes = encode(changed);
+                if (kind == 10) bytes[8] ^= 1;
+                seed(bytes, kind == 11 ? fake::Type::String : fake::Type::Blob);
+            }
+            const auto disk = io.disk;
+            auto output = state();
+            const auto outputBefore = raw(output);
+            const auto expected = kind == 4 || kind == 6 || kind == 7 ? BrainLoad::IdentityMismatch :
+                kind >= 10 ? BrainLoad::Corrupt : BrainLoad::IoError;
+            assert(store.inspectForCommissioning(output) == expected);
+            assert(raw(output) == outputBefore);
+            latched(store, before);
+            seed(state(true));
+            assert(store.inspectForCommissioning(output) == expected);
+            assert(raw(output) == outputBefore);
+            latched(store, before);
+            io.disk = disk;
+            noWrites();
+        });
+    }
+}
+
+void commissioningFailures() {
+    const auto good = encode(state(true));
+    for (size_t length = 0; length <= good.size(); ++length) {
+        scenario("inspection corrupt/truncated output atomicity " + std::to_string(length), [&] {
+            auto bytes = Bytes(good.begin(), good.begin() + length);
+            if (length == good.size()) bytes[8] ^= 1;
+            seed(bytes);
+            BrainStateStore store;
+            auto output = state();
+            const auto outputBefore = raw(output);
+            const auto before = raw(store.state());
+            assert(store.inspectForCommissioning(output) == BrainLoad::Corrupt);
+            assert(raw(output) == outputBefore);
+            latched(store, before);
+            noWrites();
+        });
+    }
+    for (bool ready : {false, true}) {
+        for (Op op : {Op::OpenRO, Op::Query, Op::Read}) {
+            for (esp_err_t error : {ESP_FAIL, ESP_ERR_NVS_NOT_FOUND, ESP_ERR_NVS_TYPE_MISMATCH,
+                                    ESP_ERR_NVS_INVALID_LENGTH}) {
+                scenario("inspection SDK failure ready/op/error " + std::to_string(ready) + "/" +
+                         std::to_string(int(op)) + "/" + std::to_string(error), [&] {
+                    seed(good);
+                    BrainStateStore store;
+                    if (ready) assert(store.load(pairing()) == BrainLoad::Ready);
+                    const auto before = raw(store.state());
+                    const auto disk = io.disk;
+                    auto output = state();
+                    const auto outputBefore = raw(output);
+                    fake::fail(op, fake::count(op) + 1, error);
+                    auto expected = error == ESP_ERR_NVS_NOT_FOUND && op != Op::Read ? BrainLoad::Missing :
+                        (error == ESP_ERR_NVS_TYPE_MISMATCH && op != Op::OpenRO ? BrainLoad::Corrupt : BrainLoad::IoError);
+                    if (ready && expected == BrainLoad::Missing) expected = BrainLoad::IoError;
+                    assert(store.inspectForCommissioning(output) == expected);
+                    assert(raw(output) == outputBefore && raw(store.state()) == before && io.disk == disk);
+                    if (expected != BrainLoad::Missing) latched(store, before);
+                    else {
+                        assert(!store.faulted() && !store.ready());
+                        assert(store.inspectForCommissioning(output) == BrainLoad::Ready);
+                        assert(sameBrainState(output, state(true)) && !store.ready());
+                    }
+                    noWrites();
+                });
+            }
+            if (op == Op::OpenRO) continue;
+            for (size_t length : {size_t(0), good.size() - 1, good.size() + 1,
+                                  kBrainStateMaxSize + 1, SIZE_MAX}) {
+                scenario("inspection inconsistent SDK length " + std::to_string(length), [&] {
+                    seed(good);
+                    BrainStateStore store;
+                    if (ready) assert(store.load(pairing()) == BrainLoad::Ready);
+                    const auto before = raw(store.state());
+                    auto output = state();
+                    const auto outputBefore = raw(output);
+                    fake::fail(op, fake::count(op) + 1, ESP_OK, false, length);
+                    const auto expected = op == Op::Query && (!length || length > kBrainStateMaxSize)
+                        ? BrainLoad::Corrupt : BrainLoad::IoError;
+                    assert(store.inspectForCommissioning(output) == expected);
+                    assert(raw(output) == outputBefore);
+                    latched(store, before);
+                    noWrites();
+                });
+            }
+        }
+        scenario("inspection disappearing key between query and read is IO failure", [&] {
+            seed(good);
+            BrainStateStore store;
+            if (ready) assert(store.load(pairing()) == BrainLoad::Ready);
+            const auto before = raw(store.state());
+            auto output = state();
+            const auto outputBefore = raw(output);
+            io.before = [](const fake::Call& call) {
+                if (call.op == Op::Read) io.disk["brainstate"].erase("record");
+            };
+            assert(store.inspectForCommissioning(output) == BrainLoad::IoError);
+            assert(raw(output) == outputBefore);
+            latched(store, before);
+            io.before = {};
+            noWrites();
+        });
+        scenario("inspection pending SHA verification failure is sticky corruption", [&] {
+            seed(good);
+            BrainStateStore store;
+            if (ready) assert(store.load(pairing()) == BrainLoad::Ready);
+            const auto before = raw(store.state());
+            auto output = state();
+            const auto outputBefore = raw(output);
+            fake_product_crypto::fail = true;
+            assert(store.inspectForCommissioning(output) == BrainLoad::Corrupt);
+            assert(raw(output) == outputBefore);
+            latched(store, before);
+            fake_product_crypto::fail = false;
+            latched(store, before);
+            noWrites();
+        });
+    }
 }
 
 void semantics() {
@@ -829,7 +1070,8 @@ void cryptoFailures() {
 
 int main(int argc, char** argv) {
     const std::vector<std::pair<const char*, std::function<void()>>> groups{
-        {"basics", basics}, {"semantics", semantics}, {"read", readFailures},
+        {"basics", basics}, {"commissioning", commissioning},
+        {"commissioning-read", commissioningFailures}, {"semantics", semantics}, {"read", readFailures},
         {"write", writeFailures}, {"races", races}, {"crypto", cryptoFailures}};
     bool found = false;
     for (const auto& group : groups) {

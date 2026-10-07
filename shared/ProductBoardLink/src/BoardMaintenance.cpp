@@ -141,6 +141,9 @@ void BoardMaintenance::receive(const v4::Frame& frame, uint32_t nowMs) {
         if (frame.payload[1] == kActive && state_ != BoardMaintenanceState::Releasing) {
             state_ = BoardMaintenanceState::Active;
             renewedAt_ = nowMs;
+            // The request began before Motion granted the lease. Using ACK
+            // arrival would incorrectly give transport delay a new lifetime.
+            confirmedAt_ = requestedAt_;
         } else if (frame.payload[1] == kInactive) state_ = BoardMaintenanceState::Released;
         else if (frame.payload[1] == kUnsafe) state_ = BoardMaintenanceState::Unsafe;
         else if (frame.payload[1] == kBusy) state_ = BoardMaintenanceState::Busy;
@@ -218,6 +221,12 @@ void BoardMaintenance::poll(uint32_t nowMs) {
     if (awaiting_ && uint32_t(nowMs - requestedAt_) >= kResponseMs) {
         awaiting_ = pendingOutput_ = false;
         state_ = BoardMaintenanceState::TimedOut;
+    }
+    if (state_ == BoardMaintenanceState::Active &&
+        uint32_t(nowMs - confirmedAt_) >= kLeaseMs) {
+        awaiting_ = pendingOutput_ = false;
+        state_ = BoardMaintenanceState::TimedOut;
+        return;
     }
     if (state_ == BoardMaintenanceState::Active && !awaiting_ &&
         uint32_t(nowMs - renewedAt_) >= kRenewMs && !send(kRenew, nowMs))

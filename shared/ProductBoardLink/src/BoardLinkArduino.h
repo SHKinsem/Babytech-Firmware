@@ -28,6 +28,8 @@ public:
     }
     const DiscoveryResult& discoveryResult() const { return discovery_.result(); }
     bool requestRecords(const char* deviceId, uint32_t nowMs);
+    bool requestInstalledRecords(const char* deviceId, const v4::Pairing& expected, uint32_t nowMs);
+    bool requestRecoveryRecords(const char* deviceId, const v4::Pairing& expected, uint32_t nowMs);
     bool setExportSource(BoardExportSource* source) { return records_.setSource(source); }
     ExportTransferState recordsState() const { return records_.state(); }
     const MotionExportSnapshot* recordsSnapshot() const { return records_.snapshot(); }
@@ -37,7 +39,9 @@ public:
     BoardMaintenanceState maintenanceState() const { return maintenance_.state(); }
     bool maintenanceActive() const { return maintenance_.active(); }
     BoardMaintenance& maintenance() { return maintenance_; }
+    const BoardMaintenance& maintenance() const { return maintenance_; }
     BoardInstall& install() { return install_; }
+    const BoardInstall& install() const { return install_; }
 private:
     class Sink : public v4::ByteSink {
     public:

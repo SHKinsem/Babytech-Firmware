@@ -34,6 +34,12 @@ class ControllerLink {
     return ready_ && boardLink_.requestRecords(device, nowMs);
   }
   babytech::boardlink::ExportTransferState recordsState() const { return boardLink_.recordsState(); }
+  bool requestInstalledRecords(const char* device, const babytech::v4::Pairing& expected, uint32_t nowMs) {
+    return ready_ && boardLink_.requestInstalledRecords(device, expected, nowMs);
+  }
+  bool requestRecoveryRecords(const char* device, const babytech::v4::Pairing& expected, uint32_t nowMs) {
+    return ready_ && boardLink_.requestRecoveryRecords(device, expected, nowMs);
+  }
   const babytech::boardlink::MotionExportSnapshot* recordsSnapshot() const { return boardLink_.recordsSnapshot(); }
   bool requestMaintenance(const char* device, uint32_t nowMs) {
     return ready_ && boardLink_.requestMaintenance(device, nowMs);
@@ -42,6 +48,19 @@ class ControllerLink {
     return ready_ && boardLink_.releaseMaintenance(nowMs);
   }
   babytech::boardlink::BoardMaintenanceState maintenanceState() const { return boardLink_.maintenanceState(); }
+  // Installation is called only by the explicit local commissioning owner.
+  const char* installationPhysicalId() const { return boardLink_.install().physicalId(); }
+  const char* installationNonce() const { return boardLink_.maintenance().nonce(); }
+  bool installationLeaseValid(uint32_t nowMs) {
+    boardLink_.maintenance().poll(nowMs);
+    return boardLink_.maintenanceState() == babytech::boardlink::BoardMaintenanceState::Active;
+  }
+  bool requestInstallation(const babytech::boardlink::CommissioningImport& request, uint32_t nowMs) {
+    return ready_ && installationLeaseValid(nowMs) && boardLink_.install().request(
+        request, installationNonce(), boardLink_.maintenance().peerBoot(), nowMs);
+  }
+  babytech::boardlink::BoardInstallState installationState() const { return boardLink_.install().state(); }
+  babytech::boardlink::CommissioningResult installationResult() const { return boardLink_.install().result(); }
   // Historical telemetry survives link expiry/restart; connected() reports
   // liveness separately. Only a newly accepted sample may replace its values.
   const babytech::boardlink::Status* lastTelemetry() const {

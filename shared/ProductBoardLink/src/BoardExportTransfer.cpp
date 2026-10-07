@@ -55,6 +55,7 @@ void BoardExportTransfer::reset() {
     snapshot_.reset();
     source_ = nullptr;
     initialized_ = outgoingPending_ = captureActive_ = false;
+    allowMissingPair_ = false;
     state_ = ExportTransferState::Idle;
     position_ = outgoingCount_ = 0;
     nextId_ = 1;
@@ -121,10 +122,34 @@ bool BoardExportTransfer::request(const char* device, const DiscoveryResult& pee
     std::memcpy(device_, device, deviceLength(device));
     std::memcpy(challenge_, challenge, sizeof(challenge_));
     peer_ = peer;
+    allowMissingPair_ = false;
     position_ = 0;
     beganAt_ = nowMs;
     state_ = ExportTransferState::Pending;
     return query(nowMs);
+}
+
+bool BoardExportTransfer::requestInstalled(const char* device, const DiscoveryResult& peer,
+                                           const char* challenge, const v4::Pairing& expected,
+                                           uint32_t nowMs) {
+    if (!device || !v4::validPairing(expected) || expected.role != v4::Role::Motion ||
+        std::strcmp(expected.deviceId, device) ||
+        std::strcmp(expected.localPhysicalId, peer.physicalId) ||
+        std::strcmp(expected.peerPhysicalId, physicalId_) ||
+        (peer.pairingState != DiscoveryPairState::Missing && peer.pairingState != DiscoveryPairState::Ready) ||
+        (peer.pairingState == DiscoveryPairState::Ready && !samePair(expected, peer.pairing))) return false;
+    auto verificationPeer = peer;
+    verificationPeer.pairingState = DiscoveryPairState::Ready;
+    verificationPeer.pairing = expected;
+    return request(device, verificationPeer, challenge, nowMs);
+}
+
+bool BoardExportTransfer::requestRecovery(const char* device, const DiscoveryResult& peer,
+                                          const char* challenge, const v4::Pairing& expected,
+                                          uint32_t nowMs) {
+    if (!requestInstalled(device, peer, challenge, expected, nowMs)) return false;
+    allowMissingPair_ = true;
+    return true;
 }
 
 void BoardExportTransfer::fail(ExportTransferState state) {
@@ -240,7 +265,8 @@ void BoardExportTransfer::receive(const v4::Frame& frame, uint32_t nowMs) {
     if (!decodeMotionExport(input_.get(), position_, device_, peer_.physicalId, peer_.peerBoot, challenge_, *parsed) ||
         (parsed->pairStatus == ExportRead::Ready &&
          (peer_.pairingState != DiscoveryPairState::Ready || !samePair(parsed->pairing, peer_.pairing))) ||
-        (parsed->pairStatus == ExportRead::Missing && peer_.pairingState != DiscoveryPairState::Missing)) {
+        (parsed->pairStatus == ExportRead::Missing && peer_.pairingState != DiscoveryPairState::Missing &&
+         !allowMissingPair_)) {
         fail(ExportTransferState::Invalid);
         return;
     }

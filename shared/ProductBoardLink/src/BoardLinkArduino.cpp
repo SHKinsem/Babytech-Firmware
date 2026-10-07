@@ -6,6 +6,17 @@
 #include <cstring>
 
 namespace babytech { namespace boardlink {
+namespace {
+void randomChallenge(char (&output)[33]) {
+    constexpr char hex[] = "0123456789abcdef";
+    for (size_t word = 0; word < 4; ++word) {
+        const uint32_t random = esp_random();
+        for (size_t nibble = 0; nibble < 8; ++nibble)
+            output[word * 8 + nibble] = hex[(random >> (28 - 4 * nibble)) & 15];
+    }
+    output[32] = 0;
+}
+}
 
 bool ArduinoBoardLink::Sink::idle() const {
     return uart_wait_tx_done(UART_NUM_1, 0) == ESP_OK;
@@ -148,24 +159,36 @@ void ArduinoBoardLink::poll(uint32_t nowMs, const Status* localStatus) {
 bool ArduinoBoardLink::requestRecords(const char* device, uint32_t nowMs) {
     if (!started_ || !discoveryEnabled_ || discovery_.result().state != DiscoveryState::Found) return false;
     char challenge[33]{};
-    constexpr char hex[] = "0123456789abcdef";
-    for (size_t word = 0; word < 4; ++word) {
-        const uint32_t random = esp_random();
-        for (size_t nibble = 0; nibble < 8; ++nibble)
-            challenge[word * 8 + nibble] = hex[(random >> (28 - 4 * nibble)) & 15];
-    }
+    randomChallenge(challenge);
     return records_.request(device, discovery_.result(), challenge, nowMs);
+}
+
+bool ArduinoBoardLink::requestInstalledRecords(const char* device, const v4::Pairing& expected,
+                                                uint32_t nowMs) {
+    maintenance_.poll(nowMs);
+    if (!started_ || !discoveryEnabled_ || maintenanceState() != BoardMaintenanceState::Active ||
+        install_.state() != BoardInstallState::Complete ||
+        (install_.result() != CommissioningResult::Installed &&
+         install_.result() != CommissioningResult::AlreadyInstalled)) return false;
+    char challenge[33]{};
+    randomChallenge(challenge);
+    return records_.requestInstalled(device, discovery_.result(), challenge, expected, nowMs);
+}
+
+bool ArduinoBoardLink::requestRecoveryRecords(const char* device, const v4::Pairing& expected,
+                                               uint32_t nowMs) {
+    maintenance_.poll(nowMs);
+    if (!started_ || !discoveryEnabled_ || maintenanceState() != BoardMaintenanceState::Active ||
+        !install_.matchesRequestedPair(expected)) return false;
+    char challenge[33]{};
+    randomChallenge(challenge);
+    return records_.requestRecovery(device, discovery_.result(), challenge, expected, nowMs);
 }
 
 bool ArduinoBoardLink::requestMaintenance(const char* device, uint32_t nowMs) {
     if (!started_ || !discoveryEnabled_ || discovery_.result().state != DiscoveryState::Found) return false;
     char nonce[33]{};
-    constexpr char hex[] = "0123456789abcdef";
-    for (size_t word = 0; word < 4; ++word) {
-        const uint32_t random = esp_random();
-        for (size_t nibble = 0; nibble < 8; ++nibble)
-            nonce[word * 8 + nibble] = hex[(random >> (28 - 4 * nibble)) & 15];
-    }
+    randomChallenge(nonce);
     return maintenance_.request(device, discovery_.result(), nonce, nowMs);
 }
 

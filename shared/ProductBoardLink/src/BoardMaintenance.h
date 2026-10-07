@@ -50,6 +50,7 @@ private:
     uint64_t boot_ = 0, peerBoot_ = 0;
     uint32_t nextId_ = 1, requestId_ = 0, lastPeerId_ = 0;
     uint32_t requestedAt_ = 0, renewedAt_ = 0;
+    uint32_t confirmedAt_ = 0;
     v4::Frame output_{};
     BoardMaintenanceTarget* target_ = nullptr;
     BoardMaintenanceState state_ = BoardMaintenanceState::Idle;

@@ -8,6 +8,8 @@
 #include <MaintenanceUsbConsole.h>
 #include "brain_network_console.h"
 #include "brain_pairing_console.h"
+#include "brain_installer.h"
+#include "brain_install_console.h"
 #include <esp_system.h>
 #endif
 
@@ -19,11 +21,34 @@ babytech::display::ControllerLink controllerLink;
 #if BABYTECH_BOARD_LINK_V4
 babytech::brain::BrainNetwork network;
 babytech::boardlink::MaintenanceUsbConsole commissioningSession;
+// This same store will serve the subsequent local-command runtime owner.
+babytech::boardlink::BrainStateStore productState;
+bool locallyInstalling() { return commissioningSession.active() && !controllerLink.intentPending(); }
+uint32_t installNowMs() { return uint32_t(millis()); }
+bool newPairingEpoch(char (&epoch)[33]) {
+  constexpr char hex[] = "0123456789abcdef";
+  bool nonzero = false;
+  for (size_t i = 0; i < 32; i += 8) {
+    const uint32_t random = esp_random();
+    nonzero |= random != 0;
+    for (size_t n = 0; n < 8; ++n) epoch[i + n] = hex[(random >> (4 * n)) & 15];
+  }
+  epoch[32] = 0;
+  return nonzero;
+}
+babytech::brain::BrainInstaller<babytech::display::ControllerLink> installer(
+  controllerLink, productState, locallyInstalling, installNowMs, newPairingEpoch);
 
 void pollCommissioningConsole() {
-  // Local UI lock only; neither this lock nor an export authorizes an import.
+  // Only the explicit installation command can advance from diagnostics to writes.
   commissioningSession.poll(Serial, millis(), !controllerLink.intentPending(),
     [](const char* line, char* output, size_t capacity) {
+      if (babytech::brain::BrainInstallConsole::handle(line, installer, millis(), output, capacity)) return true;
+      if (installer.busy() && (!std::strncmp(line, "PAIR ", 5) ||
+          (!std::strncmp(line, "NET ", 4) && std::strcmp(line, "NET STATUS")))) {
+        std::snprintf(output, capacity, "[install] busy\n");
+        return true;
+      }
       return babytech::brain::BrainPairingConsole::handle(
         line, commissioningSession.active(), controllerLink, millis(), output, capacity) ||
         babytech::brain::BrainNetworkConsole::handle(
@@ -64,6 +89,7 @@ void loop() {
   controllerLink.poll(nowMs);
 #if BABYTECH_BOARD_LINK_V4
   pollCommissioningConsole();
+  installer.poll(nowMs);
   if (!commissioningSession.active()) controllerLink.releaseMaintenance(nowMs);
   network.poll(controllerLink.lastTelemetry(), controllerLink.connected(nowMs), nowMs,
                controllerLink.lastTelemetryReceivedAtMs());

@@ -126,12 +126,23 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertIn("hasIntent && commissioningSession.active()", loop)
         self.assertIn("commissioningSession.active()) snapshot.startEnabled = false", loop)
 
-    def test_console_does_not_install_or_claim_network_shutdown(self):
+    def test_console_does_not_directly_write_or_claim_network_shutdown(self):
         for source in (self.motion, self.brain):
             body = function_body(source, "void pollCommissioningConsole()")
             for forbidden in ("installFirst", "importBrain", "importMotion", "ESP.restart", "WiFi.disconnect"):
                 self.assertNotIn(forbidden, body)
         self.assertIn("network.poll(", function_body(self.brain, "void loop()"))
+
+    def test_brain_installer_explicit_owner_without_boot_autoinstall(self):
+        self.assertEqual(self.brain.count("BrainStateStore productState;"), 1)
+        self.assertIn("BrainInstallConsole::handle(line, installer,", self.brain)
+        setup = function_body(self.brain, "void setup()")
+        self.assertNotIn("installer.start(", setup)
+        self.assertNotIn("importBrain(", setup)
+        polling = function_body(self.brain, "void loop()")
+        self.assertLess(polling.index("controllerLink.poll(nowMs)"), polling.index("installer.poll(nowMs)"))
+        self.assertLess(polling.index("pollCommissioningConsole()"), polling.index("installer.poll(nowMs)"))
+        self.assertIn("installer.busy()", function_body(self.brain, "void pollCommissioningConsole()"))
 
     def test_motion_install_uses_runtime_store_without_boot_or_console_writes(self):
         self.assertEqual(self.motion.count("MotionStateStore productState;"), 1)

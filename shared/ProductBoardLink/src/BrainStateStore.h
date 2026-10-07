@@ -28,6 +28,13 @@ public:
     // Faults remain latched for this lifetime.
     BrainLoad load(const v4::Pairing& verifiedPairing);
 
+    // Read-only commissioning evidence, not verified identity or readiness.
+    // The coordinator must check actual hardware identities and full pairing.
+    // Ready copies the complete decoded record; Missing/failure preserve output.
+    // Never changes state_/ready_ or clears faults. Before ready, Missing is not
+    // a fault; after ready, external changes latch faults just as load() does.
+    BrainLoad inspectForCommissioning(BrainState& output);
+
     // Commissioning ONLY: the caller must first validate legacy journal/context,
     // stationary and MQTT ownership gates. Missing alone is not authorization.
     // nullptr explicitly requests a new blank cache; imported retains tombstones.

@@ -73,6 +73,21 @@ BrainLoad BrainStateStore::load(const v4::Pairing& verifiedPairing) {
     return BrainLoad::Ready;
 }
 
+BrainLoad BrainStateStore::inspectForCommissioning(BrainState& output) {
+    if (faulted_) return faultReason_;
+    const BrainLoad loaded = readStored();
+    if (loaded == BrainLoad::Missing)
+        return ready_ ? latchLoadFault(BrainLoad::IoError) : BrainLoad::Missing;
+    if (loaded != BrainLoad::Ready) return latchLoadFault(loaded);
+    if (ready_) {
+        if (!samePairing(observed_.pairing, state_.pairing))
+            return latchLoadFault(BrainLoad::IdentityMismatch);
+        if (!sameBrainState(observed_, state_)) return latchLoadFault(BrainLoad::IoError);
+    }
+    output = observed_;
+    return BrainLoad::Ready;
+}
+
 bool BrainStateStore::checkCurrent() {
     const BrainLoad loaded = readStored();
     if (loaded == BrainLoad::Ready && sameBrainState(observed_, state_)) return true;

@@ -124,6 +124,7 @@ jobs:
           python tools/test_board_maintenance.py --sanitize
           python tools/test_board_install.py --sanitize
           python tools/test_motion_install.py --sanitize
+          python tools/test_brain_installer.py --sanitize
           python -m unittest discover -s tests -p test_capture_board_export.py
           python -m unittest discover -s tests -p test_maintenance_wiring.py
           python tools/test_board_link.py --sanitize

@@ -163,10 +163,21 @@ bool BoardInstall::request(const CommissioningImport& request, const char* nonce
     output_.length = uint16_t(contextOffset + contextLength + 1);
     std::memcpy(nonce_, nonce, sizeof(nonce_));
     requestedAt_ = nowMs;
+    decoded_ = request;
     pendingOutput_ = true;
     result_ = CommissioningResult::Invalid;
     state_ = BoardInstallState::Pending;
     return true;
+}
+
+bool BoardInstall::matchesRequestedPair(const v4::Pairing& expected) const {
+    const auto& submitted = decoded_.pairing;
+    return initialized_ && role_ == v4::Role::Brain && requestId_ &&
+        v4::validPairing(expected) && expected.role == submitted.role &&
+        !std::strcmp(expected.deviceId, submitted.deviceId) &&
+        !std::strcmp(expected.epoch, submitted.epoch) &&
+        !std::strcmp(expected.localPhysicalId, submitted.localPhysicalId) &&
+        !std::strcmp(expected.peerPhysicalId, submitted.peerPhysicalId);
 }
 
 bool BoardInstall::decodeRequest() {
