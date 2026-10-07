@@ -1,4 +1,5 @@
 #include "ProductContext.h"
+#include "BoardProtocolV4.h"
 
 #include <ArduinoJson.h>
 #include <algorithm>
@@ -8,14 +9,28 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <new>
 #include <string>
 #include <vector>
 
 using babytech::boardlink::ProductContext;
 using babytech::boardlink::decodeProductContext;
 using babytech::boardlink::encodeContextIdentity;
+using babytech::boardlink::encodeProductContext;
 using babytech::boardlink::kContextIdentityMaxSize;
 using babytech::boardlink::sameProductContext;
+
+// Fail only the encoder's checked array allocation; leave ArduinoJson and the
+// test harness allocations alone. Ordinary allocations retain standard behavior.
+namespace { bool failScratchAllocation = false; }
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+    if (failScratchAllocation) return nullptr;
+    try { return ::operator new[](size); }
+    catch (const std::bad_alloc&) { return nullptr; }
+}
+void operator delete[](void* pointer, const std::nothrow_t&) noexcept {
+    ::operator delete[](pointer);
+}
 
 namespace {
 size_t cases = 0;
@@ -441,6 +456,8 @@ void rejectContext(const ProductContext& value) {
     const auto before = output;
     assert(!encodeContextIdentity(value, output.data(), output.size()));
     assert(output == before);
+    assert(!encodeProductContext(value, output.data(), output.size()));
+    assert(output == before);
     assert(!sameProductContext(value, value));
     const auto good = sentinel();
     assert(!sameProductContext(value, good) && !sameProductContext(good, value));
@@ -535,6 +552,227 @@ void float32Boundaries() {
     }
     for (const char* token : {"0.9999999", "50.000003"}) reject(field(kActive, "powder_g_per_100ml", token));
 }
+
+std::string wireRoundtrip(const ProductContext& context) {
+    constexpr size_t maximum = babytech::v4::kMaxMessage;
+    std::vector<uint8_t> buffer(maximum + 9, 0xa5);
+    const auto before = bytes(context);
+    const size_t length = encodeProductContext(context, buffer.data() + 1, buffer.size() - 1);
+    assert(length && length <= maximum);
+    assert(bytes(context) == before);
+    assert(buffer.front() == 0xa5);
+    assert(std::all_of(buffer.begin() + 1 + length, buffer.end(),
+                       [](uint8_t b) { return b == 0xa5; }));
+    // No terminator or hidden slack: ASan checks both exact-sized wire buffers.
+    std::vector<uint8_t> exact(length, 0x5a);
+    assert(encodeProductContext(context, exact.data(), exact.size()) == length);
+    assert(std::equal(exact.begin(), exact.end(), buffer.begin() + 1));
+    ProductContext decoded = sentinel();
+    assert(decodeProductContext(exact.data(), exact.size(), context.deviceId, decoded));
+    assert(sameProductContext(context, decoded) && sameProductContext(decoded, context));
+    assert(identity(context) == identity(decoded));
+    if (!context.cleared) assert(bytes(context.powderGPer100Ml) == bytes(decoded.powderGPer100Ml));
+    assert(std::find(exact.begin(), exact.end(), uint8_t(0)) == exact.end());
+    DynamicJsonDocument doc(8192);
+    assert(!deserializeJson(doc, static_cast<const uint8_t*>(exact.data()), exact.size()));
+    assert(doc["type"] == "feeding_context" && doc["device_id"] == context.deviceId);
+    assert(doc["profile_version"].is<uint32_t>());
+    assert(doc["profile_version"].as<uint32_t>() == context.profileVersion);
+    assert(!doc.containsKey("updated_at"));
+    if (context.cleared) {
+        assert(doc.size() == 4 && doc["cleared"].is<bool>() && doc["cleared"].as<bool>());
+    } else {
+        assert(doc.size() == 9 && !doc.containsKey("cleared"));
+        for (const char* key : {"baby_id", "baby_name", "formula_brand"})
+            assert(doc[key].is<JsonString>());
+        for (const char* key : {"water_ml", "temp"}) assert(doc[key].is<unsigned>());
+        assert(doc["powder_g_per_100ml"].is<double>() && !doc["powder_g_per_100ml"].is<JsonString>());
+    }
+    ++cases;
+    return {exact.begin(), exact.end()};
+}
+
+void rejectWire(const ProductContext& context, size_t capacity = 4096) {
+    std::vector<uint8_t> output(capacity + 2, 0x5a);
+    const auto before = output;
+    const auto contextBefore = bytes(context);
+    assert(!encodeProductContext(context, output.data() + 1, capacity));
+    assert(output == before && bytes(context) == contextBefore);
+    ++cases;
+}
+
+void wireEncoder() {
+    const auto active = accept(kActive);
+    const auto cleared = accept(kCleared);
+    for (const auto* context : {&active, &cleared}) {
+        const auto wire = wireRoundtrip(*context);
+        // Input strings remain linked until the scratch JSON is complete; only
+        // the final copy may overwrite an overlapping destination in the input.
+        auto aliased = *context;
+        const auto original = bytes(aliased);
+        auto* output = reinterpret_cast<uint8_t*>(aliased.babyName);
+        assert(!encodeProductContext(aliased, output, 1));
+        assert(bytes(aliased) == original);
+        ++cases;
+        assert(wire.size() <= sizeof(aliased.babyName));
+        assert(encodeProductContext(aliased, output, sizeof(aliased.babyName)) == wire.size());
+        auto expected = original;
+        std::memcpy(expected.data() + offsetof(ProductContext, babyName), wire.data(), wire.size());
+        assert(bytes(aliased) == expected); // Includes the destination suffix and all other fields.
+        ProductContext decoded;
+        assert(decodeProductContext(output, wire.size(), context->deviceId, decoded));
+        assert(sameProductContext(*context, decoded) && identity(*context) == identity(decoded));
+        if (!context->cleared)
+            assert(bytes(context->powderGPer100Ml) == bytes(decoded.powderGPer100Ml));
+        ++cases;
+        for (size_t capacity = 0; capacity < wire.size(); ++capacity) rejectWire(*context, capacity);
+        for (size_t capacity : {size_t(0), size_t(1), wire.size(), SIZE_MAX}) {
+            assert(!encodeProductContext(*context, nullptr, capacity));
+            ++cases;
+        }
+        std::vector<uint8_t> large(babytech::v4::kMaxMessage + 1, 0x5a);
+        assert(encodeProductContext(*context, large.data(), SIZE_MAX) == wire.size());
+        assert(std::all_of(large.begin() + wire.size(), large.end(),
+                           [](uint8_t b) { return b == 0x5a; }));
+        ++cases;
+    }
+    auto context = active;
+    set(context.babyName, "");
+    set(context.formulaBrand, "");
+    wireRoundtrip(context);
+    for (uint32_t version : {1u, uint32_t(INT32_MAX)}) {
+        context.profileVersion = version;
+        for (uint16_t water : {uint16_t(30), uint16_t(500)}) {
+            context.waterMl = water;
+            for (uint8_t temperature : {uint8_t(35), uint8_t(60)}) {
+                context.temperatureC = temperature;
+                wireRoundtrip(context);
+            }
+        }
+    }
+    context = cleared;
+    context.powderGPer100Ml = -0.0f; // Tombstone identity intentionally ignores the sign of zero.
+    wireRoundtrip(context);
+    context = active;
+    set(context.babyId, "\"\\/id");
+    set(context.babyName, "\"quoted\" \\slash/ \x7f");
+    set(context.formulaBrand, "\xc3\xa9\xe5\xae\x9d\xf0\x9f\x98\x80");
+    wireRoundtrip(context);
+    for (unsigned c = 1; c < 32; ++c) {
+        const std::string text = "a" + std::string(1, char(c)) + "z";
+        set(context.babyId, text);
+        set(context.babyName, text);
+        set(context.formulaBrand, text);
+        const auto wire = wireRoundtrip(context);
+        assert(wire.find(char(c)) == std::string::npos);
+    }
+    // Exercise bulk escaping and arbitrary unused fixed-array tails together.
+    std::string allControls;
+    for (unsigned c = 1; c < 32; ++c) allControls += char(c);
+    set(context.babyId, allControls);
+    set(context.babyName, allControls + "\"\\");
+    set(context.formulaBrand, allControls);
+    context.babyId[sizeof(context.babyId) - 1] = char(0xff);
+    context.babyName[sizeof(context.babyName) - 1] = char(0xff);
+    context.formulaBrand[sizeof(context.formulaBrand) - 1] = char(0xff);
+    wireRoundtrip(context);
+}
+
+void wireLimits() {
+    auto context = accept(kActive);
+    set(context.deviceId, std::string(64, 'D'));
+    context.profileVersion = INT32_MAX;
+    context.waterMl = 500;
+    context.temperatureC = 60;
+    for (const std::string& unit : {std::string("a"), std::string("\xc3\xa9"),
+                                   std::string("\xf0\x9f\x98\x80"), std::string("\""),
+                                   std::string("\\"), std::string("\n")}) {
+        auto repeated = [&unit](size_t size) {
+            std::string text;
+            for (size_t i = 0; i < size / unit.size(); ++i) text += unit;
+            return text;
+        };
+        set(context.babyId, repeated(96));
+        set(context.babyName, repeated(320));
+        set(context.formulaBrand, repeated(480));
+        assert(identity(context).size() == kContextIdentityMaxSize);
+        wireRoundtrip(context);
+    }
+    set(context.babyId, std::string(96, 'b'));
+    set(context.babyName, std::string(320, 'n'));
+    set(context.formulaBrand, std::string(480, 'f'));
+    const size_t baseline = wireRoundtrip(context).size();
+    const size_t maximum = babytech::v4::kMaxMessage;
+    assert(baseline < maximum && maximum - baseline < 5 * 480);
+    // A raw control becomes six bytes (+5), a quote becomes two (+1).
+    // Construct exact 2046, 2047 and 2048 lengths independently of key order.
+    for (size_t target : {maximum - 1, maximum, maximum + 1}) {
+        const size_t extra = target - baseline;
+        std::string brand(480, 'f');
+        brand.replace(0, extra / 5, extra / 5, char(1));
+        brand.replace(extra / 5, extra % 5, extra % 5, '"');
+        set(context.formulaBrand, brand);
+        assert(babytech::boardlink::validProductContext(context));
+        if (target <= maximum) {
+            assert(wireRoundtrip(context).size() == target);
+            rejectWire(context, target - 1);
+        } else {
+            rejectWire(context, maximum);
+            rejectWire(context, target);
+            rejectWire(context, 8192);
+        }
+    }
+    set(context.babyId, std::string(96, char(1)));
+    set(context.babyName, std::string(320, char(2)));
+    set(context.formulaBrand, std::string(480, char(31)));
+    assert(babytech::boardlink::validProductContext(context));
+    rejectWire(context, 8192);
+}
+
+void wireFloat32() {
+    auto context = accept(kActive);
+    auto checkBits = [&context](uint32_t bits) {
+        std::memcpy(&context.powderGPer100Ml, &bits, sizeof(bits));
+        assert(babytech::boardlink::validProductContext(context));
+        wireRoundtrip(context);
+    };
+    constexpr uint32_t first = 0x3f800000; // 1.0f
+    constexpr uint32_t last = 0x42480000;  // 50.0f
+    // Rounding boundaries: neighbors of powers of two and every single mantissa bit.
+    for (uint32_t exponent = 127; exponent <= 132; ++exponent) {
+        const uint32_t base = exponent << 23;
+        for (uint32_t delta : {0u, 1u, 2u, 0x3fffffu, 0x400000u, 0x7ffffeu, 0x7fffffu}) {
+            const uint32_t bits = base + delta;
+            if (bits <= last) checkBits(bits);
+            if (base >= first + delta) checkBits(base - delta);
+        }
+        for (unsigned bit = 0; bit < 23; ++bit) {
+            const uint32_t bits = base + (uint32_t(1) << bit);
+            if (bits <= last) checkBits(bits);
+        }
+    }
+    checkBits(first);
+    checkBits(first + 1);
+    checkBits(last - 1);
+    checkBits(last);
+    // Stratified coverage across all legal exponents plus reproducible low-bit noise.
+    uint32_t random = 0x5eed1234;
+    constexpr uint32_t samples = 16384;
+    for (uint32_t i = 0; i < samples; ++i) {
+        checkBits(first + uint32_t(uint64_t(last - first) * i / (samples - 1)));
+        random = random * 1664525u + 1013904223u;
+        checkBits(first + random % (last - first + 1));
+    }
+}
+
+void wireAllocation() {
+    for (const auto& context : {accept(kActive), accept(kCleared)}) {
+        failScratchAllocation = true;
+        rejectWire(context);
+        failScratchAllocation = false;
+        wireRoundtrip(context);
+    }
+}
 }
 
 int main(int argc, char** argv) {
@@ -542,7 +780,9 @@ int main(int argc, char** argv) {
     struct Group { const char* name; void (*run)(); };
     const Group groups[] = {{"legacy", legacy}, {"types", types}, {"numbers", numbers},
         {"grammar", grammar}, {"unicode", unicode}, {"limits", limits}, {"canonical", canonical},
-        {"invalid-canonical", invalidCanonical}, {"device-ids", deviceIds}, {"float32", float32Boundaries}};
+        {"invalid-canonical", invalidCanonical}, {"device-ids", deviceIds}, {"float32", float32Boundaries},
+        {"encoder", wireEncoder}, {"encoder-limits", wireLimits}, {"encoder-float32", wireFloat32},
+        {"encoder-allocation", wireAllocation}};
     bool matched = false;
     for (const auto& group : groups) {
         if (argc == 1 || (argc == 2 && std::strcmp(argv[1], group.name) == 0)) {

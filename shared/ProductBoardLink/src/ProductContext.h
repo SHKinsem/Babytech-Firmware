@@ -25,6 +25,12 @@ struct ProductContext {
 bool decodeProductContext(const uint8_t* bytes, size_t length,
                           const char* expectedDeviceId, ProductContext& output);
 
+// Existing feeding_context wire JSON, without updated_at metadata or a trailing
+// NUL. Returns 1..v4::kMaxMessage bytes; 0 on invalid input, insufficient capacity
+// (including null output), allocation failure or wire overflow. Failure leaves
+// output unchanged; success leaves its suffix unchanged. No size-query mode.
+size_t encodeProductContext(const ProductContext& context, uint8_t* output, size_t capacity);
+
 // Canonical semantic bytes for equality and subsequent SHA-256 barriers; not a
 // Flash record or authentication proof. Ignores JSON order/spacing/updated_at.
 // Schema byte 1, cleared byte, length-prefixed (u16 LE) device ID, version u32 LE;

@@ -5,8 +5,11 @@
 
 #include <ArduinoJson.h>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <new>
 
 static_assert(ARDUINOJSON_VERSION_MAJOR == 6, "ProductContext requires ArduinoJson 6");
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
@@ -15,6 +18,37 @@ static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
 namespace babytech { namespace boardlink {
 namespace {
 constexpr size_t kMaxFields = 11;
+
+// ArduinoJson 6 escapes quotes and common controls, but emits other controls
+// literally. Supplement those escapes while bounding the fully expanded JSON.
+struct ContextJsonWriter {
+    uint8_t* output;
+    size_t capacity;
+    size_t length = 0;
+    bool overflow = false;
+
+    size_t write(uint8_t value) {
+        const size_t width = value < 0x20 ? 6 : 1;
+        if (overflow || width > capacity - length) {
+            overflow = true;
+            return 0;
+        }
+        if (width == 6) {
+            constexpr char hex[] = "0123456789abcdef";
+            std::memcpy(output + length, "\\u00", 4);
+            output[length + 4] = hex[value >> 4];
+            output[length + 5] = hex[value & 15];
+        } else output[length] = value;
+        length += width;
+        return 1;
+    }
+
+    size_t write(const uint8_t* data, size_t size) {
+        size_t written = 0;
+        while (written < size && write(data[written])) ++written;
+        return written;
+    }
+};
 
 bool boundedText(const char* value, size_t capacity, bool nonempty = false) {
     if (!value) return false;
@@ -136,6 +170,39 @@ bool decodeProductContext(const uint8_t* bytes, size_t length,
 }
 
 bool validProductContext(const ProductContext& context) { return valid(context); }
+
+size_t encodeProductContext(const ProductContext& context, uint8_t* output, size_t capacity) {
+    if (!output || !capacity || !valid(context)) return 0;
+    // All strings are linked const pointers valid until serialization completes.
+    DynamicJsonDocument doc(JSON_OBJECT_SIZE(9));
+    if (!doc.capacity()) return 0;
+    doc["type"] = "feeding_context";
+    doc["device_id"] = context.deviceId;
+    doc["profile_version"] = context.profileVersion;
+    char powder[32]{};
+    if (context.cleared) doc["cleared"] = true;
+    else {
+        doc["baby_id"] = context.babyId;
+        doc["baby_name"] = context.babyName;
+        doc["formula_brand"] = context.formulaBrand;
+        doc["water_ml"] = context.waterMl;
+        doc["temp"] = context.temperatureC;
+        // Match the request serializer: preserve binary32 digest identity.
+        const int length = std::snprintf(powder, sizeof(powder), "%.9g",
+                                         double(context.powderGPer100Ml));
+        if (length <= 0 || size_t(length) >= sizeof(powder)) return 0;
+        doc["powder_g_per_100ml"] = serialized(static_cast<const char*>(powder));
+    }
+    if (doc.overflowed()) return 0;
+    const size_t limit = capacity < v4::kMaxMessage ? capacity : v4::kMaxMessage;
+    std::unique_ptr<uint8_t[]> scratch(new (std::nothrow) uint8_t[limit]);
+    if (!scratch) return 0;
+    ContextJsonWriter writer{scratch.get(), limit};
+    serializeJson(doc, writer);
+    if (writer.overflow || !writer.length) return 0;
+    std::memcpy(output, scratch.get(), writer.length);
+    return writer.length;
+}
 
 size_t encodeContextIdentity(const ProductContext& context, uint8_t* output, size_t capacity) {
     if (!valid(context)) return 0;
