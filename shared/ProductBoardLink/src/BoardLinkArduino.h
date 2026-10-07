@@ -7,6 +7,7 @@
 #include "BoardPairingStore.h"
 #include "BoardDiscovery.h"
 #include "BoardExportTransfer.h"
+#include "BoardMaintenance.h"
 
 namespace babytech { namespace boardlink {
 
@@ -29,6 +30,11 @@ public:
     bool setExportSource(BoardExportSource* source) { return records_.setSource(source); }
     ExportTransferState recordsState() const { return records_.state(); }
     const MotionExportSnapshot* recordsSnapshot() const { return records_.snapshot(); }
+    bool requestMaintenance(const char* device, uint32_t nowMs);
+    bool releaseMaintenance(uint32_t nowMs) { return started_ && maintenance_.release(nowMs); }
+    bool setMaintenanceTarget(BoardMaintenanceTarget* target) { return maintenance_.setTarget(target); }
+    BoardMaintenanceState maintenanceState() const { return maintenance_.state(); }
+    bool maintenanceActive() const { return maintenance_.active(); }
 private:
     class Sink : public v4::ByteSink {
     public:
@@ -45,6 +51,7 @@ private:
     v4::Parser parser_{};
     BoardDiscovery discovery_{};
     BoardExportTransfer records_{};
+    BoardMaintenance maintenance_{};
     PairingLoad pairingState_ = PairingLoad::Missing;
     v4::Pairing pairing_{};
     char deviceId_[65]{};

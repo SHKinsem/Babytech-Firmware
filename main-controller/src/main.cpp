@@ -64,6 +64,7 @@ void loop() {
   controllerLink.poll(nowMs);
 #if BABYTECH_BOARD_LINK_V4
   pollCommissioningConsole();
+  if (!commissioningSession.active()) controllerLink.releaseMaintenance(nowMs);
   network.poll(controllerLink.lastTelemetry(), controllerLink.connected(nowMs), nowMs,
                controllerLink.lastTelemetryReceivedAtMs());
 #endif

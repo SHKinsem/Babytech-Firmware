@@ -72,12 +72,30 @@ class MaintenanceWiringTest(unittest.TestCase):
             self.assertIn("!safeToStart_()", function_body(self.ota, "void WifiOta::" + handler + "()"))
 
     def test_motion_entry_requires_fresh_stationary_and_no_work(self):
-        body = function_body(self.motion, "void pollCommissioningConsole()")
+        body = function_body(self.motion, "bool safeForCommissioning() {")
         for condition in ("canStarted", "!controlBusy()", "!motor.operationBusy()",
                           "!wifiSetup.busy()", "!ota.maintenanceActive()",
                           "!powderScale.tareInProgress()", "demo.stationary()"):
             self.assertIn(condition, body)
-        self.assertIn("commissioningSession.poll(Serial, millis(), localSafe", body)
+        console = function_body(self.motion, "void pollCommissioningConsole()")
+        self.assertIn("commissioningSession.poll(Serial, millis(), localSafe", console)
+        self.assertIn("!productBoardLink.maintenanceActive() && safeForCommissioning()", console)
+
+    def test_remote_lease_shares_guard_without_new_release_or_daily_gates(self):
+        active = function_body(self.motion, "bool commissioningActive() {")
+        self.assertIn("commissioningSession.active() || productBoardLink.maintenanceActive()", active)
+        target = function_body(self.motion, "bool safeToAcquire() const override")
+        self.assertIn("!commissioningSession.active() && safeForCommissioning()", target)
+        release = function_body(self.motion, "bool safeToRelease() const override")
+        self.assertEqual(release.strip(), "return true;")
+        self.assertIn("productBoardLink.setMaintenanceTarget(&migrationMaintenance)", self.motion)
+        loop = function_body(self.motion, "void loop()")
+        self.assertLess(loop.index("serviceBrainLink()"), loop.index("pollCommissioningConsole()"))
+        self.assertLess(loop.index("serviceBrainLink()"), loop.index("server.handleClient()"))
+        brain_loop = function_body(self.brain, "void loop()")
+        self.assertIn("if (!commissioningSession.active()) controllerLink.releaseMaintenance(nowMs)", brain_loop)
+        for source in (self.motion, self.brain):
+            self.assertNotIn("requestMaintenance(", function_body(source, "void setup()"))
 
     def test_v4_sole_usb_reader_preserves_ota_command(self):
         self.assertIn("#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\n"

@@ -109,6 +109,12 @@ Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`�
 
 验证入口：`python3 tools/test_motion_export_snapshot.py --sanitize`、`python3 tools/test_board_export_transfer.py --sanitize`和生产adapter/controller测试。前两者运行生产codec/导出及SHA/NVS边界替身；adapter短写测试另有内存导出fixture，不冒充全NVS实板。UART不是加密通道，接可信台架；只读捕获不证明后续未改变。
 
+### Brain UART安装前维护预约
+
+Discovery成功后，可选支持命令`PAIR HOLD <device_id>`在Brain本地维护内明确请求Motion预约；`PAIR HOLD`只读查看，`PAIR RELEASE`或Brain `MAINT END`经同一UART结束，不需要Motion USB。kind19绑定双方boot、Brain MAC、设备、nonce和递增ID。Motion复用当前静止/无工作条件，并与USB维护/OTA互斥；网页冲突写入/运动、网络改配和OTA启动暂拒绝，HTTP Stop/Stop all/queue cancel、合法原始Stop/Interrupt/disable和读取继续可用，CAN监督照常。UART产品动作和Stop仍未开放。
+
+Brain仅为显式预约每500ms续期，响应截止1秒，Motion预写入预约3秒到期自动释放；普通启动、配网、读取和冲奶不自动预约。release无需Ready/传感器/Cloud恢复，迟到或同nonce请求不重新打开已结束会话，失败不自动acquire。当前不写NVS或安装身份；后续安装写入必须先接部分写入恢复Guard，不能拿到期当回滚。核心`tools/test_board_maintenance.py --sanitize`和实际adapter/controller主机测试不替代UART/HTTP/Flash实机验收；自动安装仍待接入。这些命令只是支持入口，最终安装流程内部调用。
+
 ### Brain USB网络配置
 
 仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。

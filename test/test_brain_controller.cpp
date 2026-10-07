@@ -527,6 +527,10 @@ void consoleDiscoveryRoundTrip(DiscoveryPairState brainState, DiscoveryPairState
         assert(controller.discoveryResult().state == expectedState);
         assert(io.blob == storedBrain && io.opens == opens && io.mutations == 0);
         assert(console("PAIR RECORDS", false, controller, 33) == "[pair] records_idle\n");
+        assert(console("PAIR HOLD", false, controller, 33) == "[pair] hold_idle\n");
+        assert(console("PAIR HOLD bt-brain-controller-test", false, controller, 33) ==
+               "[pair] maintenance_required\n");
+        assert(console("PAIR RELEASE", false, controller, 33) == "[pair] hold_unavailable\n");
         assert(console("PAIR READ bt-brain-controller-test", false, controller, 33) ==
                "[pair] maintenance_required\n");
         if (unavailable) {
@@ -545,6 +549,21 @@ void consoleDiscoveryRoundTrip(DiscoveryPairState brainState, DiscoveryPairState
             discoveryOffline(controller, 1034);
         }
         assert(!controller.deviceId()[0] && !controller.sendIntent(display::DisplayIntent::StartFeeding, 1034));
+        if (unavailable) {
+            assert(console("PAIR HOLD bt-brain-controller-test", true, controller, 1040) ==
+                   "[pair] hold_unavailable\n");
+        } else {
+            io.randomWords = {5, 6, 7, 8};
+            assert(console("PAIR HOLD bt-brain-controller-test", true, controller, 1040) ==
+                   "[pair] hold_pending\n");
+            assert(console("PAIR HOLD", false, controller, 1040) == "[pair] hold_pending\n");
+            // Safe cancellation is permitted even after the local USB session
+            // ended, so no manual second-board END is needed.
+            assert(console("PAIR RELEASE", false, controller, 1041) == "[pair] hold_releasing\n");
+            for (unsigned i = 0; i < 32; ++i) controller.poll(1041);
+            controller.poll(2041);
+            assert(console("PAIR HOLD", false, controller, 2041) == "[pair] hold_timed_out\n");
+        }
         assert(io.blob == storedBrain && io.opens == opens && io.mutations == 0);
     });
     std::printf("PASS real PAIR console/ControllerLink UART brain=%u motion=%u -> %s; never paired/ready/action\n",

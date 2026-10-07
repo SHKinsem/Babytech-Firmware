@@ -27,6 +27,7 @@ bool ArduinoBoardLink::begin(v4::Role role, int rxPin, int txPin, uint32_t baud,
     link_.reset();
     parser_.reset();
     records_.reset();
+    maintenance_ = BoardMaintenance{};
     pairingVerified_ = false;
     deviceId_[0] = 0;
     discoveryEnabled_ = false;
@@ -79,6 +80,10 @@ bool ArduinoBoardLink::begin(v4::Role role, int rxPin, int txPin, uint32_t baud,
             pairingState_ = PairingLoad::IoError;
             return false;
         }
+        if (!maintenance_.begin(role, physical, boot, verifiedPairing())) {
+            pairingState_ = PairingLoad::IoError;
+            return false;
+        }
         discoveryEnabled_ = true;
     }
     // Both pinned SDKs construct HardwareSerial with TX ring size zero. Keep
@@ -105,9 +110,14 @@ void ArduinoBoardLink::poll(uint32_t nowMs, const Status* localStatus) {
             if (discoveryEnabled_) discovery_.receive(frame, nowMs);
         } else if (frame.kind == v4::Kind::MigrationRead) {
             if (discoveryEnabled_) records_.receive(frame, nowMs);
+        } else if (frame.kind == v4::Kind::MigrationMaintenance) {
+            if (discoveryEnabled_) maintenance_.receive(frame, nowMs);
         } else link_.receiveFrame(frame, nowMs);
     }
     if (discoveryEnabled_) {
+        maintenance_.poll(nowMs);
+        const auto* support = maintenance_.outgoing();
+        if (support && link_.queueSupportFrame(*support)) maintenance_.queued();
         discovery_.poll(nowMs);
         const auto* outgoing = discovery_.outgoing();
         if (outgoing && link_.queueSupportFrame(*outgoing)) discovery_.queued();
@@ -128,6 +138,18 @@ bool ArduinoBoardLink::requestRecords(const char* device, uint32_t nowMs) {
             challenge[word * 8 + nibble] = hex[(random >> (28 - 4 * nibble)) & 15];
     }
     return records_.request(device, discovery_.result(), challenge, nowMs);
+}
+
+bool ArduinoBoardLink::requestMaintenance(const char* device, uint32_t nowMs) {
+    if (!started_ || !discoveryEnabled_ || discovery_.result().state != DiscoveryState::Found) return false;
+    char nonce[33]{};
+    constexpr char hex[] = "0123456789abcdef";
+    for (size_t word = 0; word < 4; ++word) {
+        const uint32_t random = esp_random();
+        for (size_t nibble = 0; nibble < 8; ++nibble)
+            nonce[word * 8 + nibble] = hex[(random >> (28 - 4 * nibble)) & 15];
+    }
+    return maintenance_.request(device, discovery_.result(), nonce, nowMs);
 }
 
 } }

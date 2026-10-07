@@ -121,6 +121,7 @@ jobs:
           python tools/test_maintenance_export.py --sanitize
           python tools/test_motion_export_snapshot.py --sanitize
           python tools/test_board_export_transfer.py --sanitize
+          python tools/test_board_maintenance.py --sanitize
           python -m unittest discover -s tests -p test_capture_board_export.py
           python -m unittest discover -s tests -p test_maintenance_wiring.py
           python tools/test_board_link.py --sanitize

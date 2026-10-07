@@ -67,6 +67,16 @@ babytech::boardlink::ArduinoBoardLink productBoardLink;
 // Same read-only capture as USB diagnostics, independently owned by UART.
 babytech::boardlink::MaintenanceExport migrationExport;
 babytech::boardlink::MaintenanceUsbConsole commissioningSession;
+bool safeForCommissioning();
+class MotionMaintenanceTarget : public babytech::boardlink::BoardMaintenanceTarget {
+public:
+    bool safeToAcquire() const override {
+        return !commissioningSession.active() && safeForCommissioning();
+    }
+    // No importer writes in this stage. Releasing a RAM reservation is not a
+    // motion command and must not wait for sensors/Ready/network to recover.
+    bool safeToRelease() const override { return true; }
+} migrationMaintenance;
 #else
 HardwareSerial brain(1);
 #endif
@@ -88,7 +98,7 @@ bool demoBusy();
 bool recoveryMotionPending();
 bool commissioningActive() {
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
-    return commissioningSession.active();
+    return commissioningSession.active() || productBoardLink.maintenanceActive();
 #else
     return false;
 #endif
@@ -1786,10 +1796,13 @@ bool rejectDuringMaintenance() {
 }
 
 #if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN
-void pollCommissioningConsole() {
-    const bool localSafe = canStarted && !controlBusy() && !motor.operationBusy() &&
+bool safeForCommissioning() {
+    return canStarted && !controlBusy() && !motor.operationBusy() &&
         !wifiSetup.busy() && !ota.maintenanceActive() && !powderScale.tareInProgress() &&
         demo.stationary();
+}
+void pollCommissioningConsole() {
+    const bool localSafe = !productBoardLink.maintenanceActive() && safeForCommissioning();
     commissioningSession.poll(Serial, millis(), localSafe,
         [](const char* line, char* output, size_t capacity) { return ota.formatSerialLine(line, output, capacity); });
 }
@@ -1819,6 +1832,7 @@ void setup() {
         Serial.printf("[uart] v4 unavailable, pairing state=%u\n",
                       unsigned(productBoardLink.pairingState()));
     productBoardLink.setExportSource(&migrationExport);
+    productBoardLink.setMaintenanceTarget(&migrationMaintenance);
 #else
     brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
 #endif

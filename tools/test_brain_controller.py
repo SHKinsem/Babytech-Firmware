@@ -43,7 +43,7 @@ def main():
     sources = [root / "shared/BoardProtocol/src" / name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
     sources += [root / "shared/ProductBoardLink/src" / name for name in
-                ("BoardDiscovery.cpp", "BoardExportTransfer.cpp", "MotionExportSnapshot.cpp",
+                ("BoardDiscovery.cpp", "BoardMaintenance.cpp", "BoardExportTransfer.cpp", "MotionExportSnapshot.cpp",
                  "MotionStateRecord.cpp", "ProductContext.cpp", "ProductDigest.cpp",
                  "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
                  "BoardLinkArduino.cpp")]

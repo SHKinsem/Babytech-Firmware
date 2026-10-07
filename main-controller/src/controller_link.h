@@ -35,6 +35,13 @@ class ControllerLink {
   }
   babytech::boardlink::ExportTransferState recordsState() const { return boardLink_.recordsState(); }
   const babytech::boardlink::MotionExportSnapshot* recordsSnapshot() const { return boardLink_.recordsSnapshot(); }
+  bool requestMaintenance(const char* device, uint32_t nowMs) {
+    return ready_ && boardLink_.requestMaintenance(device, nowMs);
+  }
+  bool releaseMaintenance(uint32_t nowMs) {
+    return ready_ && boardLink_.releaseMaintenance(nowMs);
+  }
+  babytech::boardlink::BoardMaintenanceState maintenanceState() const { return boardLink_.maintenanceState(); }
   // Historical telemetry survives link expiry/restart; connected() reports
   // liveness separately. Only a newly accepted sample may replace its values.
   const babytech::boardlink::Status* lastTelemetry() const {

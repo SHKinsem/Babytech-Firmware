@@ -218,6 +218,8 @@ void goldenAndKinds() {
     static_assert(uint8_t(Kind::Discovery) == 17, "Discovery wire kind");
     static_assert(uint8_t(Kind::MigrationRead) == 18, "MigrationRead wire kind");
     assert(!isControl(Kind::MigrationRead));
+    static_assert(uint8_t(Kind::MigrationMaintenance) == 19, "MigrationMaintenance wire kind");
+    assert(!isControl(Kind::MigrationMaintenance));
     for (unsigned kind = 1; kind <= 17; ++kind) {
         Frame value = frame(static_cast<Kind>(kind));
         value.payload[0] = '{'; value.payload[1] = '}';
@@ -259,7 +261,7 @@ void goldenAndKinds() {
 
 void invalidHeadersAndCapacity() {
     Frame bad = frame(); bad.kind = static_cast<Kind>(0); rejectedFrame(bad);
-    bad = frame(); bad.kind = static_cast<Kind>(19); rejectedFrame(bad);
+    bad = frame(); bad.kind = static_cast<Kind>(20); rejectedFrame(bad);
     bad = frame(); bad.kind = static_cast<Kind>(255); rejectedFrame(bad);
     bad = frame(); bad.senderBoot = 0; rejectedFrame(bad);
     bad = frame(); bad.receiverBoot = 0; rejectedFrame(bad);

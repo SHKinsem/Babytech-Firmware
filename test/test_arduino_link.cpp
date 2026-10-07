@@ -1124,6 +1124,100 @@ void recordsOverActualAdapters() {
     fake::assertReadOnly();
     std::puts("PASS actual adapters pull records over one short-write UART, decode full capture, timeout locally; no pairing/motion/NVS writes");
 }
+
+class MaintenanceFixture : public BoardMaintenanceTarget {
+public:
+    bool safeToAcquire() const override { ++checks; return safe; }
+    bool safeToRelease() const override { return true; }
+    bool safe = false;
+    mutable unsigned checks = 0;
+};
+
+void maintenanceOverActualAdapters() {
+    const auto drain = [](ArduinoBoardLink& adapter, uint32_t now) {
+        for (unsigned i = 0; i < 100; ++i) adapter.poll(now);
+    };
+    setup(); storageState(PairingLoad::Missing);
+    ArduinoBoardLink brain;
+    assert(brain.begin(Role::Brain, 44, 43, 115200, true));
+    assert(brain.maintenanceState() == BoardMaintenanceState::Idle);
+    assert(!brain.requestMaintenance(pairing().deviceId, 0));
+    assert(brain.requestDiscovery(pairing().deviceId, 0));
+    drain(brain, 0);
+    Bytes query = io.tx;
+    fake::State brainIo = io;
+    setup(Role::Motion); storageState(PairingLoad::Missing);
+    io.randomWords = {0, uint32_t(kPeerBoot)};
+    ArduinoBoardLink motion;
+    MaintenanceFixture target;
+    assert(motion.begin(Role::Motion, 44, 43, 115200, true));
+    assert(motion.setMaintenanceTarget(&target));
+    io.maxWrite = 7;
+    io.rx.insert(io.rx.end(), query.begin(), query.end());
+    drain(motion, 10);
+    Bytes reply = io.tx;
+    fake::State motionIo = io;
+    onBoard(brainIo, [&] {
+        io.rx.insert(io.rx.end(), reply.begin(), reply.end());
+        drain(brain, 20);
+        assert(brain.discoveryResult().state == DiscoveryState::Found);
+        io.maxWrite = 3;
+    });
+    const auto request = [&](uint32_t now, uint32_t seed) {
+        onBoard(brainIo, [&] {
+            io.tx.clear(); io.randomWords = {seed, seed + 1, seed + 2, seed + 3};
+            assert(brain.requestMaintenance(pairing().deviceId, now));
+            drain(brain, now); query = io.tx;
+            assert(frames(query).size() == 1 && frames(query)[0].kind == Kind::MigrationMaintenance);
+        });
+    };
+    const auto exchange = [&](uint32_t now) {
+        onBoard(motionIo, [&] {
+            io.tx.clear(); io.rx.insert(io.rx.end(), query.begin(), query.end());
+            drain(motion, now); reply = io.tx;
+            assert(frames(reply).size() == 1 && frames(reply)[0].kind == Kind::MigrationMaintenance);
+        });
+        onBoard(brainIo, [&] {
+            io.rx.insert(io.rx.end(), reply.begin(), reply.end()); drain(brain, now + 1);
+        });
+    };
+    request(25, 1); exchange(30);
+    assert(!motion.maintenanceActive() && brain.maintenanceState() == BoardMaintenanceState::Unsafe);
+    target.safe = true;
+    request(35, 5); exchange(40);
+    assert(motion.maintenanceActive() && brain.maintenanceState() == BoardMaintenanceState::Active);
+    assert(!motion.setMaintenanceTarget(nullptr));
+    // Record reading is independent; holding maintenance grants no normal link
+    // identity, motion permission, network publication or persistent writes.
+    assert(!brain.verifiedPairing() && !brain.link().configured() && !motion.link().configured());
+    onBoard(brainIo, [&] {
+        io.tx.clear(); drain(brain, 541); query = io.tx;
+        assert(frames(query).size() == 1 && frames(query)[0].payload[0] == 2);
+    });
+    exchange(550);
+    // Release cannot depend on the admission condition still being healthy.
+    target.safe = false;
+    onBoard(brainIo, [&] {
+        io.tx.clear(); assert(brain.releaseMaintenance(560)); drain(brain, 560); query = io.tx;
+    });
+    exchange(570);
+    assert(!motion.maintenanceActive() && brain.maintenanceState() == BoardMaintenanceState::Released);
+    target.safe = true;
+    request(580, 9); exchange(590);
+    onBoard(brainIo, [&] {
+        io.tx.clear(); drain(brain, 1091);  // Lose renewal; never reacquire automatically.
+        drain(brain, 2091);
+        assert(brain.maintenanceState() == BoardMaintenanceState::TimedOut);
+    });
+    target.safe = false;
+    onBoard(motionIo, [&] {
+        motion.poll(3589); assert(motion.maintenanceActive());
+        motion.poll(3590); assert(!motion.maintenanceActive());
+        fake::assertReadOnly();
+    });
+    onBoard(brainIo, [&] { fake::assertReadOnly(); });
+    std::puts("PASS actual adapters acquire/renew/release and expire a pre-write lease over short-write UART; no new pairing/actions/NVS");
+}
 }  // namespace
 
 int main() {
@@ -1142,6 +1236,7 @@ int main() {
     discoveryReplyShortWrites();
     failedInitRetry();
     recordsOverActualAdapters();
+    maintenanceOverActualAdapters();
     fake::assertReadOnly();
     std::puts("PASS Arduino adapter host suite (real core + pair codec; I/O fakes only)");
 }

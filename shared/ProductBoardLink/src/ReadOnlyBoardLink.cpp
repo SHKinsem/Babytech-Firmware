@@ -113,7 +113,8 @@ void ReadOnlyLink::receive(uint8_t byte, uint32_t nowMs) {
 }
 
 void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
-    if (!healthy() || !validFrame(frame) || frame.kind == Kind::Discovery || frame.kind == Kind::MigrationRead) return;
+    if (!healthy() || !validFrame(frame) || frame.kind == Kind::Discovery ||
+        frame.kind == Kind::MigrationRead || frame.kind == Kind::MigrationMaintenance) return;
     session_.poll(nowMs);
     if (frame.kind == Kind::Heartbeat) {
         session_.heartbeat(frame, nowMs);
@@ -128,7 +129,8 @@ void ReadOnlyLink::receiveFrame(const Frame& frame, uint32_t nowMs) {
 }
 
 bool ReadOnlyLink::queueSupportFrame(const Frame& frame) {
-    if ((configured_ && !healthy()) || (frame.kind != Kind::Discovery && frame.kind != Kind::MigrationRead) ||
+    if ((configured_ && !healthy()) || (frame.kind != Kind::Discovery && frame.kind != Kind::MigrationRead &&
+                                      frame.kind != Kind::MigrationMaintenance) ||
         !validFrame(frame) || frame.offset || frame.total != frame.length) return false;
     scratch_.kind = frame.kind;
     scratch_.senderBoot = frame.senderBoot;

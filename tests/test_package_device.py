@@ -82,6 +82,7 @@ class SourceArchiveTest(unittest.TestCase):
             for name in ("test_protocol.py", "test_board_messages.py", "test_board_link.py",
                          "test_pairing_record.py", "test_board_arduino.py", "test_board_discovery.py",
                          "test_motion_export_snapshot.py", "test_board_export_transfer.py",
+                         "test_board_maintenance.py",
                          "test_cloud_contract.py", "test_cloud_session.py", "test_cloud_link.py",
                          "test_brain_network.py", "test_brain_station.py", "test_brain_controller.py",
                          "prepare_board_pairing.py", "test_pairing_store.py",
