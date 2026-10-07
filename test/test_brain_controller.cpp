@@ -673,6 +673,55 @@ void pairedConsoleDoesNotDegradeStatus() {
     assert(f.controller.connected(1101) && !f.controller.snapshot().startEnabled);
     std::puts("PASS paired ControllerLink STATUS/cache still updates during discovery and after timeout");
 }
+
+void pendingResultForwarding() {
+    Fixture f;
+    ResultQuery query;
+    query.sequence = 9;
+    std::strcpy(query.deviceId, pairing().deviceId);
+    std::strcpy(query.commandId, "original-request");
+    assert(!f.controller.requestResult(query, 0));
+    f.handshake(0);
+    // No STATUS has arrived: display connected() is false, but querying the
+    // established board session remains available without a Cloud prerequisite.
+    assert(!f.controller.connected(100) && !f.controller.lastTelemetry());
+    assert(f.controller.requestResult(query, 100));
+    assert(f.controller.resultLookupState() == ResultLookupState::Pending);
+    f.drain(100);
+    Parser parser;
+    Assembler assembler;
+    Frame frame;
+    Message message;
+    bool sent = false;
+    for (uint8_t byte : io.tx) {
+        if (parser.push(byte, 0, frame) && assembler.accept(frame, 0, message) == AssemblyResult::Complete &&
+            message.kind == Kind::ResultQuery) {
+            ResultQuery decoded;
+            assert(decodeResultQuery(message, decoded));
+            assert(sameResultQuery(decoded, query));
+            assert(message.senderBoot == kLocalBoot && message.receiverBoot == kPeerBoot);
+            sent = true;
+        }
+    }
+    assert(sent);
+    QueriedResult result;
+    result.query = query;
+    result.status = ResultQueryStatus::Known;
+    result.accepted = false;
+    std::strcpy(result.reason, "busy");
+    std::memset(result.requestDigestHex, 'a', 64);
+    assert(encodeQueriedResult(result, message));
+    message.senderBoot = kPeerBoot; message.receiverBoot = kLocalBoot; message.messageId = 12;
+    f.inject(message, 101);
+    assert(f.controller.resultLookupState() == ResultLookupState::Complete);
+    assert(!f.controller.resultQueryResponse().accepted);
+    assert(sameResultQuery(f.controller.resultQueryResponse().query, query));
+    f.controller.cancelResultQuery();
+    assert(f.controller.resultLookupState() == ResultLookupState::Idle);
+    assert(!f.controller.sendIntent(display::DisplayIntent::StartFeeding, 101));
+    assert(io.mutations == 0);
+    std::puts("PASS production ControllerLink/Arduino query forwarding without STATUS; no action or NVS mutation");
+}
 }  // namespace
 
 int main() {
@@ -694,5 +743,6 @@ int main() {
     }
     consoleTimeoutAndRetry();
     pairedConsoleDoesNotDegradeStatus();
+    pendingResultForwarding();
     std::puts("PASS production ControllerLink cache/receipt-time suite (SDK I/O fakes only)");
 }

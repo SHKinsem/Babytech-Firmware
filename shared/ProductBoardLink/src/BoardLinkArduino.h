@@ -26,6 +26,15 @@ public:
     bool requestDiscovery(const char* deviceId, uint32_t nowMs) {
         return started_ && discoveryEnabled_ && discovery_.request(deviceId, nowMs);
     }
+    bool setResultQueryHandler(ReadOnlyLink::ResultQueryHandler handler) {
+        return started_ && link_.setResultQueryHandler(handler);
+    }
+    bool requestResult(const ResultQuery& query, uint32_t nowMs) {
+        return started_ && link_.requestResult(query, nowMs);
+    }
+    ResultLookupState resultLookupState() const { return link_.resultLookupState(); }
+    const QueriedResult& resultQueryResponse() const { return link_.resultQueryResponse(); }
+    void cancelResultQuery() { link_.cancelResultQuery(); }
     const DiscoveryResult& discoveryResult() const { return discovery_.result(); }
     bool requestRecords(const char* deviceId, uint32_t nowMs);
     bool requestInstalledRecords(const char* deviceId, const v4::Pairing& expected, uint32_t nowMs);

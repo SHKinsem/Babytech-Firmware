@@ -168,6 +168,20 @@ class MaintenanceWiringTest(unittest.TestCase):
         loop = function_body(self.brain, "void loop()")
         self.assertNotIn("productState.load(", loop)
 
+    def test_pending_query_owner_reuses_stores_without_action_or_network_gate(self):
+        self.assertIn("controllerLink, productState);", self.brain)
+        loop = function_body(self.brain, "void loop()")
+        self.assertIn("pendingRecovery.poll(nowMs, commissioningSession.active())", loop)
+        self.assertLess(loop.index("controllerLink.poll(nowMs)"), loop.index("pendingRecovery.poll("))
+        self.assertLess(loop.index("pendingRecovery.poll("), loop.index("network.poll("))
+        setup = function_body(self.motion, "void setup()")
+        self.assertIn("productBoardLink.setResultQueryHandler(queryProductResult)", setup)
+        self.assertLess(setup.index("productRecovery.begin("), setup.index("setResultQueryHandler("))
+        handler = function_body(self.motion, "bool queryProductResult(")
+        self.assertIn("queryMotionResult(productState, query, result)", handler)
+        for forbidden in ("supervisedStop", "startLocal", "installInitial", "reserveLocal"):
+            self.assertNotIn(forbidden, handler)
+
     def test_v4_recovery_is_wired_to_boot_and_existing_stop_supervision(self):
         setup = function_body(self.motion, "void setup()")
         self.assertLess(setup.index("applyDemoJson("), setup.index("productRecovery.begin("))

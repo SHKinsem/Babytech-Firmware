@@ -10,6 +10,7 @@
 #include "brain_pairing_console.h"
 #include "brain_installer.h"
 #include "brain_install_console.h"
+#include "brain_pending_recovery.h"
 #include <esp_system.h>
 #endif
 
@@ -23,6 +24,8 @@ babytech::brain::BrainNetwork network;
 babytech::boardlink::MaintenanceUsbConsole commissioningSession;
 // This same store will serve the subsequent local-command runtime owner.
 babytech::boardlink::BrainStateStore productState;
+babytech::brain::BrainPendingRecovery<babytech::display::ControllerLink> pendingRecovery(
+  controllerLink, productState);
 bool locallyInstalling() { return commissioningSession.active() && !controllerLink.intentPending(); }
 uint32_t installNowMs() { return uint32_t(millis()); }
 bool newPairingEpoch(char (&epoch)[33]) {
@@ -79,8 +82,8 @@ void setup() {
   while (!maintenanceBoot) maintenanceBoot = (uint64_t(esp_random()) << 32) | esp_random();
   commissioningSession.begin(babytech::v4::Role::Brain, maintenanceBoot);
   if (const auto* pairing = controllerLink.verifiedPairing()) {
-    // Reuse the installer store; a recovered pending request is evidence for
-    // a later result query, never a command to replay during boot.
+    // Reuse the installer store; recovery queries original acceptance evidence,
+    // never replaying a command during boot.
     const auto loaded = productState.load(*pairing);
     Serial.printf("[Brain] Business state load=%u pending=%s; no boot replay\n",
                   unsigned(loaded), productState.ready()
@@ -98,6 +101,7 @@ void loop() {
 #if BABYTECH_BOARD_LINK_V4
   pollCommissioningConsole();
   installer.poll(nowMs);
+  pendingRecovery.poll(nowMs, commissioningSession.active());
   if (!commissioningSession.active()) controllerLink.releaseMaintenance(nowMs);
   network.poll(controllerLink.lastTelemetry(), controllerLink.connected(nowMs), nowMs,
                controllerLink.lastTelemetryReceivedAtMs());

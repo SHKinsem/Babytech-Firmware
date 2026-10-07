@@ -10,6 +10,11 @@ void ReadOnlyLink::reset() {
     parser_.reset(); assembler_.reset(); tx_.reset();
     session_ = Session{};
     peerStatus_ = Status{};
+    queriedResult_ = QueriedResult{};
+    resultHandler_ = nullptr;
+    lookupState_ = ResultLookupState::Idle;
+    lookupId_ = lookupAt_ = 0;
+    resultReplyPending_ = false;
     nextId_ = 1;
     lastHelloAt_ = lastHeartbeatAt_ = lastStatusAt_ = 0;
     awaitingStatusId_ = awaitingStatusAt_ = 0;
@@ -27,6 +32,42 @@ bool ReadOnlyLink::begin(const Pairing& pairing, uint64_t boot) {
     role_ = pairing.role;
     configured_ = session_.begin(pairing, boot);
     return configured_;
+}
+
+bool ReadOnlyLink::setResultQueryHandler(ResultQueryHandler handler) {
+    if (!configured_ || role_ != Role::Motion || resultReplyPending_) return false;
+    resultHandler_ = handler;
+    return true;
+}
+
+void ReadOnlyLink::cancelResultQuery() {
+    if (role_ != Role::Brain) return;
+    lookupState_ = ResultLookupState::Idle;
+    lookupId_ = 0;
+}
+
+void ReadOnlyLink::expireResultQuery(uint32_t nowMs) {
+    if (lookupState_ != ResultLookupState::Pending) return;
+    if (!healthy() || !session_.connected(nowMs)) lookupState_ = ResultLookupState::Unavailable;
+    else if (uint32_t(nowMs - lookupAt_) >= kMessageTimeoutMs)
+        lookupState_ = ResultLookupState::TimedOut;
+}
+
+bool ReadOnlyLink::requestResult(const ResultQuery& query, uint32_t nowMs) {
+    session_.poll(nowMs);
+    expireResultQuery(nowMs);
+    if (role_ != Role::Brain || !healthy() || !session_.connected(nowMs) ||
+        helloAckPending_ || probeRequired_ || lookupState_ == ResultLookupState::Pending ||
+        !validResultQuery(query) || std::strcmp(query.deviceId, session_.localHello().deviceId) ||
+        !encodeResultQuery(query, scratch_) || !queue(scratch_)) return false;
+    // A caller may requery resultQueryResponse().query, which aliases our state.
+    const ResultQuery acceptedQuery = query;
+    queriedResult_ = QueriedResult{};
+    queriedResult_.query = acceptedQuery;
+    lookupId_ = scratch_.messageId;
+    lookupAt_ = nowMs;
+    lookupState_ = ResultLookupState::Pending;
+    return true;
 }
 
 bool ReadOnlyLink::queue(Message& message, bool discovery, uint64_t helloReceiver) {
@@ -59,6 +100,11 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
         if (!decodeHello(message, hello)) return;
         const uint64_t previousBoot = session_.peerBoot();
         if (session_.hello(message, hello, nowMs) != HelloResult::Accepted) return;
+        if (previousBoot != session_.peerBoot()) {
+            if (lookupState_ == ResultLookupState::Pending)
+                lookupState_ = ResultLookupState::Unavailable;
+            resultReplyPending_ = false;
+        }
         if (message.kind == Kind::Hello) {
             helloAckPending_ = true;
             helloAckBoot_ = message.senderBoot;
@@ -79,7 +125,29 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
         return;
     }
     if (!session_.matches(message.senderBoot, message.receiverBoot)) return;
-    if (message.kind == Kind::Status && role_ == Role::Brain) {
+    expireResultQuery(nowMs);
+    if (message.kind == Kind::ResultQuery && role_ == Role::Motion) {
+        ResultQuery query;
+        if (!session_.connected(nowMs) || resultReplyPending_ || !resultHandler_ ||
+            !decodeResultQuery(message, query) ||
+            std::strcmp(query.deviceId, session_.localHello().deviceId) ||
+            !resultHandler_(query, queriedResult_) ||
+            !sameResultQuery(query, queriedResult_.query) ||
+            !encodeQueriedResult(queriedResult_, scratch_)) {
+            receipt(message.messageId, false);
+            return;
+        }
+        // Preserve one decoded reply until the sole ordinary transmitter is free.
+        resultReplyPending_ = true;
+    } else if (message.kind == Kind::Result && role_ == Role::Brain) {
+        QueriedResult result;
+        if (lookupState_ == ResultLookupState::Pending &&
+            decodeQueriedResult(message, result) &&
+            sameResultQuery(queriedResult_.query, result.query)) {
+            queriedResult_ = result;
+            lookupState_ = ResultLookupState::Complete;
+        }
+    } else if (message.kind == Kind::Status && role_ == Role::Brain) {
         Status status;
         const bool valid = decodeStatus(message, status);
         const uint32_t sampleStep = status.sampleUptimeMs - peerSample_;
@@ -99,6 +167,9 @@ void ReadOnlyLink::handle(const Message& message, uint32_t nowMs) {
             !document.is<JsonObject>() || document.size() != 1 ||
             document["message_id"].is<bool>() || !document["message_id"].is<uint32_t>()) return;
         if (document["message_id"].as<uint32_t>() == awaitingStatusId_) awaitingStatusId_ = 0;
+        if (message.kind == Kind::LinkReject && lookupState_ == ResultLookupState::Pending &&
+            document["message_id"].as<uint32_t>() == lookupId_)
+            lookupState_ = ResultLookupState::Unavailable;
     } else {
         // Commands, Stop, configuration and event receipts cannot mutate hardware here.
         receipt(message.messageId, false);
@@ -149,12 +220,14 @@ bool ReadOnlyLink::queueSupportFrame(const Frame& frame) {
 
 void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatus) {
     if (!configured_) { tx_.pump(sink); return; }
-    if (!healthy()) return;
+    if (!healthy()) { expireResultQuery(nowMs); return; }
     session_.poll(nowMs);
     assembler_.expire(nowMs);
+    expireResultQuery(nowMs);
     if (!session_.canExchange()) {
         peerStatus_ = Status{};
         awaitingStatusId_ = 0;
+        resultReplyPending_ = false;
     }
     if (helloAckPending_ && !tx_.ordinaryPending()) {
         Hello identity = session_.localHello();
@@ -183,6 +256,11 @@ void ReadOnlyLink::poll(uint32_t nowMs, ByteSink& sink, const Status* localStatu
     // A lost status ACK cannot hold the sole normal-message slot indefinitely.
     if (awaitingStatusId_ && uint32_t(nowMs - awaitingStatusAt_) >= kMessageTimeoutMs)
         awaitingStatusId_ = 0;
+    if (role_ == Role::Motion && resultReplyPending_ && session_.connected(nowMs) &&
+        !helloAckPending_ && !tx_.ordinaryPending()) {
+        if (encodeQueriedResult(queriedResult_, scratch_) && queue(scratch_))
+            resultReplyPending_ = false;
+    }
     if (role_ == Role::Motion && localStatus &&
         uint32_t(nowMs - localStatus->sampleUptimeMs) < kStatusIntervalMs &&
         session_.connected(nowMs) &&

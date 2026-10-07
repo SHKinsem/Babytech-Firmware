@@ -1,9 +1,12 @@
 #pragma once
 
 #include "ProductBoardMessages.h"
+#include "ProductResultQuery.h"
 #include "BoardTransmitV4.h"
 
 namespace babytech { namespace boardlink {
+
+enum class ResultLookupState { Idle, Pending, Complete, TimedOut, Unavailable };
 
 // Single-owner, non-reentrant link core. No action dispatch is present.
 // Keep this ~8 KiB object off the MCU task stack (static/member storage).
@@ -15,6 +18,13 @@ public:
     void receiveFrame(const v4::Frame& frame, uint32_t nowMs);
     bool queueSupportFrame(const v4::Frame& frame);
     bool queueInstallMessage(const v4::Message& message);
+    using ResultQueryHandler = bool (*)(const ResultQuery&, QueriedResult&);
+    bool setResultQueryHandler(ResultQueryHandler handler);
+    bool requestResult(const ResultQuery& query, uint32_t nowMs);
+    ResultLookupState resultLookupState() const { return lookupState_; }
+    const QueriedResult& resultQueryResponse() const { return queriedResult_; }
+    // Cancels only transient query tracking, never a durable request or action.
+    void cancelResultQuery();
     // Explicit installer borrows the sole receive assembler/scratch. The same
     // loop owns both paths; interleaved ordinary fragments remain backpressure.
     v4::Assembler& installAssembler() { return assembler_; }
@@ -33,12 +43,19 @@ private:
     bool queue(v4::Message& message, bool discovery = false, uint64_t helloReceiver = 0);
     void handle(const v4::Message& message, uint32_t nowMs);
     void receipt(uint32_t id, bool accepted);
+    void expireResultQuery(uint32_t nowMs);
     v4::Parser parser_{};
     v4::Assembler assembler_{};
     v4::Session session_{};
     v4::Transmitter tx_{};
     v4::Message scratch_{};
     Status peerStatus_{};
+    QueriedResult queriedResult_{};
+    ResultQueryHandler resultHandler_ = nullptr;
+    ResultLookupState lookupState_ = ResultLookupState::Idle;
+    uint32_t lookupId_ = 0;
+    uint32_t lookupAt_ = 0;
+    bool resultReplyPending_ = false;
     v4::Role role_ = v4::Role::Brain;
     uint32_t nextId_ = 1;
     uint32_t lastHelloAt_ = 0;

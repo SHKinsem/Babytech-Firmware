@@ -333,6 +333,180 @@ void sampleClockWraparound() {
     assert(f.brain.freshStatus(f.now));
     assert(f.brain.peerStatus().sampleUptimeMs < 4000);
 }
+
+unsigned queryCalls = 0;
+bool answerQuery(const ResultQuery& query, QueriedResult& result) {
+    ++queryCalls;
+    result = QueriedResult{};
+    result.query = query;
+    result.status = ResultQueryStatus::Known;
+    result.accepted = true;
+    std::strcpy(result.reason, "accepted");
+    std::memset(result.requestDigestHex, 'a', 64);
+    return true;
+}
+
+ResultQuery query(uint64_t sequence = 1) {
+    ResultQuery result;
+    result.sequence = sequence;
+    std::strcpy(result.deviceId, "bt-test-device");
+    std::strcpy(result.commandId, "original-request");
+    return result;
+}
+
+Message answer(const ResultQuery& query, uint64_t sender = 22, uint64_t receiver = 11) {
+    QueriedResult result;
+    answerQuery(query, result);
+    Message message;
+    assert(encodeQueriedResult(result, message));
+    message.senderBoot = sender; message.receiverBoot = receiver; message.messageId = 90000;
+    return message;
+}
+
+void resultQueryRuntime() {
+    Fixture f;
+    assert(!f.brain.setResultQueryHandler(answerQuery));
+    assert(f.motion.setResultQueryHandler(answerQuery));
+    assert(!f.brain.requestResult(query(), f.now));
+    f.run(3000);
+    // Heartbeats keep the session alive even without fresh display samples.
+    f.run(2000, false);
+    assert(!f.brain.freshStatus(f.now));
+    queryCalls = 0;
+    assert(f.brain.requestResult(query(), f.now));
+    assert(!f.brain.requestResult(query(2), f.now));
+    f.run(500, false);
+    assert(queryCalls == 1);
+    assert(f.brain.resultLookupState() == ResultLookupState::Complete);
+    assert(sameResultQuery(f.brain.resultQueryResponse().query, query()));
+    assert(f.brain.resultQueryResponse().accepted);
+    assert(!f.brain.peerStatus().snapshot.startEnabled);
+    assert(f.brain.requestResult(f.brain.resultQueryResponse().query, f.now));
+    assert(sameResultQuery(f.brain.resultQueryResponse().query, query()));
+    f.run(500, false);
+    assert(f.brain.resultLookupState() == ResultLookupState::Complete);
+    assert(queryCalls == 2);
+    f.brain.cancelResultQuery();
+    assert(f.brain.resultLookupState() == ResultLookupState::Idle);
+
+    ResultQuery foreign = query();
+    std::strcpy(foreign.deviceId, "bt-other");
+    assert(!f.brain.requestResult(foreign, f.now));
+    assert(!f.motion.requestResult(query(), f.now));
+    f.motion.setResultQueryHandler(nullptr);
+    assert(f.brain.requestResult(query(), f.now));
+    f.run(500, false);
+    assert(f.brain.resultLookupState() == ResultLookupState::Unavailable);
+}
+
+void resultQueryResponseMatching() {
+    Fixture f;
+    f.run(3000);
+    assert(f.brain.requestResult(query(), f.now));
+    for (const auto& message : {answer(query(2)), answer(query(), 33), answer(query(), 22, 99)}) {
+        deliver(message, f.brain, f.now);
+        assert(f.brain.resultLookupState() == ResultLookupState::Pending);
+    }
+    // A UART receipt is not the original request's business result.
+    Message receipt;
+    receipt.kind = Kind::LinkAck;
+    receipt.senderBoot = 22; receipt.receiverBoot = 11; receipt.messageId = 90001;
+    const char payload[] = "{\"message_id\":1}";
+    receipt.length = sizeof(payload) - 1;
+    std::memcpy(receipt.payload, payload, receipt.length);
+    deliver(receipt, f.brain, f.now);
+    assert(f.brain.resultLookupState() == ResultLookupState::Pending);
+    deliver(answer(query()), f.brain, f.now);
+    assert(f.brain.resultLookupState() == ResultLookupState::Complete);
+    // Unsolicited duplicate/wrong responses cannot replace resolved evidence.
+    deliver(answer(query(2)), f.brain, f.now);
+    assert(sameResultQuery(f.brain.resultQueryResponse().query, query()));
+}
+
+void resultQueryTimeoutAndRestart() {
+    for (bool wrap : {false, true}) {
+        Fixture f;
+        if (wrap) f.now = UINT32_MAX - 3500;
+        f.run(3000);
+        assert(f.brain.requestResult(query(), f.now));
+        f.run(1005, false, true, true);
+        assert(f.brain.resultLookupState() == ResultLookupState::TimedOut);
+        deliver(answer(query()), f.brain, f.now);
+        assert(f.brain.resultLookupState() == ResultLookupState::TimedOut);
+    }
+    Fixture f;
+    f.run(3000);
+    assert(f.brain.requestResult(query(), f.now));
+    assert(f.motion.begin(pairing(Role::Motion), 44));
+    f.run(3000, false);
+    assert(f.brain.resultLookupState() == ResultLookupState::Unavailable);
+    assert(f.brain.takeFailure() == LinkFailure::PeerRestarted);
+    f.motion.setResultQueryHandler(answerQuery);
+    assert(f.brain.requestResult(query(), f.now));
+    deliver(answer(query()), f.brain, f.now);
+    assert(f.brain.resultLookupState() == ResultLookupState::Pending);
+    f.run(500, false);
+    assert(f.brain.resultLookupState() == ResultLookupState::Complete);
+}
+
+void resultReplyBackpressure() {
+    Fixture f;
+    f.run(3000);
+    f.motion.setResultQueryHandler(answerQuery);
+    queryCalls = 0;
+    // Hold the ordinary transmitter with a fragmented STATUS. The result is
+    // retained once, not dropped or replaced by the next query.
+    f.status.sampleUptimeMs = f.now;
+    f.motion.poll(f.now, f.toBrain, &f.status);
+    Message request;
+    assert(encodeResultQuery(query(), request));
+    request.senderBoot = 11; request.receiverBoot = 22; request.messageId = 90002;
+    deliver(request, f.motion, f.now);
+    assert(queryCalls == 1);
+    assert(encodeResultQuery(query(2), request));
+    request.senderBoot = 11; request.receiverBoot = 22; request.messageId = 90003;
+    deliver(request, f.motion, f.now);
+    assert(queryCalls == 1);
+    f.toBrain.deliver(f.brain, f.now, false);
+    f.run(500);
+    Parser parser;
+    Assembler assembler;
+    Frame frame;
+    Message message;
+    unsigned responses = 0;
+    for (uint8_t byte : f.toBrain.history) {
+        if (parser.push(byte, 0, frame) && assembler.accept(frame, 0, message) == AssemblyResult::Complete &&
+            message.kind == Kind::Result) {
+            QueriedResult result;
+            assert(decodeQueriedResult(message, result));
+            assert(sameResultQuery(result.query, query()));
+            ++responses;
+        }
+    }
+    assert(responses == 1);
+}
+
+void resultQueryCancellationAndTransportFault() {
+    Fixture f;
+    f.run(3000);
+    assert(f.brain.requestResult(query(), f.now));
+    f.brain.cancelResultQuery();
+    deliver(answer(query()), f.brain, f.now);
+    assert(f.brain.resultLookupState() == ResultLookupState::Idle);
+    // Drain the cancelled read-only frame; cancellation never turns it into an action.
+    f.run(200);
+    assert(f.brain.requestResult(query(), f.now));
+    class BrokenSink : public ByteSink {
+    public:
+        bool idle() const override { return true; }
+        size_t available() const override { return 64; }
+        size_t write(const uint8_t*, size_t size) override { return size + 1; }
+    } broken;
+    f.brain.poll(f.now, broken);
+    assert(!f.brain.healthy());
+    f.brain.poll(f.now + 1, broken);
+    assert(f.brain.resultLookupState() == ResultLookupState::Unavailable);
+}
 } // namespace
 
 int main() {
@@ -346,5 +520,10 @@ int main() {
     sampleFreshnessExpiryBoundary();
     sampleOrderingAndReconnectWatermark();
     sampleClockWraparound();
-    std::puts("PASS v4 two-peer readonly link, stale status, reconnect and rejected actions");
+    resultQueryRuntime();
+    resultQueryResponseMatching();
+    resultQueryTimeoutAndRestart();
+    resultReplyBackpressure();
+    resultQueryCancellationAndTransportFault();
+    std::puts("PASS v4 two-peer readonly link, query runtime, matching, stale status, backpressure and restarts");
 }

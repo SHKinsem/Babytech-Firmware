@@ -133,11 +133,15 @@ Brain v4唯一loop已接`BrainInstaller`。本地维护期间，`PAIR INSTALL <d
 
 当前不能把该流程用于生产迁移；最终单USB工具、重启联调、App动作及结果桥接仍待完成。软件回归`tools/test_brain_installer.py --sanitize`与两套SDK构建不代替真实Flash/UART/机械/堆栈验收；实际烧录/整机断电/生产操作仍需另行授权。
 
-### 只读请求结果查询核心
+### 只读请求结果查询与重启恢复
 
 `ProductResultQuery`实现既有RESULT_QUERY/RESULT的严格JSON codec，按设备/source/seq/command ID读取同一个Motion Store已验证的RAM记录。最近ACK、在途执行槽或四结果队列能返回原接受/拒绝和独立执行结果；水位只区分过期/未知，不能假定接受。身份矛盾返回request_conflict，未加载/存储故障不伪装零水位历史；普通请求返回SHA-256摘要供后续Brain核对，Cloud Stop不借用普通请求摘要。
 
-此组件不load/写NVS、不重放或清除任何请求，不改机械/网络门禁。测试`python3 tools/test_product_result_query.py --sanitize`使用生产Motion Store和codec，SDK/SHA兼容及NVS边界替身；尚未接UART运行转发或Brain pending自动查询，不称重启恢复闭环已完成。
+查询组件本身不load/写NVS、不重放或清除请求。两板v4运行入口已在唯一UART owner上接入查询/回复：当前HELLO会话及双方boot必须匹配，Brain只接受当前查询的设备/source/seq/ID结果；超时、断链、传输失败或对板重启只结束瞬态查询，不假定原请求失败。Motion以原运行Store作只读回答，发送器忙时保留一条回复；查询不要求机械Ready、Cloud在线或新鲜屏幕STATUS，不影响独立调试。
+
+Brain主循环的`BrainPendingRecovery`用开机已读入的同一个Store自动查询原在途请求，不重占号、不发COMMAND。只有known结果同时匹配完整请求身份及原SHA-256摘要，才持久清除本地pending；原接受或拒绝均可解析接受在途，**不等于冲奶完成，也不清Motion终态队列**。unknown/过期/冲突/存储故障/摘要不符/超时保留pending，每秒只读重查；本地维护暂停查询，清槽存储失败保留故障证据，不反复写Flash。不增加安装或日常人工步骤。
+
+主机验证：`python3 tools/test_product_result_query.py --sanitize`验证lookup/codec；`python3 tools/test_board_link.py --sanitize`、`test_board_arduino.py`、`test_brain_controller.py`验证生产UART core/适配器/屏幕controller；`python3 tools/test_brain_pending_recovery.py --sanitize`验证生产Store在途恢复。SDK/NVS/UART边界替身不代表实板Flash断电、UART时序或完整产品验收；新动作派发、Stop/D1/D2、配置和终态桥接仍待完成。
 
 ### Brain USB网络配置
 

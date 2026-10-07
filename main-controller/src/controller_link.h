@@ -27,6 +27,13 @@ class ControllerLink {
   // Pairing was checked against the actual MAC during begin. A subsequent
   // UART failure must not hide it from the local read-only recovery owner.
   const babytech::v4::Pairing* verifiedPairing() const { return boardLink_.verifiedPairing(); }
+  bool requestResult(const babytech::boardlink::ResultQuery& query, uint32_t nowMs) {
+    // Result recovery needs the session, not fresh display telemetry or Cloud.
+    return ready_ && boardLink_.requestResult(query, nowMs);
+  }
+  babytech::boardlink::ResultLookupState resultLookupState() const { return boardLink_.resultLookupState(); }
+  const babytech::boardlink::QueriedResult& resultQueryResponse() const { return boardLink_.resultQueryResponse(); }
+  void cancelResultQuery() { boardLink_.cancelResultQuery(); }
   bool requestDiscovery(const char* deviceId, uint32_t nowMs) {
     return ready_ && boardLink_.requestDiscovery(deviceId, nowMs);
   }

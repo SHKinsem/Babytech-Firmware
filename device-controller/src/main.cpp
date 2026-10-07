@@ -528,6 +528,10 @@ uint32_t installNowMs() { return uint32_t(millis()); }
 babytech::boardlink::MotionInstallTarget migrationInstall(
     productState, productBoardLink.maintenance(), safeForRemoteInstall, installNowMs);
 motion::MotionStateRecovery productRecovery(productState, recoveryHardware);
+bool queryProductResult(const babytech::boardlink::ResultQuery& query,
+                        babytech::boardlink::QueriedResult& result) {
+    return babytech::boardlink::queryMotionResult(productState, query, result);
+}
 #endif
 #if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
 uint32_t localCommandSequence = 0;
@@ -1897,6 +1901,7 @@ void setup() {
         Serial.printf("[product] v4 state load=%u; recovered actions are never resumed\n",
                       unsigned(loaded));
     }
+    productBoardLink.setResultQueryHandler(queryProductResult);
     const auto legacyState = ProductEventOutbox::inspectLegacyState();
     if (legacyState != ProductEventOutbox::LegacyState::Empty) {
         product.setEventPending(true);

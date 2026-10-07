@@ -1291,6 +1291,62 @@ void maintenanceOverActualAdapters() {
     onBoard(brainIo, [&] { fake::assertReadOnly(); });
     std::puts("PASS actual adapters acquire/renew/release and expire a pre-write lease over short-write UART; no new pairing/actions/NVS");
 }
+unsigned resultHandlerCalls = 0;
+bool queryStoredResult(const ResultQuery& query, QueriedResult& result) {
+    ++resultHandlerCalls;
+    result = QueriedResult{};
+    result.query = query;
+    result.status = ResultQueryStatus::Known;
+    result.accepted = true;
+    std::strcpy(result.reason, "accepted");
+    std::memset(result.requestDigestHex, 'a', 64);
+    return true;
+}
+
+void resultOverActualAdapters() {
+    setup();
+    ArduinoBoardLink brain;
+    assert(brain.begin(Role::Brain, 44, 43));
+    io.maxWrite = 3;
+    fake::State brainIo = io;
+    setup(Role::Motion);
+    io.randomWords = {0, uint32_t(kPeerBoot)};
+    ArduinoBoardLink motion;
+    assert(motion.begin(Role::Motion, 44, 43));
+    assert(motion.setResultQueryHandler(queryStoredResult));
+    io.maxWrite = 5;
+    fake::State motionIo = io;
+    const auto exchange = [&](uint32_t now) {
+        onBoard(brainIo, [&] { brain.poll(now); });
+        motionIo.rx.insert(motionIo.rx.end(), brainIo.tx.begin(), brainIo.tx.end());
+        brainIo.tx.clear();
+        onBoard(motionIo, [&] { motion.poll(now); });
+        brainIo.rx.insert(brainIo.rx.end(), motionIo.tx.begin(), motionIo.tx.end());
+        motionIo.tx.clear();
+    };
+    for (uint32_t now = 0; now < 3000; ++now) exchange(now);
+    assert(brain.link().connected(3000) && motion.link().connected(3000));
+    assert(!brain.link().freshStatus(3000));
+    ResultQuery query;
+    query.sequence = 7;
+    std::strcpy(query.deviceId, pairing().deviceId);
+    std::strcpy(query.commandId, "stored-original");
+    resultHandlerCalls = 0;
+    onBoard(brainIo, [&] {
+        assert(brain.requestResult(query, 3000));
+        assert(brain.resultLookupState() == ResultLookupState::Pending);
+    });
+    for (uint32_t now = 3000; now < 3600; ++now) exchange(now);
+    assert(resultHandlerCalls == 1);
+    assert(brain.resultLookupState() == ResultLookupState::Complete);
+    assert(sameResultQuery(brain.resultQueryResponse().query, query));
+    assert(brain.resultQueryResponse().accepted);
+    onBoard(brainIo, [&] {
+        brain.cancelResultQuery();
+        assert(brain.resultLookupState() == ResultLookupState::Idle);
+    });
+    std::puts("PASS two actual adapters query original results over fragmented short-write UART without STATUS or NVS writes");
+}
 }  // namespace
 
 int main() {
@@ -1312,6 +1368,7 @@ int main() {
     maintenanceOverActualAdapters();
     installOverActualAdapters();
     installOverActualAdapters(true);
+    resultOverActualAdapters();
     fake::assertReadOnly();
     std::puts("PASS Arduino adapter host suite (real core + pair codec; I/O fakes only)");
 }

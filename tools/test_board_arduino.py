@@ -32,7 +32,7 @@ def main():
     sources += [root / "shared/ProductBoardLink/src" / name for name in
                 ("BoardDiscovery.cpp", "BoardMaintenance.cpp", "BoardInstall.cpp", "BoardExportTransfer.cpp", "MotionExportSnapshot.cpp",
                  "MotionStateRecord.cpp", "ProductContext.cpp", "ProductDigest.cpp",
-                 "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ReadOnlyBoardLink.cpp",
+                 "BoardPairingRecord.cpp", "BoardPairingStore.cpp", "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ReadOnlyBoardLink.cpp",
                  "BoardLinkArduino.cpp")]
     sources += [stubs / "FakeBoardIo.cpp", root / "test/test_arduino_link.cpp"]
     sources += [root / "tests/fakes/product_crypto/FakeProductCrypto.cpp"]
