@@ -8,6 +8,7 @@
 #include <ArduinoJson.h>
 #include <array>
 #include <cstdio>
+#include <iostream>
 #include <stdexcept>
 
 // Bind the production entry point to the USB SDK replacement, without copying
@@ -32,7 +33,7 @@ ProductContext initialContext() {
     value.waterMl = 180; value.temperatureC = 45; value.powderGPer100Ml = 25;
     check(validProductContext(value), "invalid fixture context"); return value;
 }
-void seed() {
+void seed(bool withContext = true) {
     nvs::reset(); fake_commissioning::reset();
     fake_commissioning::mac = {{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}};
     v4::Pairing pair;
@@ -43,7 +44,7 @@ void seed() {
     const size_t size = encodePairingRecord(pair, bytes.data(), bytes.size()); check(size, "pair encode failed");
     nvs::io.disk["productpair"]["record"] = {{bytes.begin(), bytes.begin() + size}, nvs::Type::Blob};
     BrainStateStore state; const auto context = initialContext();
-    check(state.installInitial(pair, &context) == BrainWrite::Stored, "fixture install failed");
+    check(state.installInitial(pair, withContext ? &context : nullptr) == BrainWrite::Stored, "fixture install failed");
     for (const auto& entry : {std::make_pair("ssid", "host-network"), std::make_pair("pass", "wifi-test-password")}) {
         const std::string value = entry.second;
         nvs::io.disk["wifi-cfg"][entry.first] = {{value.begin(), value.end()}, nvs::Type::String};
@@ -128,6 +129,103 @@ bool unsafeTxPrefix(const std::vector<uint8_t>& bytes) {
         if (!std::memcmp(bytes.data() + i, "BTM4", 4) && bytes[i + 4] == 4 &&
             (bytes[i + 5] == uint8_t(v4::Kind::Command) || bytes[i + 5] == uint8_t(v4::Kind::Stop))) return true;
     return false;
+}
+DynamicJsonDocument bridgeInput(const std::string& line) {
+    check(line.size() <= 65536, "bridge input exceeds test budget");
+    auto input = json(line);
+    check(input.is<JsonObject>(), "bridge step must be an object");
+    if (input.containsKey("quit")) check(input["quit"].is<bool>(), "invalid bridge quit flag");
+    if (input.containsKey("advance_ms"))
+        check(input["advance_ms"].is<uint32_t>() && input["advance_ms"].as<uint32_t>() <= 1000,
+              "bridge tick must be an unsigned integer within test budget");
+    if (input.containsKey("connected")) check(input["connected"].is<bool>(), "invalid bridge connection flag");
+    if (input.containsKey("usb")) check(input["usb"].is<const char*>(), "invalid bridge USB input");
+    if (input.containsKey("incoming")) check(input["incoming"].is<JsonArray>(), "bridge incoming must be an array");
+    for (auto packet : input["incoming"].as<JsonArray>()) {
+        check(packet.is<JsonObject>() && packet["topic"].is<const char*>() &&
+              packet["payload"].is<const char*>() && packet["retained"].is<bool>(),
+              "invalid bridge packet field types");
+        const auto topic = packet["topic"].as<std::string>();
+        check(topic == prefix + "command" || topic == prefix + "config", "unexpected bridge input topic");
+    }
+    return input;
+}
+void checkBridgeInputs() {
+    const auto packet = std::string("{\"topic\":\"") + prefix + "config\",\"payload\":\"{}\",\"retained\":false}";
+    auto valid = bridgeInput("{\"advance_ms\":1000,\"incoming\":[" + packet + "],\"connected\":true,\"usb\":\"SIM ON\"}");
+    check(valid["incoming"][0]["payload"] == "{}", "bridge altered valid payload bytes");
+    for (const auto& value : {"[]", "null", "{\"quit\":1}", "{\"advance_ms\":1.5}",
+              "{\"advance_ms\":true}", "{\"advance_ms\":-1}", "{\"advance_ms\":1001}",
+              "{\"incoming\":{}}", "{\"incoming\":[null]}", "{\"connected\":1}", "{\"usb\":42}",
+              "{\"incoming\":[{\"topic\":\"devices/bt-main-test/config\",\"payload\":42,\"retained\":false}]}",
+              "{\"incoming\":[{\"topic\":\"devices/bt-main-test/config\",\"payload\":\"{}\",\"retained\":1}]}"}) {
+        bool rejected = false;
+        try { bridgeInput(value); } catch (const std::exception&) { rejected = true; }
+        check(rejected, "bridge accepted malformed orchestration input");
+    }
+}
+void runBridge() {
+    // Pairing is a synthetic installation fixture; business context must arrive
+    // unmodified from the real Cloud broker path, not from a copied API record.
+    seed(false);
+    setup();
+    check(productState.ready() && fake::io.tasks.size() == 1, "bridge startup failed");
+    size_t usbCursor = 0;
+    fake::io.onDelay = [&](unsigned) {
+        const bool worker = fake::io.inWorker;
+        fake::io.inWorker = false;
+        check(!unsafeTxPrefix(fake_main::uartTx), "broker simulation emitted real UART motion/control");
+        check(!productState.state().pending && !productState.state().localSequence,
+              "broker simulation used durable local identity");
+        DynamicJsonDocument report(32768);
+        report["now_ms"] = millis(); report["connected"] = network.connected();
+        report["simulation"] = simulation && simulation->enabled();
+        report["running"] = simulation && simulation->running();
+        report["result_count"] = simulation ? simulation->resultCount() : 0;
+        report["profile_version"] = productState.state().context.profileVersion;
+        report["baby_id"] = productState.state().context.babyId;
+        report["context_cleared"] = productState.state().context.cleared;
+        report["pending"] = productState.state().pending;
+        report["local_sequence"] = productState.state().localSequence;
+        report["uart_motion_frames"] = 0;
+        auto subscriptions = report.createNestedArray("subscriptions");
+        for (const auto& topic : fake::io.subscriptions) subscriptions.add(topic);
+        report["usb_output"] = fake_main::usb.output.substr(usbCursor);
+        usbCursor = fake_main::usb.output.size();
+        auto packets = report.createNestedArray("published");
+        for (const auto& packet : fake::io.published) {
+            auto value = packets.createNestedObject();
+            value["topic"] = packet.topic; value["payload"] = packet.payload;
+            value["retained"] = packet.retained;
+        }
+        check(!report.overflowed(), "bridge output overflow");
+        std::cout << "BRAIN_BRIDGE=" << encode(report) << std::endl;
+        fake::io.published.clear();
+        fake::io.subscriptions.clear();
+        std::string line;
+        if (!std::getline(std::cin, line)) throw fake::StopWorker{};
+        auto input = bridgeInput(line);
+        if (input["quit"].as<bool>()) throw fake::StopWorker{};
+        const auto advance = input["advance_ms"] | uint32_t(0);
+        fake::io.now += advance;
+        if (input.containsKey("connected")) {
+            fake::io.connectOk = fake::io.loopOk = input["connected"].as<bool>();
+        }
+        if (input.containsKey("usb")) fake_main::input(input["usb"].as<const char*>());
+        for (auto packet : input["incoming"].as<JsonArray>()) {
+            const auto topic = packet["topic"].as<std::string>();
+            fake::io.incoming.push_back({topic, packet["payload"].as<std::string>(),
+                                         packet["retained"].as<bool>()});
+        }
+        loop();
+        fake::io.inWorker = worker;
+    };
+    fake::runWorker();
+    check(!nvs::count(nvs::Op::Erase) && !nvs::count(nvs::Op::Init) && nvs::io.handles.empty(),
+          "bridge unsafe NVS operation/leak");
+    for (const auto& call : WiFi.calls) check(call.worker, "bridge Wi-Fi escaped worker");
+    check(!fake::io.preferenceWriteCalls, "bridge changed credentials");
+    fake::cleanupLifetimeResources();
 }
 void run(const std::string& name) {
     v4::Frame control; control.kind = v4::Kind::Stop; control.senderBoot = 1; control.receiverBoot = 2;
@@ -254,6 +352,10 @@ void run(const std::string& name) {
 int main(int argc, char** argv) {
     try {
         check(argc == 2, "one isolated case required");
+        if (std::string(argv[1]) == "bridge-input-validation") {
+            checkBridgeInputs(); std::puts("PASS Brain bridge input validation"); return 0;
+        }
+        if (std::string(argv[1]) == "broker-bridge") { runBridge(); return 0; }
         run(argv[1]); std::printf("PASS Brain setup/loop %s\n", argv[1]); return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL Brain setup/loop: %s\n", error.what()); return 1;

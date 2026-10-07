@@ -14,14 +14,19 @@ import tempfile
 
 
 CASES = ("simulation-complete", "simulation-stop", "simulation-context",
-         "simulation-receipt", "simulation-offline", "simulation-offline-ack-lost", "panel-failure")
+         "simulation-receipt", "simulation-offline", "simulation-offline-ack-lost", "panel-failure",
+         "bridge-input-validation")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--case", action="append", choices=CASES)
+    parser.add_argument("--pipe", action="store_true",
+                        help="Expose host SDK MQTT I/O to an isolated broker driver over JSON lines")
     args = parser.parse_args()
+    if args.pipe and args.case:
+        parser.error("--pipe and --case are mutually exclusive")
     root = Path(__file__).resolve().parents[1]
     headers = root / "device-controller/.pio/libdeps/motion/ArduinoJson/src"
     if not (headers / "ArduinoJson.h").is_file():
@@ -73,6 +78,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="babytech-brain-main-") as directory:
         binary = Path(directory) / "brain_main"
         subprocess.run([*command, "-o", str(binary)], check=True, timeout=120)
+        if args.pipe:
+            subprocess.run([str(binary), "broker-bridge"], env=env, check=True, timeout=300)
+            return
         for case in args.case or CASES:
             subprocess.run([str(binary), case], env=env, check=True, timeout=30)
     print("PASS production Brain main: " + str(len(args.case or CASES)) + " cases")

@@ -239,6 +239,8 @@ SIM OFF
 
 测试：`tools/test_brain_simulation.py --sanitize`、`tools/test_brain_simulation_dispatcher.py --sanitize`及`tools/test_brain_network.py --sanitize`，父仓库另运行`Test/brain_event_contract_check.py --sanitize --brain-simulation`。`python3 tools/test_brain_main.py --sanitize`直接编译生产Brain `setup()/loop()`、ControllerLink/Arduino UART适配器、CloudLink worker和业务owner：七个隔离进程覆盖USB开启、完成/重复、期限点触屏Stop优先、同批墓碑/旧请求及冻结结果、SIM OFF后匹配回执、ACK前/后断网再补结果和屏幕初始化失败。主循环不复制，UI对象/USB/UART/NVS/Wi-Fi/MQTT为替身，worker让行时按确定性时钟执行loop；配网写入不在此fixture范围。测试stored消息是注入输入，不冒充Cloud事务证明；不运行Motion main、真实FreeRTOS/TCP/broker，也不证明触摸布局、电气、Flash或时限。真实终态UART桥接已有源码与限定验证，完整多owner/双板main+broker组合及整机迁移验收仍未完成。
 
+同一host runner的`--pipe`仅提供测试JSON行接口：运行实际主循环，导出原始MQTT发布字节并接收外部驱动的MQTT输入、模拟USB和时钟；不新增固件编译环境或设备串口命令。父仓库`Test/brain_main_broker_check.py`使用此接口将SDK传输替身接到本机隔离broker和真实Cloud API/SQLite，验证模拟任务的完整数据往返。它不是MCU PubSubClient TCP、Motion UART、电机、FreeRTOS或真实App验收；合成安装身份与测试绑定也不证明首次实机安装。
+
 ### Brain USB网络配置
 
 仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。
