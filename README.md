@@ -237,7 +237,7 @@ SIM OFF
 
 状态明确为`hardware_profile=simulation`、`motion_connected=false`，水温、水量、余粉及物理有效性仍未知/false。Cloud和新App仅对这一完整v4 Brain模式采用显式commands_enabled/can_start决定启动，不放宽真实固件。MQTT模拟终态包含`execution_mode=brain_simulation`并保存原宝宝、配方和uptime；不修改UART kind12/13或SQLite schema。仅用于隔离测试家庭/数据库，模拟记录不是实际喂养。结果在RAM中，断网时继续计时、重连补传并等待真实stored回执；Brain复位会丢失计时/结果，Cloud的completed_at仍为首次接收时间，不承诺离线真实UTC完成时间。
 
-测试：`tools/test_brain_simulation.py --sanitize`、`tools/test_brain_simulation_dispatcher.py --sanitize`及`tools/test_brain_network.py --sanitize`，父仓库另运行`Test/brain_event_contract_check.py --sanitize --brain-simulation`。生产组件加SDK/网络I/O替身验证软件契约，不等于实板USB、真实broker、App操作或机械验收。真实终态UART桥接已接源码与限定验证，整机迁移验收仍未完成。
+测试：`tools/test_brain_simulation.py --sanitize`、`tools/test_brain_simulation_dispatcher.py --sanitize`及`tools/test_brain_network.py --sanitize`，父仓库另运行`Test/brain_event_contract_check.py --sanitize --brain-simulation`。`python3 tools/test_brain_main.py --sanitize`直接编译生产Brain `setup()/loop()`、ControllerLink/Arduino UART适配器、CloudLink worker和业务owner：七个隔离进程覆盖USB开启、完成/重复、期限点触屏Stop优先、同批墓碑/旧请求及冻结结果、SIM OFF后匹配回执、ACK前/后断网再补结果和屏幕初始化失败。主循环不复制，UI对象/USB/UART/NVS/Wi-Fi/MQTT为替身，worker让行时按确定性时钟执行loop；配网写入不在此fixture范围。测试stored消息是注入输入，不冒充Cloud事务证明；不运行Motion main、真实FreeRTOS/TCP/broker，也不证明触摸布局、电气、Flash或时限。真实终态UART桥接已有源码与限定验证，完整多owner/双板main+broker组合及整机迁移验收仍未完成。
 
 ### Brain USB网络配置
 

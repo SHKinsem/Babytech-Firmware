@@ -76,7 +76,21 @@ class SourceArchiveTest(unittest.TestCase):
                          "CloudSession.h", "CloudSession.cpp"):
                 self.assertTrue((shared / "src" / name).is_file())
             for name in ("tests/test_cloud_identity.cpp", "tests/test_product_event_outbox.cpp",
-                         "tests/fakes/outbox/Arduino.h", "test/test_cloud_session.cpp"):
+                         "tests/fakes/outbox/Arduino.h", "test/test_cloud_session.cpp",
+                         "tests/test_brain_main.cpp",
+                         "tests/fakes/brain_main/Arduino.h", "tests/fakes/brain_main/FakeMainIo.h",
+                         "tests/fakes/brain_main/FakeMainIo.cpp", "tests/fakes/brain_main/nvs.h",
+                         "tests/fakes/brain_main/babytech_display_view.h",
+                         "tests/fakes/brain_main/babytech_st7796_panel.h",
+                         "shared/ProductBoardLink/test/arduino_stubs/Arduino.h",
+                         "shared/ProductBoardLink/test/arduino_stubs/FakeBoardIo.h",
+                         "shared/ProductBoardLink/test/arduino_stubs/FakeBoardIo.cpp",
+                         "shared/ProductBoardLink/test/arduino_stubs/driver/uart.h",
+                         "shared/ProductBoardLink/test/arduino_stubs/esp_err.h",
+                         "shared/ProductBoardLink/test/arduino_stubs/esp_mac.h",
+                         "shared/ProductBoardLink/test/arduino_stubs/esp_system.h",
+                         "shared/ProductBoardLink/test/arduino_stubs/nvs.h",
+                         "shared/ProductBoardLink/test/arduino_stubs/nvs_flash.h"):
                 self.assertTrue((extracted / name).is_file())
             self.assertTrue((extracted / "tools/test_display_view.py").is_file())
             for name in ("test_protocol.py", "test_board_messages.py", "test_board_commands.py", "test_board_link.py",
@@ -87,6 +101,7 @@ class SourceArchiveTest(unittest.TestCase):
                          "test_brain_context_sync.py", "test_brain_local_dispatcher.py", "test_result_delivery.py",
                          "test_cloud_contract.py", "test_cloud_session.py", "test_cloud_link.py",
                          "test_brain_network.py", "test_brain_station.py", "test_brain_controller.py",
+                         "test_brain_main.py",
                          "prepare_board_pairing.py", "test_pairing_store.py",
                          "test_product_context.py", "test_product_context_messages.py", "test_product_event_messages.py", "test_brain_simulation.py", "test_brain_simulation_dispatcher.py", "test_legacy_context_store.py",
                          "test_product_state.py", "test_brain_state_store.py",

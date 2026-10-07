@@ -147,6 +147,7 @@ jobs:
           python tools/test_brain_network.py --sanitize
           python tools/test_brain_station.py --sanitize
           python tools/test_brain_network_console.py --sanitize
+          python tools/test_brain_main.py --sanitize
           python -m unittest discover -s tests -p test_configure_brain_network.py
           python -m unittest discover -s tests -p test_install_brain.py
           python -m unittest discover -s tests -p test_package_ota.py
