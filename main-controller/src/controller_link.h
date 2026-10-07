@@ -24,6 +24,9 @@ class ControllerLink {
   const DisplaySnapshot& snapshot() const { return snapshot_; }
 #if BABYTECH_BOARD_LINK_V4
   const char* deviceId() const { return ready_ ? boardLink_.deviceId() : nullptr; }
+  // Pairing was checked against the actual MAC during begin. A subsequent
+  // UART failure must not hide it from the local read-only recovery owner.
+  const babytech::v4::Pairing* verifiedPairing() const { return boardLink_.verifiedPairing(); }
   bool requestDiscovery(const char* deviceId, uint32_t nowMs) {
     return ready_ && boardLink_.requestDiscovery(deviceId, nowMs);
   }

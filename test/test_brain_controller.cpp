@@ -375,6 +375,41 @@ Bytes record(const Pairing& value) {
     return result;
 }
 
+void verifiedLocalPairing() {
+    for (bool uartUnavailable : {false, true}) {
+        fake::reset();
+        io.blob = record(pairing());
+        io.serialReady = !uartUnavailable;
+        display::ControllerLink controller;
+        assert(controller.verifiedPairing() == nullptr);
+        assert(controller.begin() == !uartUnavailable);
+        const auto* verified = controller.verifiedPairing();
+        assert(verified && verified->role == Role::Brain);
+        assert(!std::strcmp(verified->deviceId, pairing().deviceId));
+        assert(!std::strcmp(verified->epoch, pairing().epoch));
+        assert(!std::strcmp(verified->localPhysicalId, pairing().localPhysicalId));
+        assert(!std::strcmp(verified->peerPhysicalId, pairing().peerPhysicalId));
+        assert(!controller.connected(0) && !controller.hasSnapshot());
+        assert(!controller.sendIntent(display::DisplayIntent::StartFeeding, 0));
+        if (uartUnavailable) assert(controller.deviceId() == nullptr);
+        fake::assertReadOnly();
+    }
+    for (unsigned fault = 0; fault < 4; ++fault) {
+        fake::reset();
+        io.blob = record(pairing());
+        if (fault == 0) io.openError = ESP_ERR_NVS_NOT_FOUND;
+        if (fault == 1) io.blob[0] ^= 1;
+        if (fault == 2) io.mac[5] ^= 1;
+        if (fault == 3) io.macError = ESP_FAIL;
+        display::ControllerLink controller;
+        controller.begin();
+        assert(controller.verifiedPairing() == nullptr);
+        assert(!controller.connected(0) && !controller.hasSnapshot());
+        fake::assertReadOnly();
+    }
+    std::puts("PASS verified local pairing survives UART failure, never substitutes missing/corrupt/foreign identity or permits action");
+}
+
 template<class Action>
 void onBoard(fake::State& state, Action action) {
     fake::assertReadOnly();
@@ -649,6 +684,7 @@ int main() {
     longOfflineFaultAcrossRollover();
     receiptTimeAndRollover();
     failedBegin();
+    verifiedLocalPairing();
     consoleDiscoveryRoundTrip(DiscoveryPairState::Missing, DiscoveryPairState::Missing);
     consoleDiscoveryRoundTrip(DiscoveryPairState::Missing, DiscoveryPairState::Ready);
     for (DiscoveryPairState fault : {DiscoveryPairState::Corrupt, DiscoveryPairState::IoError,

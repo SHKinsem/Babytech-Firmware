@@ -154,6 +154,20 @@ class MaintenanceWiringTest(unittest.TestCase):
         guard = function_body(self.motion, "bool safeForRemoteInstall() {")
         self.assertIn("!commissioningSession.active() && safeForCommissioning()", guard)
 
+    def test_brain_boot_loads_existing_store_without_network_or_replay_gate(self):
+        setup = function_body(self.brain, "void setup()")
+        self.assertIn("if (const auto* pairing = controllerLink.verifiedPairing())", setup)
+        self.assertEqual(setup.count("productState.load(*pairing)"), 1)
+        self.assertLess(setup.index("controllerLink.begin()"), setup.index("productState.load(*pairing)"))
+        self.assertLess(setup.index("productState.load(*pairing)"), setup.index("network.begin("))
+        # Loading business state must not globally gate network diagnostics.
+        self.assertIn("\n  if (!network.begin(controllerLink.deviceId()))", setup)
+        for forbidden in ("installInitial(", "saveContext(", "reserveLocal(", "clearPending(",
+                          "sendIntent(", "requestInstallation(", "ESP.restart("):
+            self.assertNotIn(forbidden, setup)
+        loop = function_body(self.brain, "void loop()")
+        self.assertNotIn("productState.load(", loop)
+
     def test_v4_recovery_is_wired_to_boot_and_existing_stop_supervision(self):
         setup = function_body(self.motion, "void setup()")
         self.assertLess(setup.index("applyDemoJson("), setup.index("productRecovery.begin("))

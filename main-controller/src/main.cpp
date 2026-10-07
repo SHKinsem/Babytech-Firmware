@@ -78,6 +78,14 @@ void setup() {
   uint64_t maintenanceBoot = 0;
   while (!maintenanceBoot) maintenanceBoot = (uint64_t(esp_random()) << 32) | esp_random();
   commissioningSession.begin(babytech::v4::Role::Brain, maintenanceBoot);
+  if (const auto* pairing = controllerLink.verifiedPairing()) {
+    // Reuse the installer store; a recovered pending request is evidence for
+    // a later result query, never a command to replay during boot.
+    const auto loaded = productState.load(*pairing);
+    Serial.printf("[Brain] Business state load=%u pending=%s; no boot replay\n",
+                  unsigned(loaded), productState.ready()
+                      ? (productState.state().pending ? "yes" : "no") : "unknown");
+  }
   if (!network.begin(controllerLink.deviceId())) {
     Serial.println("[Brain] Network unavailable; check pairing and resources");
   }

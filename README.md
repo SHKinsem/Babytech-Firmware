@@ -24,7 +24,7 @@ Brain v4 已接本地USB Wi-Fi/MQTT配置，见下方“Brain USB网络配置”
 
 `ReadOnlyLink` 为单 owner、非重入对象，约 8 KiB，不能放在 MCU loop 局部栈中；共享完整消息 scratch，短回执用紧凑帧。35 字段 STATUS 的 GCC8.4/14.2 静态接收调用链（receive/handle/decodeStatus）约 4 KiB，尚未包含外层适配器和 JSON 库调用余量；接入设备后仍须检查实际任务栈高水位，不能让网络回调并发操作链路。
 
-当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1 只读入口：Brain 使用 `BABYTECH_BOARD_LINK_V4=1`，Motion 使用 `MOTION_UART_PEER=4`。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC；缺失或损坏不能进入正常握手、联网或产品操作，但可选v4入口允许仅打开UART诊断发现。不自动认领陌生对端。受控配对写入和旧配置导入尚未完成，不能靠烧录这两个镜像直接完成迁移。
+当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1 只读入口：Brain 使用 `BABYTECH_BOARD_LINK_V4=1`，Motion 使用 `MOTION_UART_PEER=4`。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC；缺失或损坏不能进入正常握手、联网或产品操作，但可选v4入口允许仅打开UART诊断发现。不自动认领陌生对端。受控配对写入和旧配置导入已接单Brain持久安装，安装后的运行切换及产品动作/结果闭环仍未完成，不能靠烧录这两个镜像直接完成迁移。
 
 只读 v4 不启动 Motion 产品 MQTT，也不开放屏幕 Initialize/Start；Motion 独立 Wi-Fi、HTTP 调试网页及本地 OTA 保留。旧 `formulaevt/payload` 仅用只读方式检查，有记录或读取异常时保留原数据、标记待处理并监督停机，不调用会改写旧 journal 的 Outbox 初始化。新记录的开机读取/恢复已接入，接受新动作和两板补传仍未接入；只读状态不授予运动权限。默认 v3 行为不变。
 
@@ -81,7 +81,7 @@ python3 tools/prepare_board_pairing.py check --input /tmp/new-pairing.json
 
 Brain 持久状态组件已增加 `BrainStateRecord`/`BrainStateStore`：完整缓存、清除版本、本地发行序号和单个在途请求保存在同一 `brainstate/record`。显式受控安装后才可使用；普通加载不创建、不擦除记录。存储返回 `Stored` 仅代表提交/重新打开/读回核验成功，不是 Motion 已接受。已保存的在途请求重启后只能查询，不自动重新发送；清除请求槽保留序号，新宝宝配置不重写旧请求快照。读取/写入不确定时锁存故障，重复 `load()` 不能把同一运行实例倒退到旧 NVS。
 
-请求/上下文 SHA-256 使用 SDK mbedTLS，对固定字段编码计算，不依赖 JSON 字段顺序，也不是消息认证。Brain记录编码上界1491 bytes、当前最大合法本地记录1421 bytes，包含CRC和配对身份。该组件尚未接普通启动/触控/MQTT入口，Motion持久状态及双板受控迁移仍待接入，不可据此开放动作或自行写Flash。测试：`python3 tools/test_product_state.py --sanitize`、`python3 tools/test_brain_state_store.py --sanitize`；主机 SHA 使用 macOS CommonCrypto 或 Linux/WSL OpenSSL（`libssl-dev`），只替换SDK调用边界，不自写哈希实现。
+请求/上下文 SHA-256 使用 SDK mbedTLS，对固定字段编码计算，不依赖 JSON 字段顺序，也不是消息认证。Brain记录编码上界1491 bytes、当前最大合法本地记录1421 bytes，包含CRC和配对身份。实际Brain v4 setup现通过已核对本机MAC/角色的配对，只读加载与安装器共用的Store一次，保留完整配置/墓碑、本地序号和pending；UART初始化随后失败仍可读取本地证据，不要求Cloud在线。Missing/损坏/身份不符不创建或擦除记录，pending未知时不报成无请求，不因业务加载失败额外关闭网络诊断。普通loop不反复load，不发送/清除恢复的请求；触控/MQTT持久派发、结果查询和安装后的运行切换仍未接通，不可据此开放动作。测试：`python3 tools/test_product_state.py --sanitize`、`python3 tools/test_brain_state_store.py --sanitize`、`python3 tools/test_brain_controller.py --sanitize`；主机 SHA 使用 macOS CommonCrypto 或 Linux/WSL OpenSSL（`libssl-dev`），只替换SDK调用边界，不自写哈希实现。
 
 Motion新增 `MotionStateRecord`/`MotionStateStore`，在单个 `productstate/record` 中保存配置屏障、cloud/local各自消费水位及最近结果、一个执行意图或待确认喂养终态。新拒绝同样消费序号；重复结果不授权再次运动，新配置与新拒绝不改旧执行快照。喂养终态须验证Cloud stored回执和新鲜静止证据才清除，水位保留。initialize/clean记录独立执行结果，不生成喂养事件；重启加载不是继续动作的许可。Cloud Stop先走立即安全停机，静止后再保存序号屏障；存储失败不能阻止Stop。
 
