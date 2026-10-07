@@ -141,9 +141,11 @@ bool terminalEventFromSlot(const v4::Pairing& pairing, const MotionExecutionSlot
     return true;
 }
 
-bool encodeTerminalEvent(const v4::Pairing& pairing, const TerminalEvent& event, v4::Message& output) {
+static bool encodeEvent(const v4::Pairing& pairing, const TerminalEvent& event,
+                        v4::Message& output, bool simulation) {
     if (!validEvent(pairing, event)) return false;
-    DynamicJsonDocument doc(kDocumentSize);
+    if (simulation && pairing.role != v4::Role::Brain) return false;
+    DynamicJsonDocument doc(kDocumentSize + JSON_OBJECT_SIZE(1));
     if (!doc.capacity()) return false;
     const auto& request = event.request;
     char seq[20]{}, powder[32]{}, target[32]{};
@@ -165,9 +167,18 @@ bool encodeTerminalEvent(const v4::Pairing& pairing, const TerminalEvent& event,
     doc["water_delivery_basis"] = "estimated_turns";
     doc["dispensed_water_ml"] = nullptr;
     doc["uptime_ms"] = event.uptimeMs;
+    if (simulation) doc["execution_mode"] = "brain_simulation";
     if (event.reason[0]) doc["reason"] = event.reason;
     if (event.errorCode[0]) doc["error_code"] = event.errorCode;
     return serialize(doc, v4::Kind::Terminal, output);
+}
+
+bool encodeTerminalEvent(const v4::Pairing& pairing, const TerminalEvent& event, v4::Message& output) {
+    return encodeEvent(pairing, event, output, false);
+}
+
+bool encodeBrainSimulationEvent(const v4::Pairing& pairing, const TerminalEvent& event, v4::Message& output) {
+    return encodeEvent(pairing, event, output, true);
 }
 
 bool decodeTerminalEvent(const v4::Message& message, const v4::Pairing& pairing, TerminalEvent& output) {

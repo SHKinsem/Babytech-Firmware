@@ -30,8 +30,10 @@ public:
     bool busy() const { return active_ || stopQuerying_; }
     bool resultPending() const { return replyPending_; }
     bool ordinaryBusy() const { return active_; }
+    bool stopInFlight() const { return stopPending_; }
     void setPrepareReadyHandler(bool (*ready)()) { prepareReady_ = ready; }
     void setConfigurationYieldHandler(void (*yield)(uint32_t)) { configurationYield_ = yield; }
+    void setAcceptanceHandler(void (*handler)(const boardlink::ProductRequest&, uint32_t)) { acceptance_ = handler; }
     // A new explicit local operation has the same priority as a Cloud command;
     // informational Stop lookup never owns the mechanics or blocks new work.
     bool yieldToLocal(uint32_t nowMs) {
@@ -347,6 +349,7 @@ private:
         return status->activeExecutionId[32] == 0;
     }
     void complete(bool accepted, const char* reason) {
+        if (accepted && acceptance_) acceptance_(current_.request, clock_());
         result_.source = current_.request.source;
         result_.sequence = current_.request.sequence;
         std::strcpy(result_.commandId, current_.request.commandId);
@@ -369,6 +372,7 @@ private:
     Admission admission_;
     bool (*prepareReady_)() = nullptr;
     void (*configurationYield_)(uint32_t) = nullptr;
+    void (*acceptance_)(const boardlink::ProductRequest&, uint32_t) = nullptr;
     boardlink::CloudCommand current_{};
     boardlink::CommandResult result_{};
     boardlink::ResultQuery query_{};

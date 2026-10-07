@@ -27,6 +27,8 @@ def main():
     mode.add_argument("--case", help="Run one named C++ test group")
     mode.add_argument("--emit-fixture", action="store_true",
                       help="Stdout only: four production-encoded, decoded terminal JSON fixtures")
+    mode.add_argument("--emit-simulation-fixture", action="store_true",
+                      help="Stdout only: Brain MQTT terminal fixtures; rejected by UART decoder")
     mode.add_argument("--receipt-fixture", type=Path, metavar="FILE",
                       help="Decode Cloud actual receipt JSONL for expected device bt-receipt")
     args = parser.parse_args()
@@ -61,10 +63,13 @@ def main():
         environment["UBSAN_OPTIONS"] = environment.get("UBSAN_OPTIONS", "") + ":halt_on_error=1:print_stacktrace=1"
     failed = False
     fixture_output = None
-    log = sys.stderr if args.emit_fixture else sys.stdout
+    emitting = args.emit_fixture or args.emit_simulation_fixture
+    log = sys.stderr if emitting else sys.stdout
     binary_args = [args.case] if args.case else []
     if args.emit_fixture:
         binary_args = ["--emit-fixture"]
+    elif args.emit_simulation_fixture:
+        binary_args = ["--emit-simulation-fixture"]
     elif args.receipt_fixture:
         binary_args = ["--receipt-fixture", str(args.receipt_fixture.resolve())]
     with tempfile.TemporaryDirectory(prefix="babytech-product-event-messages-") as directory:
@@ -87,18 +92,18 @@ def main():
             if sys.platform == "linux":
                 command += ["-lcrypto"]
             subprocess.run([*command, "-o", str(binary)], check=True, timeout=120,
-                           stdout=sys.stderr if args.emit_fixture else None)
+                           stdout=sys.stderr if emitting else None)
             print("ProductEventMessages / mbedTLS " + major, file=log, flush=True)
             result = subprocess.run([str(binary), *binary_args], env=environment,
-                                    stdout=subprocess.PIPE if args.emit_fixture else None,
+                                    stdout=subprocess.PIPE if emitting else None,
                                     check=False, timeout=60)
             failed = failed or result.returncode != 0
-            if args.emit_fixture and result.returncode == 0:
+            if emitting and result.returncode == 0:
                 if fixture_output is not None and fixture_output != result.stdout:
                     print("Fixture bytes differ between mbedTLS API variants", file=sys.stderr)
                     failed = True
                 fixture_output = result.stdout
-    if args.emit_fixture and not failed and fixture_output is not None:
+    if emitting and not failed and fixture_output is not None:
         sys.stdout.buffer.write(fixture_output)
     return int(failed)
 

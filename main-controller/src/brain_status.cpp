@@ -112,4 +112,28 @@ void writeStatus(JsonObject out, const char* deviceId, const char* firmwareVersi
     out["mqtt_tls_enabled"] = false;
 }
 
+void writeSimulationStatus(JsonObject out, const char* deviceId, const char* firmwareVersion,
+                           const cloud::SessionSnapshot& session, const SimulationStatus& simulation,
+                           const char* challenge) {
+    writeStatus(out, deviceId, firmwareVersion, nullptr, false, session, challenge);
+    out["hardware_profile"] = "simulation";
+    out["motion_connected"] = false;
+    out["commands_enabled"] = simulation.commandsEnabled;
+    out["can_start"] = simulation.canStart && simulation.commandsEnabled && !simulation.running;
+    out["is_preparing"] = simulation.running;
+    out["progress"] = simulation.running ? "mixing" : simulation.complete ? "complete" :
+        (simulation.canStart && simulation.commandsEnabled ? "ready" : "noready");
+    out["bottle_clamp_status"] = "unknown";
+    out["actuator_issue"] = "brain_simulation";
+    out["thermal_simulated"] = true;
+    const auto* context = simulation.context;
+    out["feeding_context_configured"] = context && !context->cleared;
+    out["feeding_context_baby_id"] = context && !context->cleared ? context->babyId : "";
+    out["feeding_context_baby_name"] = context && !context->cleared ? context->babyName : "";
+    out["feeding_context_profile_version"] = context ? context->profileVersion : 0;
+    if (simulation.request) out["target_temp"] = simulation.request->temperatureC;
+    else if (context && !context->cleared) out["target_temp"] = context->temperatureC;
+    // All physical measurements and actuator validity remain absent/false.
+}
+
 } }

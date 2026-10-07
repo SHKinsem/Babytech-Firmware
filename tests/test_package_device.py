@@ -88,7 +88,7 @@ class SourceArchiveTest(unittest.TestCase):
                          "test_cloud_contract.py", "test_cloud_session.py", "test_cloud_link.py",
                          "test_brain_network.py", "test_brain_station.py", "test_brain_controller.py",
                          "prepare_board_pairing.py", "test_pairing_store.py",
-                         "test_product_context.py", "test_product_context_messages.py", "test_product_event_messages.py", "test_brain_simulation.py", "test_legacy_context_store.py",
+                         "test_product_context.py", "test_product_context_messages.py", "test_product_event_messages.py", "test_brain_simulation.py", "test_brain_simulation_dispatcher.py", "test_legacy_context_store.py",
                          "test_product_state.py", "test_brain_state_store.py",
                          "test_motion_state_record.py", "test_motion_state_store.py", "test_product_result_query.py", "test_product_command_result.py", "test_motion_product_runtime.py", "test_motion_result_queue.py", "test_board_commissioning.py",
                          "test_maintenance_console.py", "test_maintenance_export.py", "capture_board_export.py",
@@ -103,6 +103,8 @@ class SourceArchiveTest(unittest.TestCase):
             self.assertTrue((extracted / "main-controller/src/brain_simulation.h").is_file())
             self.assertTrue((extracted / "main-controller/src/brain_simulation_console.h").is_file())
             self.assertTrue((extracted / "tests/test_brain_simulation.cpp").is_file())
+            self.assertTrue((extracted / "main-controller/src/brain_simulation_dispatcher.h").is_file())
+            self.assertTrue((extracted / "tests/test_brain_simulation_dispatcher.cpp").is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/test/test_context_messages.cpp").is_file())
             self.assertTrue((extracted / "main-controller/src/brain_cloud_dispatcher.h").is_file())
             self.assertTrue((extracted / "main-controller/src/brain_context_sync.h").is_file())

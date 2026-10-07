@@ -21,6 +21,7 @@ public:
     bool busy() const { return active_; }
     const char* reason() const { return reason_; }
     void setPrepareReadyHandler(bool (*ready)()) { prepareReady_ = ready; }
+    void setAcceptanceHandler(void (*handler)(const boardlink::ProductRequest&, uint32_t)) { acceptance_ = handler; }
 
     bool canStart(uint32_t nowMs, bool blocked = false) const {
         if (!available(nowMs, blocked) || (prepareReady_ && !prepareReady_())) return false;
@@ -94,7 +95,7 @@ public:
         return true;
     }
 
-    void poll(uint32_t) {
+    void poll(uint32_t nowMs) {
         if (!active_) return;
         const auto sent = link_.commandSendState();
         if (sent == boardlink::CommandSendState::Pending) return;
@@ -108,6 +109,7 @@ public:
                 result.source == request.source && result.sequence == request.sequence &&
                 !std::strcmp(result.commandId, request.commandId)) {
                 std::strcpy(resultReason_, result.reason);
+                if (result.accepted && acceptance_) acceptance_(request, nowMs);
                 reason_ = resultReason_;
                 // Both accepted and rejected are definitive acceptance results,
                 // not feeding completion or permission to clear Motion events.
@@ -136,6 +138,7 @@ private:
     boardlink::BrainStateStore& store_;
     Clock clock_;
     bool (*prepareReady_)() = nullptr;
+    void (*acceptance_)(const boardlink::ProductRequest&, uint32_t) = nullptr;
     uint64_t sentSequence_ = 0;
     char sentCommandId_[129]{};
     char resultReason_[65]{};

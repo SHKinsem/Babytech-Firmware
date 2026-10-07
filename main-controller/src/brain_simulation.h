@@ -16,6 +16,7 @@ enum class SimulationStart { Accepted, Duplicate, Disabled, Busy, Full, Invalid,
 // verified identity and Cloud delivery. RAM results do not survive a reset.
 class BrainSimulation {
 public:
+    using Admission = bool (*)(void*);
     static constexpr uint32_t kDefaultDurationMs = 15000;
     static constexpr size_t kResultCapacity = 4;
 
@@ -45,7 +46,8 @@ public:
         return index < resultCount_ ? &results_[index] : nullptr;
     }
 
-    SimulationStart start(const boardlink::ProductRequest& request, uint32_t nowMs) {
+    SimulationStart start(const boardlink::ProductRequest& request, uint32_t nowMs,
+                          Admission stillCurrent = nullptr, void* admissionOwner = nullptr) {
         if (!enabled_) return SimulationStart::Disabled;
         if (!validSetup() || !boardlink::validProductRequest(request) ||
             std::strcmp(request.deviceId, pairing_.deviceId)) return SimulationStart::Invalid;
@@ -83,11 +85,12 @@ public:
         std::unique_ptr<v4::Message> scratch(new (std::nothrow) v4::Message);
         if (!scratch) return remember(SimulationStart::Unavailable);
         next.completed = true;
-        if (!boardlink::encodeTerminalEvent(pairing_, next, *scratch)) return remember(SimulationStart::Unavailable);
+        if (!boardlink::encodeBrainSimulationEvent(pairing_, next, *scratch)) return remember(SimulationStart::Unavailable);
         next.completed = false;
         std::strcpy(next.reason, "stopped");
         std::strcpy(next.errorCode, "E_STOPPED");
-        if (!boardlink::encodeTerminalEvent(pairing_, next, *scratch)) return remember(SimulationStart::Unavailable);
+        if (!boardlink::encodeBrainSimulationEvent(pairing_, next, *scratch)) return remember(SimulationStart::Unavailable);
+        if (stillCurrent && !stillCurrent(admissionOwner)) return remember(SimulationStart::Expired);
         next.reason[0] = next.errorCode[0] = 0;
         current_ = next;
         startedAtMs_ = nowMs;

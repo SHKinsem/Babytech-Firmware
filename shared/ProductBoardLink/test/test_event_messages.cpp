@@ -785,7 +785,7 @@ void malformed() {
     });
 }
 
-int emitFixtures() {
+int emitFixtures(bool simulation = false) {
     try {
         auto p = pairing();
         set(p.deviceId, "bt-receipt");
@@ -798,7 +798,12 @@ int emitFixtures() {
                 set(t.request.babyId, "baby-original");
                 if (source == v4::Source::CloudCommand)
                     set(t.request.commandId, "v4-event-codec-cloud-" + std::to_string(seq));
-                const auto encoded = roundtrip(p, t);
+                auto encoded = roundtrip(p, t);
+                if (simulation) {
+                    CHECK(encodeBrainSimulationEvent(p, t, encoded));
+                    TerminalEvent rejected;
+                    CHECK(!decodeTerminalEvent(encoded, p, rejected));
+                }
                 fixtures.emplace_back(std::string(source == v4::Source::CloudCommand ? "cloud_" : "local_") +
                     (completed ? "completed" : "failed"), json(encoded));
             }
@@ -844,6 +849,7 @@ int receiptFixtures(const char* path) {
 
 int main(int argc, char** argv) {
     if (argc == 2 && !std::strcmp(argv[1], "--emit-fixture")) return emitFixtures();
+    if (argc == 2 && !std::strcmp(argv[1], "--emit-simulation-fixture")) return emitFixtures(true);
     if (argc == 3 && !std::strcmp(argv[1], "--receipt-fixture")) return receiptFixtures(argv[2]);
     const std::vector<std::pair<const char*, std::function<void()>>> groups = {
         {"valid", validEvents}, {"boundaries", boundaries}, {"floats", randomFloats},

@@ -20,6 +20,10 @@ using State = babytech::brain::BrainPendingRecoveryState;
 
 namespace {
 unsigned scenarios = 0;
+std::function<void(const ProductRequest&, uint32_t)> acceptanceHook;
+void observeAcceptance(const ProductRequest& request, uint32_t at) {
+    assert(acceptanceHook); acceptanceHook(request, at);
+}
 
 // Deliberately has no motion, Cloud, Status, reserve or boot-loading API.
 // Deadlines and session invalidation belong to the real Link, not recovery.
@@ -114,6 +118,7 @@ fake::Database protectedData(bool motion = false) {
 void scenario(const std::string& name, const std::function<void()>& run, bool motion = false) {
     fake::reset();
     fake_product_crypto::reset();
+    acceptanceHook = {};
     for (const char* space : {"productpair", "productstate", "productctx", "outbox",
                               "wifi-cfg", "actuatorcfg", "sensorcfg", "brainstate"})
         io.disk[space]["unrelated"] = {{0, 0xff, 0x7f}, fake::Type::Blob};
@@ -127,6 +132,7 @@ void scenario(const std::string& name, const std::function<void()>& run, bool mo
         assert(call.name == "brainstate" || (motion && call.name == "productstate"));
         if (!call.key.empty()) assert(call.key == "record");
     }
+    acceptanceHook = {};
 }
 BrainState persistAndReboot(ProductCommand command = ProductCommand::Prepare,
                             unsigned updatedContext = 0, bool early = false) {
@@ -311,6 +317,73 @@ void restore() {
         io.calls.clear();
         link.complete(known(link, expected));
         resolved(recovery, link, store, changed);
+    });
+}
+
+void acceptanceCallbacks() {
+    for (auto command : {ProductCommand::Prepare, ProductCommand::Initialize, ProductCommand::Clean,
+                         ProductCommand::SetTargetTemp, ProductCommand::ResetError, ProductCommand::CheckFirmwareUpdate})
+        for (bool accepted : {false, true})
+            scenario("recovered callback frozen request before clear / " + std::to_string(unsigned(command)) +
+                     (accepted ? " accepted" : " rejected"), [=] {
+                const auto expected = persistAndReboot(command, 2);
+                BrainStateStore store; load(store, expected);
+                FakeLink link; Recovery recovery(link, store); start(recovery, link, expected, 100);
+                const auto disk = io.disk; const auto callsBefore = io.calls.size();
+                unsigned calls = 0;
+                recovery.setAcceptanceHandler(observeAcceptance);
+                acceptanceHook = [&](const ProductRequest& request, uint32_t at) {
+                    ++calls; assert(sameProductRequest(request, expected.pendingRequest) && at == 123);
+                    assert(store.state().pending && sameBrainState(store.state(), expected));
+                    assert(io.disk == disk && io.calls.size() == callsBefore); noWrites();
+                };
+                link.complete(known(link, expected, accepted));
+                recovery.poll(123);
+                assert(calls == unsigned(accepted) && recovery.state() == State::Resolved && !store.state().pending);
+                recovery.poll(124); recovery.poll(1000); assert(calls == unsigned(accepted));
+            });
+    for (unsigned fault = 0; fault < 9; ++fault)
+        scenario("recovered callback excludes wrong/uncertain proof / " + std::to_string(fault), [=] {
+            const auto expected = persistAndReboot();
+            BrainStateStore store; load(store, expected);
+            FakeLink link; Recovery recovery(link, store); start(recovery, link, expected, 100);
+            const auto disk = io.disk;
+            unsigned calls = 0;
+            recovery.setAcceptanceHandler(observeAcceptance);
+            acceptanceHook = [&](const ProductRequest& request, uint32_t at) {
+                ++calls; assert(sameProductRequest(request, expected.pendingRequest) && at == 1124);
+                assert(store.state().pending && io.disk == disk); noWrites();
+            };
+            auto reply = known(link, expected);
+            if (fault == 0) reply.query.source = v4::Source::CloudCommand;
+            if (fault == 1) ++reply.query.sequence;
+            if (fault == 2) std::strcpy(reply.query.deviceId, "other-device");
+            if (fault == 3) std::strcpy(reply.query.commandId, "other-command");
+            if (fault == 4) reply.requestDigestHex[0] = reply.requestDigestHex[0] == '0' ? '1' : '0';
+            if (fault >= 5) {
+                reply.status = ResultQueryStatus(fault - 4);
+                reply.requestDigestHex[0] = 0;
+                const char* reasons[] = {"unknown", "result_expired", "request_conflict", "storage_fault"};
+                std::strcpy(reply.reason, reasons[fault - 5]);
+            }
+            link.complete(reply, fault < 5); recovery.poll(123);
+            assert(!calls && recovery.state() == State::Waiting); assertPending(store, expected, disk);
+            recovery.poll(1123); link.complete(known(link, expected)); recovery.poll(1124);
+            assert(calls == 1 && !store.state().pending); recovery.poll(1125); assert(calls == 1);
+        });
+    scenario("recovered acceptance callback survives pending-clear storage failure", [] {
+        const auto expected = persistAndReboot();
+        BrainStateStore store; load(store, expected);
+        FakeLink link; Recovery recovery(link, store); start(recovery, link, expected, 100);
+        unsigned calls = 0;
+        recovery.setAcceptanceHandler(observeAcceptance);
+        acceptanceHook = [&](const ProductRequest& request, uint32_t at) {
+            ++calls; assert(sameProductRequest(request, expected.pendingRequest) && at == 123);
+            assert(store.state().pending); noWrites();
+        };
+        fake::fail(Op::Set, 1);
+        link.complete(known(link, expected)); recovery.poll(123); recovery.poll(124);
+        assert(calls == 1 && store.state().pending && recovery.clearFault());
     });
 }
 
@@ -742,7 +815,7 @@ int main(int argc, char** argv) {
     const struct { const char* name; void (*run)(); } groups[] = {
         {"basics", basics}, {"restore", restore}, {"mismatches", mismatches},
         {"retries", retries}, {"maintenance", maintenance}, {"failures", failures},
-        {"production", production}};
+        {"production", production}, {"acceptance", acceptanceCallbacks}};
     bool found = selected == "all";
     for (const auto& group : groups) if (selected == "all" || selected == group.name) {
         found = true;

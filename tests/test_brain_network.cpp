@@ -3,6 +3,8 @@
 #include "brain_network.h"
 #include "brain_status.h"
 #include "brain_network_console.h"
+#include "brain_simulation_dispatcher.h"
+#include "brain_simulation_console.h"
 #include "FakeBrainNvs.h"
 #include "FakeCloudIo.h"
 #include "WiFi.h"
@@ -1602,6 +1604,195 @@ Status readyMotion() {
     value.executionAuthorized = value.feedingContextConfigured = true;
     return value;
 }
+
+void simulationPath(const std::string& mode) {
+    using Owner = babytech::brain::BrainSimulationDispatcher<BrainNetwork>;
+    using namespace babytech::boardlink;
+    BrainNetwork network;
+    begin(network);
+    babytech::v4::Pairing pairing;
+    pairing.role = babytech::v4::Role::Brain;
+    std::strcpy(pairing.deviceId, kId);
+    std::strcpy(pairing.epoch, "0123456789abcdef0123456789abcdef");
+    std::strcpy(pairing.localPhysicalId, "aabbccddeeff");
+    std::strcpy(pairing.peerPhysicalId, "112233445566");
+    Owner owner(pairing, network, millis, 15000);
+    ProductContext context;
+    std::strcpy(context.deviceId, kId);
+    std::strcpy(context.babyId, "baby-test");
+    std::strcpy(context.babyName, "Frozen baby");
+    std::strcpy(context.formulaBrand, "Test formula");
+    context.profileVersion = 7;
+    context.waterMl = 180;
+    context.temperatureC = 45;
+    context.powderGPer100Ml = 25.5f;
+    owner.setContext(&context, true, true);
+    struct Route {
+        Owner& owner;
+        size_t realCalls = 0;
+        static void command(void* ptr, const CloudCommand& value, uint32_t generation, uint32_t now) {
+            auto& self = *static_cast<Route*>(ptr);
+            if (self.owner.enabled()) self.owner.command(value, generation, now);
+            else ++self.realCalls;
+        }
+        static void stopCommand(void* ptr, const CloudStop& value, uint32_t generation, uint32_t now) {
+            auto& self = *static_cast<Route*>(ptr);
+            if (self.owner.enabled()) self.owner.stop(value, generation, now);
+            else ++self.realCalls;
+        }
+        static void receipt(void* ptr, const CloudReceipt& value) {
+            static_cast<Route*>(ptr)->owner.receipt(value);
+        }
+        static void contextReceived(void* ptr, const ProductContext&, uint32_t, uint32_t) {
+            // The main callback refreshes cache usability immediately: pending
+            // persistence cannot authorize a later command in the same batch.
+            static_cast<Route*>(ptr)->owner.setContext(nullptr, false, true);
+        }
+    } route{owner};
+    network.setProductHandlers(Route::command, Route::stopCommand, &route);
+    network.setReceiptHandler(Route::receipt, &route);
+    network.setContextHandler(Route::contextReceived, &route);
+    char output[96]{};
+    check(babytech::brain::BrainSimulationConsole::handle("SIM ON", owner, false, output, sizeof(output)),
+          "actual owner did not handle USB simulation command");
+    check(owner.enabled() && std::string(output) == "[simulation] on\n", "USB mode did not enable owner");
+    std::string session, original;
+    unsigned phase = 0, waits = 0;
+    const auto ui = [&] {
+        const bool worker = fake::io.inWorker;
+        fake::io.inWorker = false;
+        network.poll(nullptr, false, millis(), 0, false, false, owner.enabled() ? &owner.status() : nullptr);
+        owner.poll(millis());
+        fake::io.inWorker = worker;
+    };
+    const auto findTopic = [&](const char* suffix) {
+        std::vector<size_t> found;
+        for (size_t i = 0; i < fake::io.published.size(); ++i)
+            if (fake::io.published[i].topic == kPrefix + suffix) found.push_back(i);
+        return found;
+    };
+    fake::io.onDelay = [&](unsigned) {
+        check(++waits < 40, "simulation network scenario did not converge");
+        if (phase == 0) { ui(); phase = 1; return; }
+        if (phase == 1) {
+            const auto statuses = findTopic("status");
+            if (statuses.empty()) { ui(); return; }
+            DynamicJsonDocument doc(8192);
+            check(!deserializeJson(doc, fake::io.published[statuses.back()].payload), "simulation status malformed");
+            check(doc["hardware_profile"] == "simulation" && doc["motion_connected"] == false &&
+                  doc["commands_enabled"] == true && doc["can_start"] == true && doc["progress"] == "ready",
+                  "detached-Motion simulation did not advertise explicit ready");
+            check(doc["water_temp"].isNull() && doc["low_water"].isNull() && doc["powder_remained"].isNull() &&
+                  doc["actuator_operational"] == false, "simulation forged physical measurements/readiness");
+            session = doc["command_session"].as<std::string>();
+            original = cloudCommand("prepare", session, millis());
+            if (mode == "context-batch") {
+                auto newer = context;
+                newer.profileVersion++;
+                receive("command", original);
+                receive("config", contextJson(newer));
+                ui();
+                check(!owner.running() && owner.resultCount() == 0 && route.realCalls == 0,
+                      "pending context allowed old-context Prepare in the same batch");
+                phase = 6;
+                return;
+            }
+            receive("command", original);
+            ui();
+            check(owner.running(), "actual Cloud ingress did not start Brain simulation");
+            receive("command", original);
+            ui();
+            check(owner.running() && owner.resultCount() == 0 && route.realCalls == 0,
+                  "duplicate simulation restarted/completed or fell through to real route");
+            fake::io.now += 15000;
+            phase = 2;
+            return;
+        }
+        if (phase == 2) {
+            if (mode == "stop") receive("command", cloudCommand("stop", session, millis(), "43", "stop-test"));
+            if (mode == "offline") {
+                fake::io.clients.front()->dropConnection();
+                fake::io.connectOk = false;
+            }
+            ui();
+            check(!owner.running() && owner.resultCount() == 1, "timer/Stop did not freeze one result");
+            phase = mode == "offline" ? 3 : 4;
+            return;
+        }
+        if (phase == 3) {
+            check(!network.connected() && owner.resultCount() == 1, "offline completion deleted result");
+            fake::io.connectOk = true;
+            fake::io.now += 5000;
+            ui();
+            phase = 4;
+            return;
+        }
+        if (phase == 4) {
+            const auto events = findTopic("event");
+            if (events.empty()) { fake::io.now += 250; ui(); return; }
+            const std::string frozen = fake::io.published[events.front()].payload;
+            DynamicJsonDocument doc(4096);
+            check(!deserializeJson(doc, frozen), "production simulation event not JSON");
+            check(doc["execution_mode"] == "brain_simulation" && doc["command_id"] == "cloud-test" &&
+                  doc["command_seq"] == "42" && doc["baby_id"] == "baby-test" &&
+                  doc["feeding_context_profile_version"] == 7 && doc["water_ml"] == 180 &&
+                  doc["temp"] == 45 && doc["target_powder_g"].as<float>() == 45.9f,
+                  "MQTT terminal changed original request identity/recipe");
+            check(doc["dispensed_water_ml"].isNull(), "simulation invented dispensed water");
+            check(doc["event"] == (mode == "stop" ? "feeding_failed" : "feeding_completed"),
+                  "explicit Stop was recorded as success");
+            if (mode == "stop") check(doc["reason"] == "stopped", "Stop reason missing");
+            for (size_t index : events) check(fake::io.published[index].payload == frozen, "retry mutated frozen event");
+            check(owner.resultCount() == 1 && route.realCalls == 0, "publish queue acted as stored proof/real dispatch");
+            CloudReceipt receipt;
+            std::strcpy(receipt.deviceId, kId);
+            std::strcpy(receipt.eventId, doc["event_id"].as<const char*>());
+            babytech::v4::Message message;
+            check(encodeCloudReceipt(receipt, message), "receipt fixture encoding failed");
+            const std::string stored(reinterpret_cast<const char*>(message.payload), message.length);
+            receive("config/nested", stored);
+            receive("command", stored);
+            ui();
+            check(owner.resultCount() == 1, "wrong topic cleared simulated result");
+            if (mode == "switch") {
+                // Both pre-toggle queued and post-toggle old-session bytes
+                // must never be delivered to the real hardware route.
+                receive("command", original);
+                check(owner.setEnabled(false, false) == babytech::brain::SimulationModeResult::Changed,
+                      "idle mode switch blocked by an unuploaded RAM result");
+                check(!network.connected() && owner.resultCount() == 1, "mode switch lost pending result/session");
+                phase = 5;
+                return;
+            }
+            receive("config", stored);
+            ui();
+            check(owner.resultCount() == 0, "actual decoded matching receipt did not remove simulated result");
+            workerOnly();
+            stop();
+        }
+        if (phase == 5) {
+            if (!network.connected()) { fake::io.now += 5000; ui(); return; }
+            receive("command", original);
+            ui();
+            check(route.realCalls == 0 && owner.resultCount() == 1, "delayed simulation bytes reached real route");
+            workerOnly();
+            stop();
+        }
+        if (phase == 6) {
+            const auto acks = findTopic("ack");
+            if (acks.empty()) { ui(); return; }
+            DynamicJsonDocument ack(2048);
+            check(!deserializeJson(ack, fake::io.published[acks.back()].payload), "invalid batch ACK");
+            check(ack["accepted"] == false && ack["reason"] == "context_required",
+                  "context batch did not reject stale request explicitly");
+            check(!owner.running() && !owner.status().canStart && owner.resultCount() == 0,
+                  "pending context falsely restored simulation readiness");
+            workerOnly();
+            stop();
+        }
+    };
+    fake::runWorker();
+}
 void statusSafety() {
     babytech::cloud::SessionSnapshot session;
     std::strcpy(session.id, kChallenge);
@@ -2071,6 +2262,7 @@ int main(int argc, char** argv) {
         else if (name == "failure-throttle" || name == "failure-throttle-rollover") failureThrottle(name == "failure-throttle-rollover");
         else if (name == "publish-failure") publishFailure();
         else if (name == "status-safety") statusSafety();
+        else if (name.compare(0, 11, "simulation-") == 0) simulationPath(name.substr(11));
         else if (name == "status-flags") statusFlags();
         else if (name.compare(0, 13, "status-flags-") == 0) networkStatusFlags(name.substr(13));
         else if (name == "status-size") statusSize();

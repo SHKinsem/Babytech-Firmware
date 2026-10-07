@@ -201,11 +201,25 @@ Brain v4现从既有MQTT配置槽解析完整档案/墓碑，回调只暂存最�
 
 `python3 tools/test_product_event_messages.py --sanitize`测试生产codec；父仓库`python3 Test/brain_event_contract_check.py --sanitize`将生产编码事件交给隔离Cloud数据库，再把实际Cloud回执交给固件解析器。无真实MQTT/UART、Flash或电机，不代表板间交付。终态UART收发、Brain MQTT转发、Motion匹配回执清队列和main接线尚未完成，公开can_start仍false；默认v3及旧单槽事件路径不变。
 
-### Brain-only 仿真组件（尚未接入固件入口）
+### Brain-only 仿真（Brain v4 USB入口）
 
 `main-controller/src/brain_simulation.h`只模拟一个整体计时，默认关闭；冻结原宝宝、配方、事件身份和终态uptime，Stop生成失败而非成功。四条RAM结果容量包含当前动作预留，未上传的旧结果不阻止下一瓶，只有满容量才限制新请求。真实Cloud stored回执经解码并匹配后才移除对应结果；没有UART、运动或NVS接口，RAM结果不承诺掉电补传。
 
-`brain_simulation_console.h`是纯`SIM STATUS/ON/OFF`解析器，尚未挂入main/USB/网络，所以这些命令目前不能作为设备操作步骤。`tools/test_brain_simulation.py --sanitize`验证纯组件，不是实际App/Cloud闭环或实板验收。实际请求session/TTL及原身份由接线owner核验；模式切换不取消真实未知请求。模拟标识的跨端补充已确认但未接线，默认真机路径不变。
+已有有效配对、业务缓存和网络配置的Brain v4，在自己的115200波特率USB监视器发送以下命令（每条以换行结束）：
+
+```text
+SIM STATUS
+SIM ON
+SIM OFF
+```
+
+不需要额外仿真编译环境或修改Motion固件；默认v3入口不支持这些命令。模式默认off且不持久化。ON/OFF仅切Brain请求路由，实际模拟任务或未决真实任务存在时返回busy，不取消或抹掉原证据。成功切换轮换MQTT会话，等待Cloud重新完成现有probe即可，不需人工配对；迟到的旧模式命令不能转为真实UART动作。有效保存的身份/缓存即可让Motion断电或UART未接时测试，不要求Motion在线，但不为未安装的空白Brain伪造配对。
+
+开启后只支持App经Cloud发送Prepare/Stop：默认整体15秒计时，不逐项模拟电机；Stop生成失败记录。屏幕只观察仿真状态，本地Initialize/Start不进入UART或模拟本地序号。Cloud下发的配置仍保存Brain缓存，但不转发Motion；退出后恢复原真实同步。真实UART心跳/只读恢复仍属于原链路，不是仿真UART消息。Motion独立网页不改。
+
+状态明确为`hardware_profile=simulation`、`motion_connected=false`，水温、水量、余粉及物理有效性仍未知/false。Cloud和新App仅对这一完整v4 Brain模式采用显式commands_enabled/can_start决定启动，不放宽真实固件。MQTT模拟终态包含`execution_mode=brain_simulation`并保存原宝宝、配方和uptime；不修改UART kind12/13或SQLite schema。仅用于隔离测试家庭/数据库，模拟记录不是实际喂养。结果在RAM中，断网时继续计时、重连补传并等待真实stored回执；Brain复位会丢失计时/结果，Cloud的completed_at仍为首次接收时间，不承诺离线真实UTC完成时间。
+
+测试：`tools/test_brain_simulation.py --sanitize`、`tools/test_brain_simulation_dispatcher.py --sanitize`及`tools/test_brain_network.py --sanitize`，父仓库另运行`Test/brain_event_contract_check.py --sanitize --brain-simulation`。生产组件加SDK/网络I/O替身验证软件契约，不等于实板USB、真实broker、App操作或机械验收。真实终态UART桥接和整机迁移仍未完成。
 
 ### Brain USB网络配置
 
@@ -216,7 +230,7 @@ python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN wifi
 python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN mqtt
 ```
 
-按提示输入SSID/密码或broker/端口/账号/密码；密码隐藏输入，不写命令行、文件或串口日志。工具先确认Brain，再进入本地维护、保存、退出；失败也尝试退出，若USB断开则重新连接后用`MAINT END`解除本地UI锁。成功仅表示存储读回通过，需另查连接状态。Wi-Fi与MQTT均可在未配对时预存，不创建网络任务、不联网或发布设备身份；有效配对后网络启动时读取已保存凭据。已运行时配置成功由worker重连。当前完整UART安装入口尚缺，预存不等于身份安装。旧账号撤销与新Brain独占产品MQTT仍需单独受控交接。
+按提示输入SSID/密码或broker/端口/账号/密码；密码隐藏输入，不写命令行、文件或串口日志。工具先确认Brain，再进入本地维护、保存、退出；失败也尝试退出，若USB断开则重新连接后用`MAINT END`解除本地UI锁。成功仅表示存储读回通过，需另查连接状态。Wi-Fi与MQTT均可在未配对时预存，不创建网络任务、不联网或发布设备身份；有效配对后网络启动时读取已保存凭据。已运行时配置成功由worker重连。首次UART安装入口已接，网络预存不等于身份安装或实机验收。旧账号撤销与新Brain独占产品MQTT仍需单独受控交接。
 
 底层命令为`NET STATUS`、`NET WIFI <ssid_hex> <password_hex或->`、`NET MQTT <host_hex> <port> <user_hex> <password_hex>`；除STATUS外要求本地维护。hex是编码不是加密，不要将完整命令贴聊天。Wi-Fi/MQTT配置由各自NVS格式保存，不是跨两项事务；一项成功另一项失败时仅重试失败项。凭据保留在设备NVS/RAM中，本工具不提供存储加密。USB打开仍可能因驱动/适配器复位板子；实机验证须在授权安全台架执行。此入口未改变Motion独立网页，也不开放产品动作。
 

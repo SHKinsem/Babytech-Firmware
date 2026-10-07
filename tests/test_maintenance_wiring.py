@@ -139,8 +139,36 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(loop.index("pollCommissioningConsole()"), loop.index("server.handleClient()"))
         loop = function_body(self.brain, "void loop()")
         self.assertLess(loop.index("pollCommissioningConsole()"), loop.index("view.takeIntent"))
-        self.assertIn("hasIntent && commissioningSession.active()", loop)
+        self.assertIn("hasIntent && (commissioningSession.active() || simulating())", loop)
+
+    def test_brain_simulation_is_separate_from_motion_and_persistent_local_intents(self):
+        command = function_body(self.brain, "void dispatchCloudCommand(")
+        stop = function_body(self.brain, "void dispatchCloudStop(")
+        self.assertIn("if (simulating()) { refreshSimulationContext(); simulation->command", command)
+        self.assertIn("else cloudDispatcher.command", command)
+        self.assertIn("if (simulating()) simulation->stop", stop)
+        self.assertIn("else cloudDispatcher.stop", stop)
+        loop = function_body(self.brain, "void loop()")
+        self.assertIn("cloudDispatcher.busy() || localDispatcher.busy(), !simulating()", loop)
+        self.assertLess(loop.index("network.poll("), loop.index("simulation->poll("))
+        self.assertLess(loop.index("hasIntent && (commissioningSession.active() || simulating())"),
+                        loop.index("localDispatcher.dispatch("))
+        self.assertIn("network.setReceiptHandler(receiveCloudReceipt, nullptr)", self.brain)
+        receipt = function_body(self.brain, "void receiveCloudReceipt(")
+        self.assertIn("simulation->receipt(receipt)", receipt)
+        self.assertNotIn("clearPending", receipt)
+        self.assertNotIn("controllerLink", receipt)
         self.assertIn("commissioningSession.active()) snapshot.startEnabled = false", loop)
+
+    def test_simulation_refreshes_admission_in_receive_batch_and_observes_typed_acceptance(self):
+        callback = function_body(self.brain, "void receiveCloudContext(")
+        self.assertLess(callback.index("contextSync.receive(context)"), callback.index("refreshSimulationContext()"))
+        command = function_body(self.brain, "void dispatchCloudCommand(")
+        self.assertLess(command.index("refreshSimulationContext()"), command.index("simulation->command"))
+        setup = function_body(self.brain, "void setup()")
+        for owner in ("cloudDispatcher", "localDispatcher", "pendingRecovery"):
+            self.assertIn(owner + ".setAcceptanceHandler(observeRealAcceptance)", setup)
+        self.assertNotIn("observeAccepted(controllerLink.commandResponse()", self.brain)
 
     def test_console_does_not_directly_write_or_claim_network_shutdown(self):
         for source in (self.motion, self.brain):

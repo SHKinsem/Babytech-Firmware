@@ -24,6 +24,7 @@ public:
 
     BrainPendingRecoveryState state() const { return state_; }
     bool clearFault() const { return clearFault_; }
+    void setAcceptanceHandler(void (*handler)(const boardlink::ProductRequest&, uint32_t)) { acceptance_ = handler; }
 
     void poll(uint32_t nowMs, bool maintenance = false) {
         if (clearFault_) return;
@@ -63,6 +64,7 @@ public:
                     boardlink::sameResultQuery(result.query, query_) &&
                     digestMatches(pending.pendingDigest, result.requestDigestHex)) {
                     cancel();
+                    if (result.accepted && acceptance_) acceptance_(pending.pendingRequest, nowMs);
                     // accepted=false is definitive rejection; either ACK resolves
                     // acceptance in flight, independently of feeding outcome.
                     const auto written = store_.clearPending(pending.pendingRequest);
@@ -119,6 +121,7 @@ private:
     bool querying_ = false;
     bool waiting_ = false;
     bool clearFault_ = false;
+    void (*acceptance_)(const boardlink::ProductRequest&, uint32_t) = nullptr;
 };
 
 } }

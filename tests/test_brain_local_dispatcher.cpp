@@ -23,12 +23,16 @@ namespace {
 uint32_t nowMs = 100;
 unsigned scenarios = 0, failures = 0;
 std::function<void()> clockHook;
+std::function<void(const ProductRequest&, uint32_t)> acceptanceHook;
 constexpr char execution[] = "11111111111111111111111111111111";
 
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error( \
     "line " + std::to_string(__LINE__) + ": " #condition); } while (false)
 
 uint32_t clockNow() { if (clockHook) clockHook(); return nowMs; }
+void observeAcceptance(const ProductRequest& request, uint32_t at) {
+    CHECK(acceptanceHook); acceptanceHook(request, at);
+}
 v4::Pairing pairing(v4::Role role = v4::Role::Brain) {
     v4::Pairing p;
     p.role = role;
@@ -78,7 +82,7 @@ nvs::Database protectedData(bool motion) {
     return disk;
 }
 void scenario(const std::string& name, const std::function<void()>& run, bool motion = false) {
-    ++scenarios; nvs::reset(); crypto::reset(); nowMs = 100; clockHook = {};
+    ++scenarios; nvs::reset(); crypto::reset(); nowMs = 100; clockHook = {}; acceptanceHook = {};
     for (const char* space : {"brainstate", "productstate", "productpair", "productctx",
                               "outbox", "wifi-cfg", "actuatorcfg", "sensorcfg"})
         nvs::io.disk[space]["unrelated"] = {{0, 0xff, 0x7f}, nvs::Type::Blob};
@@ -97,7 +101,7 @@ void scenario(const std::string& name, const std::function<void()>& run, bool mo
         ++failures;
         std::fprintf(stderr, "FAIL %s: %s\n", name.c_str(), error.what());
     }
-    clockHook = {}; nvs::io.before = {};
+    clockHook = {}; acceptanceHook = {}; nvs::io.before = {};
 }
 
 // Fault injection replaces only transport boundaries; valid traffic crosses codecs.
@@ -456,6 +460,60 @@ void storage() {
     });
 }
 
+void acceptanceCallbacks() {
+    for (bool initialize : {false, true}) for (bool accepted : {false, true})
+        scenario(std::string("local acceptance callback before pending clear / ") +
+                 (initialize ? "initialize" : "prepare") + (accepted ? " accepted" : " rejected"), [=] {
+            Rig rig(initialize); CHECK(rig.start(initialize));
+            const auto original = rig.store.state().pendingRequest;
+            CHECK(rig.store.saveContext(context(11, true)) == BrainWrite::Stored);
+            const auto disk = nvs::io.disk; const auto writes = nvs::count(Op::Set);
+            unsigned calls = 0;
+            rig.d.setAcceptanceHandler(observeAcceptance);
+            acceptanceHook = [&](const ProductRequest& request, uint32_t at) {
+                ++calls; CHECK(sameProductRequest(request, original) && at == 123);
+                CHECK(rig.store.state().pending && sameProductRequest(rig.store.state().pendingRequest, original));
+                CHECK(nvs::io.disk == disk && nvs::count(Op::Set) == writes && !rig.link.cancellations);
+            };
+            rig.link.complete(result(original, accepted, accepted ? "accepted" : "not_ready"));
+            rig.poll(123);
+            CHECK(calls == unsigned(accepted) && !rig.store.state().pending && !rig.d.busy());
+            rig.poll(124); rig.poll(1000); CHECK(calls == unsigned(accepted));
+        });
+    for (unsigned fault = 0; fault < 5; ++fault)
+        scenario("local acceptance callback excludes wrong/late owner / " + std::to_string(fault), [=] {
+            Rig rig; CHECK(rig.start()); const auto original = rig.store.state().pendingRequest;
+            unsigned calls = 0;
+            rig.d.setAcceptanceHandler(observeAcceptance);
+            acceptanceHook = [&](const ProductRequest&, uint32_t) { ++calls; };
+            auto reply = result(original);
+            if (fault == 0) reply.source = v4::Source::CloudCommand;
+            if (fault == 1) ++reply.sequence;
+            if (fault == 2) std::strcpy(reply.commandId, "other-command");
+            if (fault == 3) {
+                CHECK(rig.store.clearPending(original) == BrainWrite::Stored);
+                CHECK(rig.store.reserveLocal(request(ProductCommand::Initialize, 2)) == BrainWrite::Stored);
+                reply = result(rig.store.state().pendingRequest);
+            }
+            if (fault == 4) { rig.link.send = CommandSendState::TimedOut; rig.poll(122); }
+            const auto before = rig.store.state(); const auto disk = nvs::io.disk;
+            rig.link.complete(reply); rig.poll(123); rig.poll(124);
+            CHECK(!calls && sameBrainState(rig.store.state(), before) && nvs::io.disk == disk);
+        });
+    scenario("local acceptance callback survives pending-clear storage failure", [] {
+        Rig rig; CHECK(rig.start()); const auto original = rig.store.state().pendingRequest;
+        unsigned calls = 0;
+        rig.d.setAcceptanceHandler(observeAcceptance);
+        acceptanceHook = [&](const ProductRequest& request, uint32_t at) {
+            ++calls; CHECK(sameProductRequest(request, original) && at == 123);
+            CHECK(rig.store.state().pending && !rig.link.cancellations);
+        };
+        nvs::fail(Op::Set, nvs::count(Op::Set) + 1);
+        rig.link.complete(result(original)); rig.poll(123); rig.poll(124);
+        CHECK(calls == 1 && rig.store.state().pending); reason(rig.d, "storage_fault");
+    });
+}
+
 void responses() {
     for (bool accepted : {false, true}) scenario(accepted ? "exact acceptance clears pending" : "exact rejection clears pending", [=] {
         Rig rig; CHECK(rig.start()); const auto frozen = rig.store.state().pendingRequest;
@@ -692,7 +750,8 @@ int main(int argc, char** argv) {
     const std::string selected = argc == 2 ? argv[1] : "all";
     const struct { const char* name; void (*run)(); } groups[] = {
         {"basics", basics}, {"gates", gates}, {"identity", identity}, {"timing", timing},
-        {"storage", storage}, {"responses", responses}, {"production", production}};
+        {"storage", storage}, {"responses", responses}, {"production", production},
+        {"acceptance", acceptanceCallbacks}};
     bool found = selected == "all";
     for (const auto& group : groups) if (selected == "all" || selected == group.name) {
         found = true; group.run();

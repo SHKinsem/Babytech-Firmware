@@ -112,6 +112,7 @@ jobs:
           python tools/test_product_context_messages.py --sanitize
           python tools/test_product_event_messages.py --sanitize
           python tools/test_brain_simulation.py --sanitize
+          python tools/test_brain_simulation_dispatcher.py --sanitize
           python tools/test_legacy_context_store.py --sanitize
           python tools/test_product_state.py --sanitize
           python tools/test_brain_state_store.py --sanitize

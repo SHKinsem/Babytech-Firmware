@@ -168,6 +168,36 @@ void pendingUnchanged(const BrainState& old, const BrainState& saved) {
 }
 
 void cacheTests() {
+    scenario("Brain simulation cache-only saves context without Motion or pending mutation", [] {
+        Rig rig(1, true);
+        rig.link.board = false;
+        const auto before = rig.store.state();
+        CHECK(rig.sync.hasUsableCache() && !rig.sync.canPrepare());
+        const auto newer = context(11, false, true);
+        CHECK(rig.sync.receive(newer) && !rig.sync.hasUsableCache());
+        rig.sync.poll(100, false, false, false);
+        CHECK(rig.sync.hasUsableCache() && !rig.sync.canPrepare());
+        CHECK(sameProductContext(diskBrain().context, newer));
+        pendingUnchanged(before, diskBrain());
+        CHECK(rig.link.attempts == 0 && rig.link.contexts.empty());
+        auto conflict = newer;
+        ++conflict.waterMl;
+        CHECK(!rig.sync.receive(conflict) && !rig.sync.hasUsableCache());
+        CHECK(rig.sync.receive(context(12, true)));
+        rig.sync.poll(200, false, false, false);
+        CHECK(!rig.sync.hasUsableCache() && rig.store.state().context.cleared);
+        CHECK(rig.sync.receive(context(13)));
+        rig.sync.poll(300, false, false, false);
+        CHECK(rig.sync.hasUsableCache() && rig.link.attempts == 0);
+        rig.link.board = true;
+        rig.sync.poll(301);
+        CHECK(rig.link.attempts == 1 && rig.link.contexts.back().profileVersion == 13);
+        CHECK(!rig.sync.canPrepare());
+        rig.link.complete();
+        rig.sync.poll(302);
+        CHECK(rig.sync.canPrepare());
+        pendingUnchanged(before, diskBrain());
+    });
     for (unsigned cache : {0u, 1u, 2u}) scenario("cold boot persisted cache / " + std::to_string(cache), [=] {
         Rig seed(cache); const auto expected = seed.store.state();
         nvs::reboot(); BrainStateStore store;

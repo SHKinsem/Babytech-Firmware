@@ -41,6 +41,12 @@ public:
             boardlink::sameProductContext(sent_, store_.state().context) && proofCurrent();
     }
 
+    bool hasUsableCache() const {
+        return !received_ && store_.ready() && store_.state().hasContext &&
+            !store_.state().context.cleared &&
+            store_.state().context.profileVersion > conflictVersion_;
+    }
+
     // Explicit non-Prepare operations may preempt this idempotent transfer.
     // This never erases a cache or rolls back a possibly committed Motion write.
     void yield(uint32_t nowMs) {
@@ -51,7 +57,8 @@ public:
         wait(nowMs);
     }
 
-    void poll(uint32_t nowMs, bool maintenance = false, bool ordinaryBusy = false) {
+    void poll(uint32_t nowMs, bool maintenance = false, bool ordinaryBusy = false,
+              bool forwardToMotion = true) {
         if (maintenance) { yield(nowMs); return; }
         // A bounded UART pump can still be backpressured: do not start Flash
         // while its safety-control frame/receipt is outstanding.
@@ -66,6 +73,9 @@ public:
                 waiting_ = false;
             }
         }
+        // Simulation shares the actual cache, but never forwards simulated
+        // configuration or produces a fabricated Motion persistence proof.
+        if (!forwardToMotion) { yield(nowMs); return; }
         if (!store_.ready() || !store_.state().hasContext) { yield(nowMs); return; }
         const auto& context = store_.state().context;
         if (context.profileVersion <= conflictVersion_) { yield(nowMs); return; }

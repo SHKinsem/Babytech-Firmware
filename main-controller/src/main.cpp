@@ -14,6 +14,9 @@
 #include "brain_cloud_dispatcher.h"
 #include "brain_local_dispatcher.h"
 #include "brain_context_sync.h"
+#include "brain_simulation_console.h"
+#include "brain_simulation_dispatcher.h"
+#include "brain_simulation_mode_guard.h"
 #include <esp_system.h>
 #endif
 
@@ -24,6 +27,13 @@ babytech::display::BabytechDisplayView view;
 babytech::display::ControllerLink controllerLink;
 #if BABYTECH_BOARD_LINK_V4
 babytech::brain::BrainNetwork network;
+using SimulationOwner = babytech::brain::BrainSimulationDispatcher<babytech::brain::BrainNetwork>;
+std::unique_ptr<SimulationOwner> simulation;
+babytech::brain::BrainSimulationModeGuard simulationModeGuard;
+bool simulating() { return simulation && simulation->enabled(); }
+void observeRealAcceptance(const babytech::boardlink::ProductRequest& request, uint32_t nowMs) {
+  simulationModeGuard.observeAccepted(request, nowMs);
+}
 babytech::boardlink::MaintenanceUsbConsole commissioningSession;
 // Installation, local requests and result recovery share this single store.
 babytech::boardlink::BrainStateStore productState;
@@ -44,16 +54,27 @@ const char* cloudAdmission() {
 }
 babytech::brain::BrainCloudDispatcher<babytech::display::ControllerLink,
   babytech::brain::BrainNetwork> cloudDispatcher(controllerLink, network, installNowMs, cloudAdmission);
+void refreshSimulationContext() {
+  if (simulation) simulation->setContext(
+    productState.ready() && productState.state().hasContext ? &productState.state().context : nullptr,
+    contextSync.hasUsableCache(), !commissioningSession.active() && productState.ready() && !productState.state().pending);
+}
 void dispatchCloudCommand(void*, const babytech::boardlink::CloudCommand& command,
                           uint32_t generation, uint32_t nowMs) {
-  cloudDispatcher.command(command, generation, nowMs);
+  if (simulating()) { refreshSimulationContext(); simulation->command(command, generation, nowMs); }
+  else cloudDispatcher.command(command, generation, nowMs);
 }
 void receiveCloudContext(void*, const babytech::boardlink::ProductContext& context, uint32_t, uint32_t) {
   contextSync.receive(context);
+  refreshSimulationContext();
 }
 void dispatchCloudStop(void*, const babytech::boardlink::CloudStop& stop,
                        uint32_t generation, uint32_t nowMs) {
-  cloudDispatcher.stop(stop, generation, nowMs);
+  if (simulating()) simulation->stop(stop, generation, nowMs);
+  else cloudDispatcher.stop(stop, generation, nowMs);
+}
+void receiveCloudReceipt(void*, const babytech::boardlink::CloudReceipt& receipt) {
+  if (simulation) simulation->receipt(receipt);
 }
 bool newPairingEpoch(char (&epoch)[33]) {
   constexpr char hex[] = "0123456789abcdef";
@@ -73,6 +94,25 @@ void pollCommissioningConsole() {
   // Only the explicit installation command can advance from diagnostics to writes.
   commissioningSession.poll(Serial, millis(), !controllerLink.intentPending(),
     [](const char* line, char* output, size_t capacity) {
+      if (!std::strncmp(line, "SIM ", 4)) {
+        if (!simulation) { std::snprintf(output, capacity, "[simulation] verified_pairing_required\n"); return true; }
+        const auto* last = controllerLink.lastTelemetry();
+        const bool realUnresolved = installer.busy() || commissioningSession.active() ||
+          cloudDispatcher.ordinaryBusy() || cloudDispatcher.stopInFlight() || localDispatcher.busy() || controllerLink.intentPending() ||
+          !productState.ready() || productState.state().pending ||
+          simulationModeGuard.unresolved(last, controllerLink.connected(uint32_t(millis())),
+            controllerLink.lastTelemetryReceivedAtMs(), uint32_t(millis())) ||
+          (last && (last->motionBusy || last->isPreparing || last->activeExecutionId[0] || !last->stationary));
+        const bool before = simulating();
+        const bool handled = babytech::brain::BrainSimulationConsole::handle(
+          line, *simulation, realUnresolved, output, capacity);
+        if (before != simulating()) contextSync.yield(uint32_t(millis()));
+        return handled;
+      }
+      if (simulating() && (!std::strncmp(line, "INSTALL ", 8) || !std::strncmp(line, "PAIR ", 5))) {
+        std::snprintf(output, capacity, "[simulation] disable_before_install_or_pairing\n");
+        return true;
+      }
       if (babytech::brain::BrainInstallConsole::handle(line, installer, millis(), output, capacity)) return true;
       if (installer.busy() && (!std::strncmp(line, "PAIR ", 5) ||
           (!std::strncmp(line, "NET ", 4) && std::strcmp(line, "NET STATUS")))) {
@@ -112,6 +152,7 @@ void setup() {
     // Reuse the installer store; recovery queries original acceptance evidence,
     // never replaying a command during boot.
     const auto loaded = productState.load(*pairing);
+    simulation.reset(new (std::nothrow) SimulationOwner(*pairing, network, installNowMs));
     Serial.printf("[Brain] Business state load=%u pending=%s; no boot replay\n",
                   unsigned(loaded), productState.ready()
                       ? (productState.state().pending ? "yes" : "no") : "unknown");
@@ -121,9 +162,13 @@ void setup() {
   }
   network.setProductHandlers(dispatchCloudCommand, dispatchCloudStop, nullptr);
   network.setContextHandler(receiveCloudContext, nullptr);
+  network.setReceiptHandler(receiveCloudReceipt, nullptr);
   cloudDispatcher.setPrepareReadyHandler(contextReady);
   cloudDispatcher.setConfigurationYieldHandler(yieldConfiguration);
+  cloudDispatcher.setAcceptanceHandler(observeRealAcceptance);
   localDispatcher.setPrepareReadyHandler(contextReady);
+  localDispatcher.setAcceptanceHandler(observeRealAcceptance);
+  pendingRecovery.setAcceptanceHandler(observeRealAcceptance);
 #endif
 }
 
@@ -131,9 +176,18 @@ void loop() {
   const uint32_t nowMs = millis();
   controllerLink.poll(nowMs);
 #if BABYTECH_BOARD_LINK_V4
+  simulationModeGuard.unresolved(controllerLink.lastTelemetry(), controllerLink.connected(nowMs),
+    controllerLink.lastTelemetryReceivedAtMs(), nowMs);
   cloudDispatcher.poll(nowMs, commissioningSession.active() || productState.state().pending);
+  if (simulation) {
+    refreshSimulationContext();
+    // Process explicit Stop before the timer on this iteration, so Stop wins
+    // at its deadline rather than first recording a simulated success.
+  }
   network.poll(controllerLink.lastTelemetry(), controllerLink.connected(nowMs), nowMs,
-               controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false);
+               controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false,
+               simulating() ? &simulation->status() : nullptr);
+  if (simulation) simulation->poll(uint32_t(millis()));
   // Drain a queued urgent Stop before installer/recovery may perform Flash I/O.
   controllerLink.poll(uint32_t(millis()));
   localDispatcher.poll(uint32_t(millis()));
@@ -141,7 +195,7 @@ void loop() {
   installer.poll(uint32_t(millis()));
   pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy() || localDispatcher.busy());
   contextSync.poll(uint32_t(millis()), commissioningSession.active(),
-    cloudDispatcher.busy() || localDispatcher.busy());
+    cloudDispatcher.busy() || localDispatcher.busy(), !simulating());
   if (!commissioningSession.active()) controllerLink.releaseMaintenance(uint32_t(millis()));
 #endif
   if (!displayReady) {
@@ -164,6 +218,29 @@ void loop() {
     productState.state().localSequence >= babytech::v4::kMaxSequence;
   if (commissioningSession.active()) snapshot.startEnabled = false;
 #endif
+#if BABYTECH_BOARD_LINK_V4
+  if (simulating()) {
+    const auto& state = simulation->status();
+    snapshot = {};
+    snapshot.cloudConnected = network.connected();
+    snapshot.thermalSimulated = true;
+    snapshot.stage = state.running ? babytech::display::DisplayStage::Mixing :
+      state.complete ? babytech::display::DisplayStage::Complete :
+      state.canStart ? babytech::display::DisplayStage::Ready : babytech::display::DisplayStage::NotReady;
+    snapshot.primaryCondition = state.context && !state.context->cleared ?
+      babytech::display::DisplayCondition::None : babytech::display::DisplayCondition::BabyMissing;
+    if (state.context && !state.context->cleared) {
+      snapshot.waterMl = state.request ? state.request->waterMl : state.context->waterMl;
+      snapshot.temperatureC = state.request ? state.request->temperatureC : state.context->temperatureC;
+      std::snprintf(snapshot.babyName.data(), snapshot.babyName.size(), "%s", state.context->babyName);
+      std::snprintf(snapshot.formulaBrand.data(), snapshot.formulaBrand.size(), "%s", state.context->formulaBrand);
+    }
+    // This minimal tool simulates App commands, not local persistent sequences.
+    snapshot.startEnabled = false;
+    controllerConnected = true;
+    intentPending = state.running;
+  } else
+#endif
   if (controllerLink.protocolIncompatible(displayNowMs)) {
     snapshot.primaryCondition =
         babytech::display::DisplayCondition::ProtocolIncompatible;
@@ -177,7 +254,7 @@ void loop() {
   babytech::display::DisplayIntent intent;
   const bool hasIntent = view.takeIntent(intent);
 #if BABYTECH_BOARD_LINK_V4
-  if (hasIntent && commissioningSession.active()) {
+  if (hasIntent && (commissioningSession.active() || simulating())) {
     delay(5);
     return;
   }

@@ -29,17 +29,21 @@ unsigned clockCalls = 0, admissionCalls = 0, scenarios = 0, failures = 0;
 const char* blocked = nullptr;
 std::function<void()> clockHook;
 std::function<const char*()> admissionHook;
+std::function<void(const ProductRequest&, uint32_t)> acceptanceHook;
 
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error( \
     "line " + std::to_string(__LINE__) + ": " #condition); } while (false)
 
 uint32_t clockNow() { ++clockCalls; if (clockHook) clockHook(); return nowMs; }
 const char* admission() { ++admissionCalls; return admissionHook ? admissionHook() : blocked; }
+void observeAcceptance(const ProductRequest& request, uint32_t at) {
+    CHECK(acceptanceHook); acceptanceHook(request, at);
+}
 
 void scenario(const std::string& name, const std::function<void()>& run, bool usesNvs = false) {
     ++scenarios;
     nvs::reset(); crypto::reset(); nowMs = 100; clockCalls = admissionCalls = 0;
-    blocked = nullptr; clockHook = {}; admissionHook = {};
+    blocked = nullptr; clockHook = {}; admissionHook = {}; acceptanceHook = {};
     try {
         run();
         if (!usesNvs) CHECK(nvs::io.calls.empty());
@@ -48,6 +52,7 @@ void scenario(const std::string& name, const std::function<void()>& run, bool us
         ++failures;
         std::fprintf(stderr, "FAIL %s: %s\n", name.c_str(), error.what());
     }
+    acceptanceHook = {};
 }
 
 struct Ack {
@@ -652,6 +657,79 @@ void admissionAndReplay() {
         CHECK(!nvs::count(nvs::Op::Set) && !nvs::count(nvs::Op::Commit));
         ack(r.net.acks.at(0), command(), false, "storage_fault");
     }, true);
+}
+
+void acceptanceCallbacks() {
+    for (bool recovered : {false, true})
+        for (auto kind : {ProductCommand::Prepare, ProductCommand::Clean, ProductCommand::SetTargetTemp})
+            for (bool accepted : {false, true})
+                scenario("acceptance callback original request before release / " + std::to_string(unsigned(kind)) +
+                         (recovered ? " query" : " ACK") + (accepted ? " accepted" : " rejected"), [=] {
+                    Rig r; auto incoming = command(kind); const auto original = incoming;
+                    unsigned calls = 0;
+                    r.d.setAcceptanceHandler(observeAcceptance);
+                    acceptanceHook = [&](const ProductRequest& request, uint32_t at) {
+                        ++calls;
+                        CHECK(sameProductRequest(request, original.request) && at == nowMs);
+                        CHECK(r.d.ordinaryBusy() && !r.d.resultPending() && r.net.acks.empty());
+                    };
+                    if (recovered) r.query(incoming); else r.start(incoming);
+                    // The owner's request, not the caller's reused buffer, is authoritative.
+                    std::strcpy(incoming.request.commandId, "caller-overwritten");
+                    if (kind == ProductCommand::Prepare) incoming.request.waterMl = 30;
+                    CHECK(!calls);
+                    r.net.publishAvailable = false;
+                    if (recovered) r.link.completeQuery(known(original.request, accepted));
+                    else r.link.complete(result(original.request, accepted));
+                    r.poll(1200);
+                    CHECK(calls == unsigned(accepted) && !r.d.ordinaryBusy() && r.d.resultPending());
+                    r.poll(1201); r.poll(1202);
+                    CHECK(calls == unsigned(accepted));
+                    r.net.publishAvailable = true; r.poll(1203);
+                    CHECK(!r.d.resultPending());
+                    ack(r.net.acks.back(), original, accepted, accepted ? "accepted" : "not_ready");
+                    r.start(original); r.poll(1204);
+                    CHECK(calls == unsigned(accepted) && r.link.commands.size() == 1);
+                });
+    for (unsigned fault = 0; fault < 9; ++fault)
+        scenario("recovered acceptance callback excludes wrong/uncertain proof / " + std::to_string(fault), [=] {
+            Rig r; const auto original = command(); r.query(original);
+            unsigned calls = 0;
+            r.d.setAcceptanceHandler(observeAcceptance);
+            acceptanceHook = [&](const ProductRequest& request, uint32_t at) {
+                ++calls; CHECK(sameProductRequest(request, original.request) && at == nowMs);
+                CHECK(r.d.ordinaryBusy() && r.net.acks.empty());
+            };
+            auto reply = known(original.request);
+            if (fault == 0) reply.query.source = v4::Source::LocalTouch;
+            if (fault == 1) ++reply.query.sequence;
+            if (fault == 2) std::strcpy(reply.query.deviceId, "other-device");
+            if (fault == 3) std::strcpy(reply.query.commandId, "other-command");
+            if (fault == 4) reply.requestDigestHex[0] = reply.requestDigestHex[0] == '0' ? '1' : '0';
+            if (fault >= 5) {
+                reply.status = ResultQueryStatus(fault - 4);
+                reply.requestDigestHex[0] = 0;
+                const char* reasons[] = {"unknown", "result_expired", "request_conflict", "storage_fault"};
+                std::strcpy(reply.reason, reasons[fault - 5]);
+            }
+            r.link.completeQuery(reply, fault < 5); r.poll(1102);
+            CHECK(!calls && r.d.ordinaryBusy() && !r.d.resultPending() && r.net.acks.empty());
+            r.poll(2102); r.link.completeQuery(known(original.request)); r.poll(2103);
+            CHECK(calls == 1 && !r.d.ordinaryBusy()); r.poll(2104); CHECK(calls == 1);
+        });
+    for (unsigned fault = 0; fault < 3; ++fault)
+        scenario("direct acceptance callback excludes mismatched ACK / " + std::to_string(fault), [=] {
+            Rig r; const auto original = command(); r.start(original);
+            unsigned calls = 0;
+            r.d.setAcceptanceHandler(observeAcceptance);
+            acceptanceHook = [&](const ProductRequest&, uint32_t) { ++calls; };
+            auto reply = result(original.request);
+            if (fault == 0) reply.source = v4::Source::LocalTouch;
+            if (fault == 1) ++reply.sequence;
+            if (fault == 2) std::strcpy(reply.commandId, "other-command");
+            r.link.complete(reply); r.poll(101);
+            CHECK(!calls && r.d.ordinaryBusy() && r.net.acks.empty());
+        });
 }
 
 void results() {
@@ -1633,7 +1711,8 @@ int main(int argc, char** argv) {
     const struct { const char* name; void (*run)(); } groups[] = {
         {"basics", basics}, {"freshness", freshness}, {"admission", admissionAndReplay},
         {"results", results}, {"expired", expiredUnknown}, {"replies", replyRetries},
-        {"stops", stops}, {"production", production}, {"stop_recovery", stopRecovery}};
+        {"stops", stops}, {"production", production}, {"stop_recovery", stopRecovery},
+        {"acceptance", acceptanceCallbacks}};
     bool found = selected == "all";
     for (const auto& g : groups) if (selected == "all" || selected == g.name) { found = true; g.run(); }
     if (!found || argc > 2) { std::fprintf(stderr, "Unknown test group\n"); return 2; }

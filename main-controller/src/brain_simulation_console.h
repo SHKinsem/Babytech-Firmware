@@ -9,7 +9,8 @@ namespace babytech { namespace brain {
 // owner. No maintenance session, real-operation cancellation or UART command.
 class BrainSimulationConsole {
 public:
-    static bool handle(const char* line, BrainSimulation& simulation, bool realRequestUnresolved,
+    template<class Simulation>
+    static bool handle(const char* line, Simulation& simulation, bool realRequestUnresolved,
                        char* output, size_t capacity) {
         if (!line || std::strncmp(line, "SIM ", 4)) return false;
         if (!output || !capacity) return true;

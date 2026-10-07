@@ -12,10 +12,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
 CASES = [
+    "simulation-complete", "simulation-stop", "simulation-offline", "simulation-switch", "simulation-context-batch",
     "configure-wifi", "configure-mqtt", "configure-mqtt-failure", "configure-unpaired",
     "configure-unpaired-failure", "configure-unpaired-begin-failure", "configure-other-owner",
     *(f"station-{kind}" for kind in (
@@ -91,7 +93,10 @@ def main():
     if not compiler:
         raise SystemExit("A C++17 compiler is required")
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-               "-DARDUINO=10819", "-DBABYTECH_BOARD_LINK_V4=1", '-DFIRMWARE_VERSION="host-test"']
+               "-DARDUINO=10819", "-DBABYTECH_BOARD_LINK_V4=1", "-DMBEDTLS_VERSION_MAJOR=3",
+               '-DFIRMWARE_VERSION="host-test"']
+    if sys.platform == "darwin":
+        command.append("-Wno-deprecated-declarations")
     for feature in ("ARDUINO_STRING", "ARDUINO_STREAM", "ARDUINO_PRINT", "PROGMEM"):
         command.append(f"-DARDUINOJSON_ENABLE_{feature}=0")
     command.append("-DARDUINOJSON_ENABLE_STD_STRING=1")
@@ -100,7 +105,7 @@ def main():
     for include in (root / "tests/fakes/brain_network", root / "tests/fakes/cloud_link",
                     root / "main-controller/src", root / "shared/BabytechCloudLink/src",
                     root / "shared/ProductBoardLink/src", root / "shared/BoardProtocol/src",
-                    root / "shared/BabytechDisplayCore/src", headers):
+                    root / "shared/BabytechDisplayCore/src", root / "tests/fakes/product_crypto", headers):
         command += ["-I", str(include)]
     for source in ("main-controller/src/brain_network.cpp", "main-controller/src/brain_station.cpp",
                    "main-controller/src/brain_status.cpp", "shared/BabytechCloudLink/src/CloudLink.cpp",
@@ -109,8 +114,15 @@ def main():
                    "shared/BoardProtocol/src/BoardSessionV4.cpp", "shared/ProductBoardLink/src/ProductBoardMessages.cpp",
                    "shared/ProductBoardLink/src/ProductRequest.cpp",
                    "shared/ProductBoardLink/src/ProductContext.cpp",
+                   "shared/ProductBoardLink/src/ProductEventMessages.cpp",
+                   "shared/ProductBoardLink/src/ProductDigest.cpp",
+                   "shared/ProductBoardLink/src/MotionStateRecord.cpp",
+                   "shared/ProductBoardLink/src/BoardPairingRecord.cpp",
+                   "tests/fakes/product_crypto/FakeProductCrypto.cpp",
                    "tests/fakes/brain_network/FakeBrainNvs.cpp", "tests/test_brain_network.cpp"):
         command.append(str(root / source))
+    if sys.platform == "linux":
+        command.append("-lcrypto")
     with tempfile.TemporaryDirectory(prefix="babytech-brain-network-") as directory:
         binary = Path(directory) / ("brain_network.exe" if os.name == "nt" else "brain_network")
         subprocess.run([*command, "-o", str(binary)], check=True, timeout=120)

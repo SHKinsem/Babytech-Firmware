@@ -4,6 +4,8 @@
 #include "brain_status.h"
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <new>
 
 #ifndef FIRMWARE_VERSION
 #define FIRMWARE_VERSION "unknown"
@@ -65,6 +67,21 @@ void BrainNetwork::setContextHandler(ContextHandler handler, void* context) {
     contextOwner_ = context;
 }
 
+void BrainNetwork::setReceiptHandler(ReceiptHandler handler, void* context) {
+    receiptHandler_ = handler;
+    receiptOwner_ = context;
+}
+
+bool BrainNetwork::publishSimulationEvent(const v4::Pairing& pairing, const boardlink::TerminalEvent& event) {
+    cloud::SessionSnapshot session;
+    if (!started_ || std::strcmp(pairing.deviceId, cloud_.deviceId()) || !cloud_.sessionSnapshot(session)) return false;
+    std::unique_ptr<v4::Message> message(new (std::nothrow) v4::Message);
+    if (!message || !boardlink::encodeBrainSimulationEvent(pairing, event, *message)) return false;
+    std::memcpy(payload_, message->payload, message->length);
+    payload_[message->length] = 0;
+    return cloud_.publishForSession("event", String(payload_), session.generation);
+}
+
 cloud::Freshness BrainNetwork::checkFreshness(const char* session, uint32_t generation,
                                              uint32_t sampledAtMs, uint16_t ttlMs) {
     return cloud_.checkFreshness(session, generation, sampledAtMs, ttlMs);
@@ -72,17 +89,22 @@ cloud::Freshness BrainNetwork::checkFreshness(const char* session, uint32_t gene
 
 bool BrainNetwork::publishStatus(const boardlink::Status* lastMotion, bool motionConnected,
                                 const cloud::SessionSnapshot& session, uint32_t motionReceivedAtMs,
-                                const char* challenge, bool commandsEnabled, bool canStart) {
+                                const char* challenge, bool commandsEnabled, bool canStart,
+                                const SimulationStatus* simulation) {
     // CloudLink also checks this original receipt again at actual publish entry.
     const bool freshMotion = motionConnected && lastMotion &&
         uint32_t(session.uptimeMs - motionReceivedAtMs) < 1500;
     status_.clear();
-    writeStatus(status_.to<JsonObject>(), cloud_.deviceId(), FIRMWARE_VERSION,
-                lastMotion, freshMotion, session, challenge, commandsEnabled, canStart);
+    if (simulation)
+        writeSimulationStatus(status_.to<JsonObject>(), cloud_.deviceId(), FIRMWARE_VERSION,
+                              session, *simulation, challenge);
+    else
+        writeStatus(status_.to<JsonObject>(), cloud_.deviceId(), FIRMWARE_VERSION,
+                    lastMotion, freshMotion, session, challenge, commandsEnabled, canStart);
     if (!encodeStatusJson(status_, payload_, sizeof(payload_))) return false;
     CloudLink::StatusPublishOptions options;
     options.probeReply = challenge != nullptr;
-    options.hasMotionSample = motionConnected && lastMotion;
+    options.hasMotionSample = !simulation && motionConnected && lastMotion;
     options.motionReceivedAtMs = motionReceivedAtMs;
     return cloud_.publishStatusForSession(String(payload_), session.generation, options);
 }
@@ -162,7 +184,8 @@ void BrainNetwork::receiveCommand(uint32_t nowMs) {
 }
 
 void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnected, uint32_t nowMs,
-                        uint32_t motionReceivedAtMs, bool commandsEnabled, bool canStart) {
+                        uint32_t motionReceivedAtMs, bool commandsEnabled, bool canStart,
+                        const SimulationStatus* simulation) {
     if (!started_) return;
     cloud::SessionSnapshot current;
     const bool hasSession = cloud_.sessionSnapshot(current);
@@ -185,6 +208,12 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
             continue;
         }
         if (std::strcmp(suffix, "/config")) continue;
+        boardlink::CloudReceipt receipt;
+        if (receiptHandler_ && boardlink::decodeCloudReceipt(
+                reinterpret_cast<const uint8_t*>(inbound_.payload), std::strlen(inbound_.payload), device, receipt)) {
+            if (inbound_.generation == cloud_.sessionGeneration()) receiptHandler_(receiptOwner_, receipt);
+            continue;
+        }
         if (contextHandler_ && boardlink::decodeProductContext(
                 reinterpret_cast<const uint8_t*>(inbound_.payload), std::strlen(inbound_.payload),
                 device, contextScratch_)) {
@@ -206,7 +235,7 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
         cloud::ProbeReply reply;
         if (cloud_.probeReply(target, challenge, inbound_.generation, reply))
             publishStatus(lastMotion, motionConnected, reply.session, motionReceivedAtMs, reply.challenge,
-                          commandsEnabled, canStart);
+                          commandsEnabled, canStart, simulation);
         // Other config messages cannot dispatch actions or mutate NVS here.
     }
     if (!hasSession) return;
@@ -216,7 +245,7 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
         lastAttemptAtMs_ = nowMs;
         if (cloud_.sessionSnapshot(current) &&
             publishStatus(lastMotion, motionConnected, current, motionReceivedAtMs, nullptr,
-                          commandsEnabled, canStart)) {
+                          commandsEnabled, canStart, simulation)) {
             lastPublishedAtMs_ = nowMs;
             published_ = true;
         }

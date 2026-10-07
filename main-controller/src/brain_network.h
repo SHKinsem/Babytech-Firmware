@@ -5,6 +5,8 @@
 #include "CloudLink.h"
 #include "ProductBoardMessages.h"
 #include "ProductContext.h"
+#include "ProductEventMessages.h"
+#include "brain_status.h"
 #include "brain_station.h"
 #include <ArduinoJson.h>
 
@@ -17,6 +19,7 @@ public:
     using CommandHandler = void(*)(void*, const boardlink::CloudCommand&, uint32_t generation, uint32_t nowMs);
     using StopHandler = void(*)(void*, const boardlink::CloudStop&, uint32_t generation, uint32_t nowMs);
     using ContextHandler = void(*)(void*, const boardlink::ProductContext&, uint32_t generation, uint32_t nowMs);
+    using ReceiptHandler = void(*)(void*, const boardlink::CloudReceipt&);
     bool begin(const char* pairedDeviceId);
     // Handlers receive trusted Current/Expired requests on the UI loop. An
     // expired duplicate must not overwrite an earlier actual acceptance ACK.
@@ -28,6 +31,10 @@ public:
     // No action, persistence or ACK is implied. Copy before the callback returns;
     // registration/removal is UI-loop-owned and independent of product handlers.
     void setContextHandler(ContextHandler handler, void* context);
+    void setReceiptHandler(ReceiptHandler handler, void* context);
+    // Mode changes rotate immediately, invalidating old-mode queued traffic.
+    void resetCommandSession() { if (started_) cloud_.requestReconnect(); }
+    bool publishSimulationEvent(const v4::Pairing& pairing, const boardlink::TerminalEvent& event);
     cloud::Freshness checkFreshness(const char* session, uint32_t generation,
                                    uint32_t sampledAtMs, uint16_t ttlMs);
     // Trusted runtime only: publish a determined original result, not a new
@@ -38,7 +45,8 @@ public:
     bool publishAck(const char* commandId, const char* command, uint64_t sequence,
                     const char* originalSession, bool accepted, const char* reason);
     void poll(const boardlink::Status* lastMotion, bool motionConnected, uint32_t nowMs,
-              uint32_t motionReceivedAtMs = 0, bool commandsEnabled = false, bool canStart = false);
+              uint32_t motionReceivedAtMs = 0, bool commandsEnabled = false, bool canStart = false,
+              const SimulationStatus* simulation = nullptr);
     bool connected() const { return started_ && cloud_.connected(); }
     bool started() const { return started_; }
     bool configureWifi(const char* ssid, const char* password) {
@@ -52,7 +60,8 @@ public:
 private:
     bool publishStatus(const boardlink::Status* lastMotion, bool motionConnected,
                        const cloud::SessionSnapshot& session, uint32_t motionReceivedAtMs,
-                       const char* challenge = nullptr, bool commandsEnabled = false, bool canStart = false);
+                       const char* challenge = nullptr, bool commandsEnabled = false, bool canStart = false,
+                       const SimulationStatus* simulation = nullptr);
     void receiveCommand(uint32_t nowMs);
     bool publishAckForGeneration(const char* commandId, const char* command, uint64_t sequence,
                                  const char* session, bool accepted, const char* reason, uint32_t generation);
@@ -70,6 +79,8 @@ private:
     void* productContext_ = nullptr;
     ContextHandler contextHandler_ = nullptr;
     void* contextOwner_ = nullptr;
+    ReceiptHandler receiptHandler_ = nullptr;
+    void* receiptOwner_ = nullptr;
     bool started_ = false;
     bool attempted_ = false;
     bool published_ = false;

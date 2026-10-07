@@ -26,6 +26,10 @@ bool terminalEventFromSlot(const v4::Pairing& pairing, const MotionExecutionSlot
                            TerminalEvent& output);
 bool encodeTerminalEvent(const v4::Pairing& pairing, const TerminalEvent& event,
                          v4::Message& output);
+// Brain MQTT only. The extra marker is deliberately not accepted by the UART
+// terminal decoder; no simulation frames are sent to Motion.
+bool encodeBrainSimulationEvent(const v4::Pairing& pairing, const TerminalEvent& event,
+                                v4::Message& output);
 bool decodeTerminalEvent(const v4::Message& message, const v4::Pairing& pairing,
                          TerminalEvent& output);
 bool encodeCloudReceipt(const CloudReceipt& receipt, v4::Message& output);
