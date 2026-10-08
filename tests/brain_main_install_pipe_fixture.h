@@ -14,7 +14,7 @@ void runInstallBridge(const DualOptions& options) {
     WiFi.state = 0;  // SDK Wi-Fi reports disconnected; no worker is executed.
     setup();
     main_install_nvs::PairCommitFault fault;
-    fault.arm(options.pairCommitFault);
+    fault.arm(options.pairCommitFault, options.pairCommitApplied);
     for (;;) {
         check(!simulating() && fake_main::uartTx.size() <= dualUartLimit &&
               fake_main::usb.output.size() <= dualUartLimit, "installation output budget exceeded");

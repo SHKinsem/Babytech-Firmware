@@ -29,9 +29,19 @@ installation using the original embedded identity/epoch. Two later offline
 boots perform zero SDK blob Set/Commit calls and do not reinstall or move.
 Same-boot Brain storage faults reject another install; a Motion storage fault
 can accept an explicit Brain retry but still returns the fault, preserving all
-bytes. Neither path clears records or adds a production gate. This covers one
-partial-install commit-error cut, not errors after persistence, arbitrary
-Flash power loss or mixed firmware-image upgrades.
+bytes. Neither path clears records or adds a production gate.
+
+Add `--install-storage-applied` in the parent tool to select host-only
+`--install-nvs-fault pair-commit-applied`: the fake SDK applies the complete
+pairing commit but returns an error. The failed run remains inactive. After
+preserving both disks and restarting, a Brain fault leaves both boards fully
+saved, so normal offline startup reuses pairing without reinstallation. A
+Motion fault leaves Brain unimported; explicit Brain USB recovery keeps the
+original pair/context and performs zero Motion blob writes. Ordinary offline
+boots retain the full disk and do not execute product actions. Both fault
+modes are rejected by non-installation pipes before setup. These are two
+commit-error outcomes, not arbitrary torn Flash writes, physical power loss
+or mixed firmware-image upgrades; production behavior is unchanged.
 
 ## 原执行上的 Cloud Stop（2026-10-08）
 

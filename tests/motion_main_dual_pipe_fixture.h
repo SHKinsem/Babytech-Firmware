@@ -26,6 +26,7 @@ void parse(DynamicJsonDocument& doc, const std::string& raw) {
 }
 struct Options {
     bool seedHistory = false, prepare = false, installation = false, pairCommitFault = false;
+    bool pairCommitApplied = false;
     std::string stateFile, contextFile;
     uint32_t bootSeed = 0x16543;
 };
@@ -63,8 +64,9 @@ Options options(int argc, char** argv) {
                 require(result.stateFile.empty(), "duplicate state-file");
                 result.stateFile = value;
             } else if (arg == "--install-nvs-fault") {
-                require(!result.pairCommitFault && value == "pair-commit", "invalid installation NVS fault");
+                require(!result.pairCommitFault && (value == "pair-commit" || value == "pair-commit-applied"), "invalid installation NVS fault");
                 result.pairCommitFault = true;
+                result.pairCommitApplied = value == "pair-commit-applied";
             } else if (arg == "--context-file") {
                 require(result.contextFile.empty(), "duplicate context-file");
                 result.contextFile = value;
@@ -458,7 +460,7 @@ int run(int argc, char** argv) {
     motion_io::flowFeedback = args.prepare;
     setup();
     main_install_nvs::PairCommitFault fault;
-    fault.arm(args.pairCommitFault);
+    fault.arm(args.pairCommitFault, args.pairCommitApplied);
     Reporter reporter;
     reporter.report(args, restored);
     std::string line;

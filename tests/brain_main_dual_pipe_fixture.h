@@ -270,6 +270,7 @@ struct DualOptions {
     std::optional<nvs::Database> disk;
     uint32_t seed = 0;
     bool pairCommitFault = false;
+    bool pairCommitApplied = false;
 };
 DualOptions realBridgeOptions(int argc, char** argv) {
     DualOptions options;
@@ -285,8 +286,9 @@ DualOptions realBridgeOptions(int argc, char** argv) {
             bool present;
             options.disk = dualParseSnapshot(dualReadBounded(file, dualSnapshotLimit, false, present));
         } else if (key == "--install-nvs-fault") {
-            check(!options.pairCommitFault && value == "pair-commit", "invalid installation NVS fault");
+            check(!options.pairCommitFault && (value == "pair-commit" || value == "pair-commit-applied"), "invalid installation NVS fault");
             options.pairCommitFault = true;
+            options.pairCommitApplied = value == "pair-commit-applied";
         } else if (key == "--boot-id") {
             check(!seedSeen && !value.empty() && value.size() <= 10, "invalid or repeated real pipe boot-id");
             seedSeen = true;
