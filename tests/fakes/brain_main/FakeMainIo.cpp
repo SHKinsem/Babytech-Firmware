@@ -37,7 +37,8 @@ void input(const char* line) {
 }
 }
 void delay(uint32_t value) { fake::io.now += value; }
-uint32_t esp_random() { static uint32_t value = 100; return ++value; }
+uint32_t fake_main::randomCounter = 100;
+uint32_t esp_random() { return ++fake_main::randomCounter; }
 HardwareSerial::HardwareSerial(uint8_t number) { fake::check(number == 1, "wrong UART"); }
 size_t HardwareSerial::setRxBufferSize(size_t size) { return size; }
 size_t HardwareSerial::setTxBufferSize(size_t size) { return size; }

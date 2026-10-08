@@ -21,6 +21,7 @@ struct UsbPort : FakeSerial {
     void printf(const char*, ...);
 };
 extern UsbPort usb;
+extern uint32_t randomCounter;
 extern std::deque<uint8_t> uartRx;
 extern std::vector<uint8_t> uartTx;
 extern bool panelReady, stopClick;

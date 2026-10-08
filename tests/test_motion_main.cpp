@@ -238,8 +238,12 @@ void uartContext(v4::Pairing pair) {
     check(!product.executionAuthorized() && productState.state().slot.kind == MotionSlotKind::Empty, "setting temperature authorized physical feed");
 }
 }
+#include "motion_main_dual_pipe_fixture.h"
+
 int main(int argc, char** argv) {
     try {
+        if (argc >= 2 && std::string(argv[1]) == "dual-bridge")
+            return motion_main_dual_pipe::run(argc - 2, argv + 2);
         check(argc == 2, "case required");
         const std::string which = argv[1];
         fake_motion_nvs::reset();

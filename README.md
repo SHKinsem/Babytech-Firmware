@@ -1,5 +1,13 @@
 # Babytech Firmware
 
+## 双主循环历史结果验证（2026-10-08）
+
+父项目 `Test/dual_main_broker_check.py --sanitize` 通过 host-only `test_brain_main.py --real-pipe` 与 `test_motion_main.py --pipe`，运行两端生产 `setup()/loop()` 的独立进程。SDK UART 原字节双向中继，Brain 原始 MQTT 发布/订阅映射到隔离 Paho/broker 和真实 Cloud；不使用脚本 Motion peer、伪造 ACK 或落库回执。首次通过正常 Motion Store 接口准备四条历史 LocalTouch 完成/失败结果，不执行新冲奶。
+
+覆盖 Brain、Motion 先后重建进程并保留 SDK disk、原事件重新发送、真实 Cloud 去重及提交后回执清空 Motion 队列。核对每代 native 订阅/retained 配置、实际 HELLO boot nonce、原 JSON 字节/配方/宝宝、失败详情、消费水位及无运动 CAN 输出。`--build-output` 只编译测试二进制，`--boot-id` 是 SDK 随机种子而非真实 boot ID；不新增固件环境或串口命令。联合 fixture 单独使用有界 3000 次 worker 预算，其他测试仍为 1000。
+
+SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 seed，Cloud session 随机源未随重启轮换。此项不证明凭据 Flash、旧 Cloud session 失效、新 Prepare/Settemp、同时双板复位、完整 HTTP/OTA 矩阵、真实 CAN/UART/RTOS/ACL 或首次物理激活。默认 v3、非食用宏 0 和生产接口不变，完整 B3.3/B4 仍待验收。
+
 ## Motion 主循环验证（2026-10-08）
 
 `python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。八个独立进程覆盖空/已配对启动、默认和显式保存预算下的 Intent 恢复、工作台/部分 CAN TX、目标 Stop、reset 不冒充物理停稳、已有配置 UART 重建/幂等查询及 SDK crypto 校验。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
@@ -14,7 +22,7 @@
 
 2026-10-08 真实模式就绪上报：公开 `can_start` 不再固定 false，而按新鲜且空闲停稳的 Motion Start 权限、双方精确同步的宝宝/配方，以及现有冲突请求/维护状态计算。每次周期/probe 编码在 UI loop 重新求值，避免前面的配置/命令回调使旧布尔值过时。屏幕离线启动不依赖 Cloud，Cloud 发行不依赖本地触控序号容量；信息性 Stop 查询、历史待上传结果本身不阻止下一瓶，Motion 队列满与机械检查仍生效。Unknown 动作不重放，本地持久 pending 不因此清除；未开启非食用能力的 Motion 仍不能启动，不代表食用或实机验收。下面按日期排列的开发证据中固定 false 是当时边界，以本段为当前行为。
 
-`python3 tools/test_brain_main.py --sanitize` 包含12个case/15个独立进程。`--case real-readiness` 的离线缓存/最大本地序号fixture运行生产main和实际UART适配器，测试peer返回编码身份、配置证明和状态；各38个probe核对true/false，覆盖配置更新/墓碑、接受后旧idle、ACK未入队、本地Stop及恢复。历史outbox/信息性查询不过拦，屏幕离线实际发送，本地序号满不挡Cloud。测试peer不是Motion main，SDK/物理时序/Flash/broker仍不在此证据内，真实Motion默认非食用能力仍关闭。
+`python3 tools/test_brain_main.py --sanitize` 包含13个case/16个独立进程，包括新增真实 pipe 输入校验。`--case real-readiness` 的离线缓存/最大本地序号fixture运行生产main和实际UART适配器，测试peer返回编码身份、配置证明和状态；各38个probe核对true/false，覆盖配置更新/墓碑、接受后旧idle、ACK未入队、本地Stop及恢复。历史outbox/信息性查询不过拦，屏幕离线实际发送，本地序号满不挡Cloud。测试peer不是Motion main，SDK/物理时序/Flash/broker仍不在此证据内，真实Motion默认非食用能力仍关闭。
 
 `--case real-results --case real-results-write-failure` 将生产Brain主循环/网络/UART适配器接到实际Motion `ReadOnlyLink`、`MotionStateStore` 和 `MotionResultDelivery`。夹具用Store正常接口预存四条历史完成/失败结果（Cloud/local交替），不模拟执行电机。测试事件发布失败、无新鲜STATUS/配置同步时补传、当前宝宝已换而原JSON/宝宝/配方不变、非stored/错设备/不匹配回执、UART回执丢失、Motion owner重建及删除commit失败后重载；精确回执逐项删除，非outbox持久证据保持不变，Brain不发Command/Stop。SDK/NVS/网络/时钟是替身，stored是注入输入，不证明Cloud事务、真实broker、Motion setup/loop、双板重启、CAN或Flash原子性；不能据此关闭完整B3.3/B4。
 

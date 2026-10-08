@@ -16,18 +16,31 @@ import tempfile
 CASES = ("simulation-complete", "simulation-stop", "simulation-context",
          "simulation-receipt", "simulation-offline", "simulation-offline-ack-lost", "panel-failure",
          "bridge-input-validation", "real-readiness", "real-results", "real-results-write-failure",
-         "real-auth-offline")
+         "real-auth-offline", "real-pipe-input-validation")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--case", action="append", choices=CASES)
-    parser.add_argument("--pipe", action="store_true",
+    pipes = parser.add_mutually_exclusive_group()
+    pipes.add_argument("--pipe", action="store_true",
                         help="Expose host SDK MQTT I/O to an isolated broker driver over JSON lines")
+    pipes.add_argument("--real-pipe", action="store_true",
+                       help="Expose actual Brain main MQTT and raw UART SDK I/O (DUAL_BRAIN= JSON lines)")
+    parser.add_argument("--state-file", type=Path,
+                        help="Initial raw fake NVS snapshot JSON; only valid with --real-pipe")
+    parser.add_argument("--boot-id", type=int,
+                        help="SDK random counter seed (1..UINT32_MAX-32), not an actual boot ID")
+    parser.add_argument("--build-output", type=Path,
+                        help="Build the host binary at this path and return without running")
     args = parser.parse_args()
-    if args.pipe and args.case:
-        parser.error("--pipe and --case are mutually exclusive")
+    if (args.pipe or args.real_pipe) and args.case:
+        parser.error("pipe modes and --case are mutually exclusive")
+    if (args.state_file is not None or args.boot_id is not None) and not args.real_pipe:
+        parser.error("--state-file and --boot-id require --real-pipe")
+    if args.boot_id is not None and not 1 <= args.boot_id <= 2**32 - 1 - 32:
+        parser.error("--boot-id must be in 1..UINT32_MAX-32")
     root = Path(__file__).resolve().parents[1]
     headers = root / "device-controller/.pio/libdeps/motion/ArduinoJson/src"
     if not (headers / "ArduinoJson.h").is_file():
@@ -76,11 +89,23 @@ def main():
     if args.sanitize:
         env["ASAN_OPTIONS"] = env.get("ASAN_OPTIONS", "") + ":halt_on_error=1:abort_on_error=1"
         env["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
+    if args.build_output is not None:
+        subprocess.run([*command, "-o", str(args.build_output)], check=True, timeout=120)
+        return
     with tempfile.TemporaryDirectory(prefix="babytech-brain-main-") as directory:
         binary = Path(directory) / "brain_main"
         subprocess.run([*command, "-o", str(binary)], check=True, timeout=120)
         if args.pipe:
             subprocess.run([str(binary), "broker-bridge"], env=env, check=True, timeout=300)
+            return
+        if args.real_pipe:
+            options = []
+            if args.state_file is not None:
+                options += ["--state-file", str(args.state_file)]
+            if args.boot_id is not None:
+                options += ["--boot-id", str(args.boot_id)]
+            subprocess.run([str(binary), "real-broker-bridge", *options],
+                           env=env, check=True, timeout=300)
             return
         process_count = 0
         for case in args.case or CASES:

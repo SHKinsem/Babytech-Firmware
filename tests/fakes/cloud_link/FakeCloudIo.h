@@ -23,6 +23,7 @@ struct Io {
     unsigned preferenceWriteCalls = 0;
     std::vector<std::pair<std::string, bool>> preferenceOpens;
     uint32_t now = 1000;
+    unsigned delayLimit = 1000;
     unsigned allocationCalls = 0;
     unsigned failAllocation = 0;
     bool failBuffer = false;

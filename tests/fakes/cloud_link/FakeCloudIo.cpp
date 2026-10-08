@@ -196,7 +196,7 @@ BaseType_t xTaskCreatePinnedToCore(TaskFunction_t entry, const char*, uint32_t s
 void vTaskDelay(TickType_t ticks) {
     fake::io.now += ticks;
     ++fake::io.delays;
-    fake::check(fake::io.delays <= 1000, "worker exceeded bounded test schedule");
+    fake::check(fake::io.delays <= fake::io.delayLimit, "worker exceeded bounded test schedule");
     if (fake::io.onDelay) fake::io.onDelay(fake::io.delays);
 }
 

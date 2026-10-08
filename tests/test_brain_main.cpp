@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <iostream>
 #include <stdexcept>
+#include <random>
 
 // Bind the production entry point to the USB SDK replacement, without copying
 // its loop, callbacks or ownership decisions into the test.
@@ -762,8 +763,12 @@ void run(const std::string& name) {
 }
 #include "brain_main_result_fixture.h"
 #include "brain_main_offline_fixture.h"
+#include "brain_main_dual_pipe_fixture.h"
 int main(int argc, char** argv) {
     try {
+        if (argc >= 2 && std::string(argv[1]) == "real-broker-bridge") {
+            runRealBridge(realBridgeOptions(argc, argv)); return 0;
+        }
         if (argc >= 2 && std::string(argv[1]) == "real-auth-offline") {
             check(argc == 2 || (argc == 3 && (std::string(argv[2]) == "command-subscribe-failed" ||
                   std::string(argv[2]) == "config-subscribe-failed")), "invalid offline fixture variant");
@@ -781,6 +786,9 @@ int main(int argc, char** argv) {
         }
         if (std::string(argv[1]) == "bridge-input-validation") {
             checkBridgeInputs(); std::puts("PASS Brain bridge input validation"); return 0;
+        }
+        if (std::string(argv[1]) == "real-pipe-input-validation") {
+            checkRealBridgeInputs(); std::puts("PASS Brain real pipe input validation"); return 0;
         }
         if (std::string(argv[1]) == "broker-bridge") { runBridge(); return 0; }
         run(argv[1]); std::printf("PASS Brain setup/loop %s\n", argv[1]); return 0;
