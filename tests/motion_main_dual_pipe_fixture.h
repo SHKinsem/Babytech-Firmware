@@ -224,6 +224,7 @@ struct Reporter {
         doc["pending_result_count"] = state.pendingResultCount;
         const auto kind = state.slot.kind;
         doc["execution_slot"] = unsigned(kind);
+        doc["target_temp"] = product.targetTemp();
         doc["cloud_sequence"] = state.cloudSequence; doc["local_sequence"] = state.localSequence;
         doc["recovery_pending"] = productRecovery.executionPending();
         doc["motion_pending"] = productRecovery.motionPending();

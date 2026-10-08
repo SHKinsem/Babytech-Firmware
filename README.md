@@ -1,12 +1,16 @@
 # Babytech Firmware
 
-## 双主循环历史结果验证（2026-10-08）
+## 双主循环结果与命令验证（2026-10-08）
 
 父项目 `Test/dual_main_broker_check.py --sanitize` 通过 host-only `test_brain_main.py --real-pipe` 与 `test_motion_main.py --pipe`，运行两端生产 `setup()/loop()` 的独立进程。SDK UART 原字节双向中继，Brain 原始 MQTT 发布/订阅映射到隔离 Paho/broker 和真实 Cloud；不使用脚本 Motion peer、伪造 ACK 或落库回执。首次通过正常 Motion Store 接口准备四条历史 LocalTouch 完成/失败结果，不执行新冲奶。
 
-覆盖 Brain、Motion 先后重建进程并保留 SDK disk、原事件重新发送、真实 Cloud 去重及提交后回执清空 Motion 队列。核对每代 native 订阅/retained 配置、实际 HELLO boot nonce、原 JSON 字节/配方/宝宝、失败详情、消费水位及无运动 CAN 输出。`--build-output` 只编译测试二进制，`--boot-id` 是 SDK 随机种子而非真实 boot ID；不新增固件环境或串口命令。联合 fixture 单独使用有界 3000 次 worker 预算，其他测试仍为 1000。
+覆盖 Brain、Motion 单板及双方退出后同时重建进程并保留 SDK disk、原事件重新发送、真实 Cloud 去重及提交后回执清空 Motion 队列。随后真实 Cloud session probe/发行两条无运动请求：`reset_error` 接受为 `already_clear`，`check_firmware_update` 拒绝为 `cloud_ota_not_supported`；实际 UART COMMAND/RESULT、MQTT ACK 与永久账本身份/序号一致。水位未知的 Settemp 在 Cloud 拒绝且不发行，不能伪造传感器让它通过。重复 API 返回原 ACK、冲突 ID 拒绝；原 MQTT 旧序号实际送入 Brain 后丢弃，不新增 UART 请求/查询/结果或 ACK。四条喂养记录仍唯一，无运动 CAN 输出。
 
-SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 seed，Cloud session 随机源未随重启轮换。此项不证明凭据 Flash、旧 Cloud session 失效、新 Prepare/Settemp、同时双板复位、完整 HTTP/OTA 矩阵、真实 CAN/UART/RTOS/ACL 或首次物理激活。默认 v3、非食用宏 0 和生产接口不变，完整 B3.3/B4 仍待验收。
+核对每代 native 订阅/retained 配置、实际 HELLO boot nonce、原 JSON 字节/配方/宝宝、失败详情及消费水位。`--build-output` 只编译测试二进制，`--boot-id` 是 SDK 随机种子而非真实 boot ID；不新增固件环境或串口命令。联合 fixture 单独使用有界 3000 次 worker 预算及 Brain SDK 名义写容量 23 bytes；其他测试仍为 1000 次、原 7-byte 短写。7 bytes/15ms UI 节拍不足以在真实 50ms 首帧预算内发送请求，超时主动失效不是 CRC/parser 故障；联合测试不放宽生产预算或吞 CRC。23 bytes 只代表 host SDK 能及时发送，不证明 MCU UART/任务时序。
+
+SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 seed，Cloud session 随机源未随重启轮换。此项不证明凭据 Flash、旧 Cloud session 失效、新 Prepare/Settemp 成功、运行中双板断电、完整 HTTP/OTA 矩阵、真实 CAN/UART/RTOS/ACL 或首次物理激活。默认 v3、非食用宏 0 和生产接口不变，完整 B3.3/B4 仍待验收。
+
+测试同时输出 SDK 输入/owner 队列与累计发送失败计数。历史回执集中释放的背压依靠重传恢复，失败数独立报告；新命令及重放阶段必须不新增失败，并核对输入/全部队列排空、原 TTL 与 6-byte 控制帧前缀，不能把丢包或未完成发送算作去重成功。这些只读观察不改变生产队列或门禁。
 
 ## Motion 主循环验证（2026-10-08）
 

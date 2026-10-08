@@ -284,6 +284,9 @@ DualOptions realBridgeOptions(int argc, char** argv) {
 void runRealBridge(const DualOptions& options) {
     seed(false);
     fake::io.delayLimit = 3000;
+    // Nominal pipe uses the advertised room; regular short-write tests keep 7.
+    // Throttling 7 bytes per 15ms UI step exceeds the real 50ms first-frame guard.
+    fake_main::uartWriteLimit = 23;
     if (options.disk) nvs::io.disk = *options.disk;
     fake_main::randomCounter = options.seed;
     setup();
@@ -297,6 +300,10 @@ void runRealBridge(const DualOptions& options) {
         DynamicJsonDocument report(dualOutputLimit);
         report["now_ms"] = millis(); report["connected"] = network.connected();
         report["simulation"] = false; report["random_seed"] = options.seed;
+        report["uart_sdk_write_limit"] = fake_main::uartWriteLimit;
+        report["sdk_pending_packets"] = fake::io.incoming.size();
+        report["sdk_queued_items"] = fake::queuedItems();
+        report["sdk_queue_send_failures"] = fake::io.queueSendFailures;
         report["motion_connected"] = controllerLink.connected(millis());
         report["has_motion_snapshot"] = controllerLink.hasSnapshot();
         report["telemetry_seen"] = controllerLink.lastTelemetry() != nullptr;

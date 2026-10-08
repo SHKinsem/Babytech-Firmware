@@ -70,6 +70,7 @@ struct Io {
 };
 extern Io io;
 size_t liveQueues();
+size_t queuedItems();
 size_t liveSemaphores();
 void check(bool condition, const char* message);
 void runWorker();

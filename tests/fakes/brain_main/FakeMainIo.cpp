@@ -10,6 +10,7 @@ namespace fake_main {
 UsbPort usb;
 std::deque<uint8_t> uartRx;
 std::vector<uint8_t> uartTx;
+size_t uartWriteLimit = 7;
 bool panelReady = true, stopClick = false;
 babytech::display::DisplayIntent intent = babytech::display::DisplayIntent::None;
 babytech::display::DisplaySnapshot shown;
@@ -53,7 +54,8 @@ int HardwareSerial::read() {
 }
 int HardwareSerial::availableForWrite() { return 23; }
 size_t HardwareSerial::write(const uint8_t* data, size_t size) {
-    const auto count = std::min(size, size_t(7));
+    fake::check(fake_main::uartWriteLimit > 0 && fake_main::uartWriteLimit <= 23, "invalid SDK UART write limit");
+    const auto count = std::min(size, fake_main::uartWriteLimit);
     fake_main::uartTx.insert(fake_main::uartTx.end(), data, data + count);
     return count;
 }

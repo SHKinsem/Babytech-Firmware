@@ -46,6 +46,11 @@ void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 size_t liveQueues() { return queues.size(); }
+size_t queuedItems() {
+    size_t count = 0;
+    for (const auto& entry : queues) count += entry.second->items.size();
+    return count;
+}
 size_t liveSemaphores() { return semaphores.size(); }
 void completeDeferredSends() {
     for (const auto& send : deferredSends)
