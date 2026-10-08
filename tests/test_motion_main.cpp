@@ -86,8 +86,11 @@ WebServer::Response http(HTTPMethod method, const char* path, WebServer::Argumen
     return result;
 }
 DynamicJsonDocument parseJson(const std::string& value) {
-    DynamicJsonDocument doc(16384);
-    check(!deserializeJson(doc, value), "actual HTTP JSON invalid"); return doc;
+    // The complete 48-frame CAN trace needs more DOM space on a 64-bit host.
+    DynamicJsonDocument doc(32768);
+    const auto error = deserializeJson(doc, value);
+    if (error) throw std::runtime_error(std::string("actual HTTP JSON invalid: ") + error.c_str());
+    check(true, "actual HTTP JSON parsed"); return doc;
 }
 class BrainPeer {
     class Sink : public v4::ByteSink {
@@ -266,6 +269,7 @@ void uartContext(v4::Pairing pair) {
 }
 }
 #include "motion_main_http_fixture.h"
+#include "motion_main_recovery_http_fixture.h"
 #include "motion_main_ota_fixture.h"
 #include "motion_main_prepare_fixture.h"
 #include "motion_main_dual_pipe_fixture.h"
@@ -306,6 +310,10 @@ int main(int argc, char** argv) {
         else if (which == "http-product-guards") motion_main_http::guards(seedPair());
         else if (which == "http-history-debug") motion_main_http::history(seedPair());
         else if (which == "http-product-stop-failure") motion_main_http::cancel(seedPair(), 0, true);
+        else if (which == "http-recovery-guards") motion_main_recovery_http::guards(seedPair());
+        else if (which == "http-recovery-stop-failure") motion_main_recovery_http::cancel(seedPair(), 0, true);
+        else if (which.rfind("http-recovery-stop-", 0) == 0)
+            motion_main_recovery_http::cancel(seedPair(), unsigned(std::stoul(which.substr(19))), false);
         else if (which == "http-maintenance-usb") motion_main_http::maintenance(seedPair(), 0);
         else if (which == "http-maintenance-uart-release") motion_main_http::maintenance(seedPair(), 1);
         else if (which == "http-maintenance-uart-expiry") motion_main_http::maintenance(seedPair(), 2);

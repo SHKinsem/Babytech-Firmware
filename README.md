@@ -22,7 +22,7 @@ SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 see
 
 ## Motion 主循环验证（2026-10-08）
 
-显式主机 Prepare 场景单独运行，不加入默认34进程或默认历史结果 pipe；新 Prepare 联测使用上方的显式参数：
+显式主机 Prepare 场景单独运行，不加入默认45进程或默认历史结果 pipe；新 Prepare 联测使用上方的显式参数：
 
 ```bash
 python3 tools/test_motion_main.py --sanitize --prepare-fixture \
@@ -35,7 +35,11 @@ python3 tools/test_motion_main.py --sanitize --prepare-fixture \
 
 三个独立进程通过ASan/UBSan，共108项检查；默认34进程亦通过。此处Brain是脚本ReadOnlyLink peer，不运行真实Brain main/Cloud/broker；五段等待不是完整机械脚本或电机运动/传感器闭环证明。完整新Prepare双main链路、真实Flash/CAN/UART/RTOS和B4仍待验证，默认设备非食用宏0及v3不变。
 
-`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。34个独立进程包含原八项启动/恢复与SDK crypto、12项产品占用/历史结果HTTP、4项USB/UART维护、9项OTA认证/预约/上传失败及一项GPIO采样/输入校验。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
+`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。45个独立进程包含原八项启动/恢复与SDK crypto、12项产品占用/历史结果HTTP、4项USB/UART维护、9项OTA认证/预约/上传失败、一项GPIO采样/输入校验及11项恢复中HTTP。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
+
+恢复中HTTP测试用正常Motion Store接口预存一条Prepare intent，再运行实际setup/loop；不是Cloud重新发行任务。`http-recovery-guards`覆盖诊断读取、动作/参数/称重/Wi-Fi写入拒绝、合法raw只读与畸形raw不取消、OTA安全拒绝；原请求/事件/执行ID、消费水位及完整SDK disk不变。`http-recovery-stop-0..8`逐进程验证九种既有Stop/disable/reset入口，核对完整广播Abort后Stop及对应F3帧，不因软件reset的200或Stop的202删除intent或宣称停稳。
+
+`http-recovery-stop-failure`注入FE发送失败并保留503与原证据；取消注入后实际重发Abort/Stop，原CanFault仍锁存，接口仍返回503。五轴新鲜反馈齐全后恢复正常结束，原Prepare按`reboot_during_feed/E_REBOOT_DURING_FEED`归档一次；缺轴/仍运动不得提前归档。全恢复区间禁止使能/回零/新队列，持久变化仅允许业务record。归档后未收到Cloud回执也不阻普通polling/距离设置/队列运行取消或OTA manifest验证。host JSON DOM容量32KiB仅用于解析完整48帧诊断trace，不改变固件响应或设备内存。45进程和显式Prepare三进程108检查通过ASan/UBSan；SDK停稳信号不是真实机械停稳、Flash断电或完整多owner/联合升级验收。
 
 新增 `http-product-guards` 经生产 UART 接受 Clean，核对15个读取入口和动作/配置写入拒绝；合法raw Read可用，畸形Stop/Interrupt/disable不能取消，新增CAN只允许读取，持久任务和Clean等待状态不变。`http-product-stop-0..8` 分别覆盖Stop、Stop-all、queue cancel、单轴/广播disable、raw Stop/Interrupt/disable及control reset；实际广播Abort/Stop和对应F3完整帧必须出现，未停稳不删持久决策、不误报OTA安全，reset的200只表示软件状态清理及Stop提交。`http-product-stop-failure` 注入FE提交失败，核对503、成功Abort和原证据保留。
 

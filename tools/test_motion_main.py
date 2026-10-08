@@ -19,6 +19,8 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         "http-ota-auth", "http-ota-controls", "http-ota-write-failure", "http-ota-image-invalid",
         "http-ota-hash-mismatch", "http-ota-disconnect-abort", "http-ota-start-unsafe",
         "http-ota-challenge-expiry", "http-ota-session-wrap", "sdk-water-sampling",
+        "http-recovery-guards", "http-recovery-stop-failure",
+        *tuple("http-recovery-stop-" + str(i) for i in range(9)),
         *tuple("http-product-stop-" + str(i) for i in range(9)))
 PREPARE_CASES = ("sdk-prepare-flow", "sdk-prepare-home-missing", "sdk-prepare-marker-missing")
 
