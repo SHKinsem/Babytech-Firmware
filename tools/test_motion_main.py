@@ -16,6 +16,9 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         "http-history-debug", "http-product-stop-failure",
         "http-maintenance-usb", "http-maintenance-uart-release", "http-maintenance-uart-expiry",
         "http-maintenance-busy",
+        "http-ota-auth", "http-ota-controls", "http-ota-write-failure", "http-ota-image-invalid",
+        "http-ota-hash-mismatch", "http-ota-disconnect-abort", "http-ota-start-unsafe",
+        "http-ota-challenge-expiry", "http-ota-session-wrap",
         *tuple("http-product-stop-" + str(i) for i in range(9)))
 
 

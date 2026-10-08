@@ -14,7 +14,7 @@ SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 see
 
 ## Motion 主循环验证（2026-10-08）
 
-`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。24个独立进程包含原八项启动、Intent恢复、工作台/部分CAN TX、目标Stop、reset非停稳证明、缓存重建/幂等查询及SDK crypto回归，12项产品占用/历史结果HTTP测试及4项USB/UART维护路由测试。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
+`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。33个独立进程包含原八项启动/恢复与SDK crypto、12项产品占用/历史结果HTTP、4项USB/UART维护及9项OTA认证/预约/上传失败测试。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
 
 新增 `http-product-guards` 经生产 UART 接受 Clean，核对15个读取入口和动作/配置写入拒绝；合法raw Read可用，畸形Stop/Interrupt/disable不能取消，新增CAN只允许读取，持久任务和Clean等待状态不变。`http-product-stop-0..8` 分别覆盖Stop、Stop-all、queue cancel、单轴/广播disable、raw Stop/Interrupt/disable及control reset；实际广播Abort/Stop和对应F3完整帧必须出现，未停稳不删持久决策、不误报OTA安全，reset的200只表示软件状态清理及Stop提交。`http-product-stop-failure` 注入FE提交失败，核对503、成功Abort和原证据保留。
 
@@ -22,7 +22,9 @@ SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 see
 
 `http-maintenance-usb` 通过实际USB `MAINT BEGIN/END`，`http-maintenance-uart-release/expiry` 通过实际Discovery及维护帧进入预约；明确SDK五轴静止反馈是前置，不用手动设置busy。维护中15读取入口和独立raw `01 1F 6B`可用，16写入/reset入口拒绝，8停止/disable入口逐请求核对完整非查询CAN帧的地址、DLC、payload、顺序及数量。USB无三秒TTL，缺反馈END拒绝，补新反馈后退出；UART持续实际续租超过三秒再释放，或以最后完整帧SDK读取时刻检查2999ms仍有效/3000ms释放。仅两个边界loop冻结host时钟，避免原XMotor/loop延时移动观察，不改变生产预算或其他用例时钟。进入、续租、退出/到期全过程保持完整SDK disk；进入/退出不发取消或运动，退出后无害polling配置恢复。`http-maintenance-busy` 核对实际Clean占用时USB/UART拒绝，不夺取产品任务。不是Brain安装协调器或写入中断、真实USB/UART/CAN/Flash/RTOS验证，也不证明成功认证OTA。
 
-主循环测试发现默认 10 query/s 无法让五轴位置/速度/flags 同时满足原 600ms 停稳窗口。经用户批准，Stop/reset 等待和恢复停稳证明使用 Stop 时冻结的预算窗口（600–5000ms），仍要求全部配置轴反馈严格晚于 Stop 且速度在原静止阈值内；普通动作、启动/回零检查仍为 600ms，查询速率和 3 秒 Stop 等待期限不变。缺反馈、运动和过期仍不能确认。测试 SDK 不代表真实 CAN 采样关联、电气、NVS Flash、RTOS 时序或带电 OTA 安全；上传始终拒绝的 Flash 替身不会伪造安装成功。完整双 main + broker 恢复矩阵和实机验收仍待完成。
+OTA场景通过实际USB `OTA CODE` 和已注册HTTP接口取得nonce、验证管理员HMAC、签名并预约；仅host SDK在完整匹配现行固件PEM后显式替换为一次性测试公钥。测试只保留公开签名，不读取生产私钥、不修改固件公钥；默认SDK不替换，实际系统P-256验签保留。覆盖关闭/等长错PEM/坏公钥/错签名/坏DER/改hash负例、nonce消费和60秒期限，token/IP/字段匹配、START安全重查、Ready期间读取/写入/专用Stop权限，以及120秒正常/回绕到期当轮START拒绝。begin失败、短写、hash不符、SDK end拒绝及256/1024字节后ABORT均检查状态/原因、释放预约和重新认证恢复；ABORT不伪造最终HTTP响应。Uploading没有自动TTL释放，不能据Ready到期测试声称上传超时已恢复。此项不证明生产密钥、ESP32 mbedTLS/TCP、有效固件安装/回滚、UART产品拒绝矩阵或Brain/Motion联合升级。
+
+主循环测试发现默认 10 query/s 无法让五轴位置/速度/flags 同时满足原 600ms 停稳窗口。经用户批准，Stop/reset 等待和恢复停稳证明使用 Stop 时冻结的预算窗口（600–5000ms），仍要求全部配置轴反馈严格晚于 Stop 且速度在原静止阈值内；普通动作、启动/回零检查仍为 600ms，查询速率和 3 秒 Stop 等待期限不变。缺反馈、运动和过期仍不能确认。测试 SDK 不代表真实 CAN 采样关联、电气、NVS Flash、RTOS 时序或带电 OTA 安全；Flash替身可核对begin/write/abort，但end始终拒绝，不伪造安装成功。完整双 main + broker 恢复矩阵和实机验收仍待完成。
 
 ## B1.0 屏幕迁入状态（2026-10-06）
 

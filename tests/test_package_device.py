@@ -79,6 +79,7 @@ class SourceArchiveTest(unittest.TestCase):
                          "tests/fakes/outbox/Arduino.h", "test/test_cloud_session.cpp",
                          "tests/test_brain_main.cpp",
                          "tests/test_motion_main.cpp", "tests/motion_main_http_fixture.h",
+                         "tests/motion_main_ota_fixture.h",
                          "tests/fakes/motion_main/Arduino.h",
                          "tests/fakes/motion_main/WebServer.h", "tests/fakes/motion_main/FakeMotionIo.cpp",
                          "tests/fakes/motion_main/FakeMotionNvs.cpp", "tests/fakes/motion_main/mbedtls/pk.h",

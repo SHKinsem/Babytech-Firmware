@@ -38,6 +38,14 @@ inline void mbedtls_pk_free(mbedtls_pk_context* ctx) {
 }
 
 namespace motion_main_crypto {
+// Explicit test-only trust root substitution for HTTP fixtures. Match the exact
+// supplied firmware PEM first; keep real P-256 parsing and signature verification.
+// Ordinary main/pipe/crypto tests leave these null and use the supplied key.
+inline const char* expectedTestPem = nullptr;
+inline const char* replacementTestPem = nullptr;
+inline unsigned testKeySubstitutions = 0;
+inline unsigned nativeParseSuccesses = 0;
+inline unsigned nativeVerifyCalls = 0;
 // Reject malformed PEM, noncanonical base64 and anything except P-256 SPKI.
 inline bool p256Point(const unsigned char* pem, size_t size,
                          std::vector<unsigned char>& point) {
@@ -98,6 +106,14 @@ inline int mbedtls_pk_parse_public_key(mbedtls_pk_context* ctx,
     mbedtls_pk_free(ctx);
     std::vector<unsigned char> point;
     if (!motion_main_crypto::p256Point(pem, size, point)) return -1;
+    if (motion_main_crypto::expectedTestPem && motion_main_crypto::replacementTestPem &&
+        size == std::strlen(motion_main_crypto::expectedTestPem) + 1 &&
+        std::memcmp(pem, motion_main_crypto::expectedTestPem, size) == 0) {
+        pem = reinterpret_cast<const unsigned char*>(motion_main_crypto::replacementTestPem);
+        size = std::strlen(motion_main_crypto::replacementTestPem) + 1;
+        if (!motion_main_crypto::p256Point(pem, size, point)) return -1;
+        ++motion_main_crypto::testKeySubstitutions;
+    }
 #if defined(__APPLE__)
     CFDataRef data = CFDataCreate(kCFAllocatorDefault, point.data(),
                                    static_cast<CFIndex>(point.size()));
@@ -118,6 +134,7 @@ inline int mbedtls_pk_parse_public_key(mbedtls_pk_context* ctx,
     ctx->native = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
     BIO_free(bio);
 #endif
+    if (ctx->native) ++motion_main_crypto::nativeParseSuccesses;
     return ctx->native ? 0 : -1;
 }
 
@@ -126,6 +143,7 @@ inline int mbedtls_pk_verify(mbedtls_pk_context* ctx, mbedtls_md_type_t type,
                               const unsigned char* signature, size_t signatureSize) {
     if (!ctx || !ctx->native || type != MBEDTLS_MD_SHA256 || !hash ||
         hashSize != 32 || !signature || !signatureSize || signatureSize > 80) return -1;
+    ++motion_main_crypto::nativeVerifyCalls;
 #if defined(__APPLE__)
     if (!SecKeyIsAlgorithmSupported(ctx->native, kSecKeyOperationTypeVerify,
         kSecKeyAlgorithmECDSASignatureDigestX962SHA256)) return -1;

@@ -240,6 +240,7 @@ void uartContext(v4::Pairing pair) {
 }
 #include "motion_main_dual_pipe_fixture.h"
 #include "motion_main_http_fixture.h"
+#include "motion_main_ota_fixture.h"
 
 int main(int argc, char** argv) {
     try {
@@ -259,6 +260,15 @@ int main(int argc, char** argv) {
         else if (which == "http-maintenance-uart-release") motion_main_http::maintenance(seedPair(), 1);
         else if (which == "http-maintenance-uart-expiry") motion_main_http::maintenance(seedPair(), 2);
         else if (which == "http-maintenance-busy") motion_main_http::maintenanceBusy(seedPair());
+        else if (which == "http-ota-auth") { seedPair(); motion_main_ota::auth(); }
+        else if (which == "http-ota-controls" || which == "http-ota-session-wrap")
+            motion_main_ota::controls(seedPair(), which == "http-ota-session-wrap");
+        else if (which == "http-ota-write-failure") { seedPair(); motion_main_ota::imageFailure(0); }
+        else if (which == "http-ota-image-invalid") { seedPair(); motion_main_ota::imageFailure(1); }
+        else if (which == "http-ota-hash-mismatch") { seedPair(); motion_main_ota::imageFailure(2); }
+        else if (which == "http-ota-disconnect-abort") { seedPair(); motion_main_ota::imageFailure(3); }
+        else if (which == "http-ota-start-unsafe") { seedPair(); motion_main_ota::unsafeStart(); }
+        else if (which == "http-ota-challenge-expiry") { seedPair(); motion_main_ota::challengeExpiry(); }
         else if (which.rfind("http-product-stop-", 0) == 0)
             motion_main_http::cancel(seedPair(), unsigned(std::stoul(which.substr(18))), false);
         else {
