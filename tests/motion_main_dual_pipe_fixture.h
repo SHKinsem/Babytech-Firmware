@@ -262,6 +262,9 @@ struct Reporter {
                 ? encodeRequestIdentity(state.cloudResult.request, identity.data(), identity.size()) : 0;
             require(state.cloudResult.kind != MotionResultKind::Ordinary || count, "invalid stored request identity");
             decision["request_identity"] = hex(identity.data(), count);
+            decision["stop_sequence"] = state.cloudResult.stopSequence;
+            decision["stop_command_id"] = state.cloudResult.stopCommandId;
+            decision["stop_execution_id"] = state.cloudResult.stopExecutionId;
             auto responses = doc.createNestedArray("http_responses");
             for (size_t i = httpCursor; i < server.responses.size(); ++i) {
                 const auto& response = server.responses[i];

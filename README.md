@@ -1,5 +1,15 @@
 # Babytech Firmware
 
+## 原执行上的 Cloud Stop（2026-10-08）
+
+父项目 `Test/dual_main_broker_check.py --sanitize --prepare-fixture --prepare-contention cloud` 已通过604步实际双main/原UART/隔离broker与Cloud联测。先真实发行并接受Prepare序号1，再发行独立Stop序号2；Brain按当前Motion STATUS绑定原Product执行ID，二进制UART Stop使用Cloud来源、当前双方boot和准确目标，不混进普通COMMAND。
+
+Stop ACK表示已收到，不等于电机停稳或Flash保存：缺轴/无新反馈时原intent、消费序号1和完整SDK disk仍保留；新鲜静止反馈后原Prepare归档为`stopped/E_STOPPED`，当前Cloud结果才变为`CloudStop`(kind2)/序号2。Prepare的原接受ACK、宝宝/配方和终态仍归属于序号1，不能要求新的当前结果仍是Prepare，也不能把Stop当一条喂养记录。Prepare pipe只读新增Stop序号/命令ID/执行ID，不改生产记录。
+
+原终态三表commit及当前boot stored清对应项后，实际原TTL内Prepare/Stop MQTT重放、各自API重复/同ID冲突均无新UART控制前缀、ACK、CAN运动/停止或NVS写入。Stop重放尾段再次核对原Prepare账本及三表完整快照；Cloud HTTP ACK仅增加已持久保存的UTC`received_at`，其余七字段与原MQTT ACK精确一致。此处只证明SDK软件路径，不是触摸/Flutter/WebSocket、真实Flash/停稳/RTOS/ACL、丢Stop回执恢复、联合升级或B4验收；不改变生产门禁/契约/schema/PIO、默认v3或非食用0。
+
+本轮原HTTP Stop518步、屏幕Stop533步、正常Prepare537步/run6回归通过，均SDK累计失败0；59专项Python、quick Cloud249（既有跳过1）/工具105/旧host22组/SQLite备份通过。独立限定Code/QA复审通过，reviewer复跑Python并以改写原账本/三表的反例核对尾审计，不运行C++或broker；实际联测由主Agent执行，未重建MCU、部署或烧录。
+
 ## 冲奶中三入口竞争与停止（2026-10-08）
 
 父项目测试入口为 `Test/dual_main_broker_check.py --sanitize --prepare-fixture --prepare-contention http|screen`。运行两端实际main、UART原字节及隔离broker/Cloud；在原Prepare接受后，交错提交第二个Cloud Prepare、屏幕Start/Initialize意图，以及六个工作台动作/参数/称重/OTA写入。Cloud忙拒绝不取得发行序号，屏幕不占本地序号或持久pending，工作台诊断仍可读取。之后分别从Motion HTTP或Brain屏幕Stop停止原任务，检查广播Abort后Stop、新鲜停稳反馈、原请求的`stopped/E_STOPPED`终态、三表commit与匹配stored回执，不将Stop提交当完成。
