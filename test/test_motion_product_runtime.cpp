@@ -677,6 +677,82 @@ ContextResult deliverContext(Fixture& fixture, const ProductContext& context) {
     return result;
 }
 
+void temperatureProjection() {
+    for (auto command : {ProductCommand::Clean, ProductCommand::Initialize})
+        scenario("non-feeding active operation keeps current target " + std::to_string(int(command)), [=] {
+            Fixture f(command != ProductCommand::Initialize);
+            auto settemp = request(20, ProductCommand::SetTargetTemp, v4::Source::CloudCommand);
+            settemp.temperatureC = 46;
+            decision(f.deliver(settemp), true, "accepted");
+            decision(f.deliver(request(21, command)), true, "accepted");
+            CHECK(f.runtime.active() && !f.product.active());
+            CHECK(f.product.activeRun().recipe.temperatureC != 46);
+            Status status;
+            status.snapshot = f.product.displaySnapshot();
+            f.runtime.project(status, true);
+            CHECK(status.snapshot.temperatureC == 46);
+        });
+    scenario("v4 idle target does not rewrite context or default v3 snapshot", [] {
+        Fixture f;
+        const auto originalContext = f.store.state().context;
+        auto settemp = request(20, ProductCommand::SetTargetTemp, v4::Source::CloudCommand);
+        settemp.temperatureC = 46;
+        decision(f.deliver(settemp), true, "accepted");
+        CHECK(f.product.targetTemp() == 46 && !f.product.active());
+        CHECK(f.product.context().recipe.temperatureC == context().temperatureC);
+        CHECK(f.store.state().context.profileVersion == originalContext.profileVersion);
+        CHECK(!std::memcmp(f.store.state().context.digest, originalContext.digest, kProductDigestSize));
+        Status status;
+        status.snapshot = f.product.displaySnapshot();
+        CHECK(status.snapshot.temperatureC == context().temperatureC);
+        const auto disk = io.disk;
+        const auto calls = io.calls.size();
+        f.runtime.project(status, true);
+        CHECK(status.snapshot.temperatureC == 46);
+        f.runtime.project(status, false);
+        CHECK(status.snapshot.temperatureC == 46 && !status.snapshot.startEnabled);
+        CHECK(io.disk == disk && io.calls.size() == calls && !f.executor.starts && !f.executor.stops);
+
+        // A later local Prepare still uses the cached recipe, not the display target.
+        auto prepare = request(21);
+        prepare.waterMl = context().waterMl;
+        prepare.temperatureC = context().temperatureC;
+        decision(f.deliver(prepare), true, "accepted");
+        CHECK(f.product.active() && f.product.activeRun().recipe.temperatureC == context().temperatureC);
+        CHECK(f.product.targetTemp() == context().temperatureC);
+        status.snapshot = f.product.displaySnapshot();
+        f.runtime.project(status, true);
+        CHECK(status.snapshot.temperatureC == context().temperatureC);
+    });
+    scenario("v4 active target follows frozen Prepare rather than cached recipe", [] {
+        Fixture f;
+        const auto prepare = request(20, ProductCommand::Prepare, v4::Source::CloudCommand);
+        decision(f.deliver(prepare), true, "accepted");
+        CHECK(prepare.temperatureC != context().temperatureC);
+        Status status;
+        status.snapshot = f.product.displaySnapshot();
+        CHECK(status.snapshot.temperatureC == context().temperatureC);
+        f.runtime.project(status, true);
+        CHECK(status.snapshot.temperatureC == prepare.temperatureC);
+        auto newer = context();
+        ++newer.profileVersion;
+        newer.temperatureC = 47;
+        CHECK(deliverContext(f, newer).status == ContextStatus::Busy);
+        decision(f.deliver(request(21, ProductCommand::SetTargetTemp, v4::Source::CloudCommand)), false, "busy");
+        CHECK(f.product.activeRun().recipe.temperatureC == prepare.temperatureC);
+        status.snapshot = f.product.displaySnapshot();
+        f.runtime.project(status, true);
+        CHECK(status.snapshot.temperatureC == prepare.temperatureC);
+        f.finishFeed(1010, true);
+        CHECK(deliverContext(f, newer).status == ContextStatus::Stored);
+        CHECK(f.product.context().recipe.temperatureC == 47);
+        CHECK(f.product.displaySnapshot().temperatureC == 47);
+        status.snapshot = f.product.displaySnapshot();
+        f.runtime.project(status, true);
+        CHECK(!f.product.active() && status.snapshot.temperatureC == prepare.temperatureC);
+    });
+}
+
 void contexts() {
     scenario("Initialize before context proof uses original mechanical admission", [] {
         Fixture f(false, 0, false, false);
@@ -2806,7 +2882,7 @@ void uartIntegration() {
 
 int main(int argc, char** argv) {
     const std::vector<std::pair<const char*, std::function<void()>>> groups = {
-        {"acceptance", acceptance}, {"contexts", contexts}, {"context_uart", contextUart},
+        {"acceptance", acceptance}, {"temperature", temperatureProjection}, {"contexts", contexts}, {"context_uart", contextUart},
         {"writes", writes}, {"duplicates", duplicates},
         {"rejections", rejections}, {"deferred", deferredRejections}, {"ttl", ttl}, {"terminals", terminals}, {"queues", queues},
         {"manual_owner", manualOwnership}, {"offline_link", offlineAndLink},

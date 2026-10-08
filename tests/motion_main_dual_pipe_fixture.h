@@ -225,6 +225,8 @@ struct Reporter {
         const auto kind = state.slot.kind;
         doc["execution_slot"] = unsigned(kind);
         doc["target_temp"] = product.targetTemp();
+        doc["low_water_pin"] = BABYTECH_LOW_WATER_PIN;
+        doc["low_water_valid"] = lowWaterValid; doc["low_water"] = lowWater;
         doc["cloud_sequence"] = state.cloudSequence; doc["local_sequence"] = state.localSequence;
         doc["recovery_pending"] = productRecovery.executionPending();
         doc["motion_pending"] = productRecovery.motionPending();
@@ -266,7 +268,7 @@ struct Reporter {
 };
 struct Input {
     fake_brain::Bytes uart;
-    unsigned advance = 0, missing = 0, moving = 0;
+    unsigned advance = 0, missing = 0, moving = 0, lowWaterLevel = HIGH;
     bool feedback = false, quit = false;
 };
 Input input(const std::string& line) {
@@ -277,11 +279,13 @@ Input input(const std::string& line) {
     for (JsonPairConst field : object) {
         const std::string key = field.key().c_str();
         require(key == "uart_rx" || key == "advance_ms" || key == "feedback" ||
-                key == "missing_axis" || key == "moving_axis" || key == "quit", "unknown pipe input field");
+                key == "missing_axis" || key == "moving_axis" || key == "low_water_level" || key == "quit",
+                "unknown pipe input field");
     }
     Input result;
     result.feedback = motion_io::automaticFeedback;
     result.missing = motion_io::missingId; result.moving = motion_io::movingId;
+    result.lowWaterLevel = motion_io::lowWaterLevel;
     if (object.containsKey("uart_rx")) {
         require(object["uart_rx"].is<std::string>(), "uart_rx must be hex string");
         result.uart = unhex(object["uart_rx"].as<std::string>(), 8192);
@@ -294,6 +298,10 @@ Input input(const std::string& line) {
     };
     number("advance_ms", result.advance, 1000);
     number("missing_axis", result.missing, 5); number("moving_axis", result.moving, 5);
+    if (object.containsKey("low_water_level")) {
+        require(BABYTECH_LOW_WATER_PIN == 21, "low_water_level requires explicit host water fixture");
+        number("low_water_level", result.lowWaterLevel, 1);
+    }
     for (const char* key : {"feedback", "quit"})
         if (object.containsKey(key)) require(object[key].is<bool>(), "pipe boolean type invalid");
     if (object.containsKey("feedback")) result.feedback = object["feedback"].as<bool>();
@@ -330,6 +338,7 @@ int run(int argc, char** argv) {
         if (next.quit) { reporter.report(args, restored, true); return 0; }
         motion_io::automaticFeedback = next.feedback;
         motion_io::missingId = next.missing; motion_io::movingId = next.moving;
+        motion_io::lowWaterLevel = next.lowWaterLevel;
         motion_io::uartRx.insert(motion_io::uartRx.end(), next.uart.begin(), next.uart.end());
         const auto start = motion_io::now;
         // loop's actual SDK delay(1) counts toward the requested elapsed time.

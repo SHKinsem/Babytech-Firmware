@@ -49,6 +49,33 @@ ProductContext fixtureContext() {
 void tick(unsigned count = 1) {
     for (unsigned i = 0; i < count; ++i) { motion_io::now += 10; loop(); }
 }
+void waterSampling() {
+    seedPair(); setup();
+    check(!lowWaterValid, "boot fabricated stable low-water input");
+    motion_io::freezeClock = true;
+    const auto sample = [] { motion_io::now = lastLowWaterSampleAt + 100; loop(); };
+    if (BABYTECH_LOW_WATER_PIN < 0) {
+        for (unsigned i = 0; i < 8; ++i) sample();
+        check(!lowWaterValid && lowWaterSamples == 0, "unconfigured input became valid");
+    } else {
+        check(BABYTECH_LOW_WATER_PIN == 21, "unexpected host water fixture GPIO");
+        for (unsigned i = 1; i <= 5; ++i) {
+            sample();
+            check(lowWater && lowWaterSamples == i && lowWaterValid == (i == 5),
+                  "high GPIO bypassed five-sample low-water debounce");
+        }
+        motion_io::lowWaterLevel = LOW;
+        motion_io::now = lastLowWaterSampleAt + 99; loop();
+        check(lowWater && lowWaterValid, "GPIO changed before sampling deadline");
+        for (unsigned i = 1; i <= 5; ++i) {
+            sample();
+            check(!lowWater && lowWaterSamples == i && lowWaterValid == (i == 5),
+                  "normal GPIO bypassed five-sample recovery debounce");
+        }
+    }
+    check(!product.executionAuthorized() && !product.canStart(), "water fixture authorized product execution");
+    motion_io::freezeClock = false;
+}
 WebServer::Response http(HTTPMethod method, const char* path, WebServer::Arguments args = {}) {
     const auto before = server.responses.size();
     WebServer::Request req; req.method = method; req.uri = path; req.arguments = std::move(args);
@@ -242,6 +269,25 @@ void uartContext(v4::Pairing pair) {
 #include "motion_main_http_fixture.h"
 #include "motion_main_ota_fixture.h"
 
+void waterInputValidation() {
+    using motion_main_dual_pipe::input;
+    for (const auto* raw : {"{\"low_water_level\":true}", "{\"low_water_level\":2}",
+                           "{\"low_water_level\":-1}", "{\"low_water_level\":\"0\"}",
+                           "{\"low_water_level\":null}", "{\"low_water_level\":0,\"quit\":true}"}) {
+        bool rejected = false;
+        try { input(raw); } catch (const std::runtime_error&) { rejected = true; }
+        check(rejected, "invalid GPIO pipe input was accepted");
+    }
+    if (BABYTECH_LOW_WATER_PIN == 21) {
+        check(input("{\"low_water_level\":0}").lowWaterLevel == LOW &&
+              input("{\"low_water_level\":1}").lowWaterLevel == HIGH, "explicit GPIO pipe level changed");
+    } else {
+        bool rejected = false;
+        try { input("{\"low_water_level\":0}"); } catch (const std::runtime_error&) { rejected = true; }
+        check(rejected, "default pipe allowed unconfigured GPIO input");
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc >= 2 && std::string(argv[1]) == "dual-bridge")
@@ -250,6 +296,7 @@ int main(int argc, char** argv) {
         const std::string which = argv[1];
         fake_motion_nvs::reset();
         if (which == "sdk-crypto") checks += motion_main_crypto_fixture::run();
+        else if (which == "sdk-water-sampling") { waterSampling(); waterInputValidation(); }
         else if (which == "recovery-intent" || which == "recovery-default-budget") recovery(seedPair(), which == "recovery-default-budget");
         else if (which == "http-workbench" || which == "http-partial-tx") workbench(seedPair(), which == "http-partial-tx");
         else if (which == "uart-context-command") uartContext(seedPair());

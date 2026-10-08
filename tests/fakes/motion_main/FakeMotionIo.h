@@ -10,5 +10,6 @@ inline int rejectedOpcode = -1, rejectedPacket = -1;
 inline bool automaticFeedback = false;
 inline unsigned missingId = 0, movingId = 0;
 inline unsigned gpioWrites = 0, canStarts = 0;
+inline int lowWaterLevel = HIGH;
 void reply(uint8_t id, std::initializer_list<uint8_t> data);
 }

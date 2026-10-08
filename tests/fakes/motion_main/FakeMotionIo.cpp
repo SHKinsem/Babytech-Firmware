@@ -6,7 +6,10 @@ void delay(unsigned long ms) { if (!motion_io::freezeClock) motion_io::now += ui
 void delayMicroseconds(unsigned) {}
 void pinMode(int, int) {}
 void digitalWrite(int, int) { ++motion_io::gpioWrites; }
-int digitalRead(int) { return HIGH; } // HX711 absent, never fabricate a weight.
+int digitalRead(int pin) {
+    if (pin == 21) return motion_io::lowWaterLevel; // Explicit host low-water fixture only.
+    return HIGH; // HX711 absent, never fabricate a weight.
+}
 void noInterrupts() { motion_io::critical = true; }
 void interrupts() { motion_io::critical = false; }
 esp_err_t esp_read_mac(uint8_t* out, esp_mac_type_t type) {

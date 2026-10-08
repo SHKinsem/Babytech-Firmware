@@ -412,6 +412,8 @@ void MotionProductRuntime::archiveExecution() {
 }
 
 void MotionProductRuntime::project(Status& status, bool linkConnected, bool recoveringMotion) const {
+    status.snapshot.temperatureC = product_.active()
+        ? product_.activeRun().recipe.temperatureC : product_.targetTemp();
     status.executionAuthorized = product_.executionAuthorized() && store_.ready() && linkConnected &&
         !cloudStopPending_ && !deferred_ && !hardware_.unavailable();
     status.snapshot.startEnabled = status.executionAuthorized && !active() && product_.canStart() &&

@@ -8,15 +8,19 @@
 
 核对每代 native 订阅/retained 配置、实际 HELLO boot nonce、原 JSON 字节/配方/宝宝、失败详情及消费水位。`--build-output` 只编译测试二进制，`--boot-id` 是 SDK 随机种子而非真实 boot ID；不新增固件环境或串口命令。联合 fixture 单独使用有界 3000 次 worker 预算及 Brain SDK 名义写容量 23 bytes；其他测试仍为 1000 次、原 7-byte 短写。7 bytes/15ms UI 节拍不足以在真实 50ms 首帧预算内发送请求，超时主动失效不是 CRC/parser 故障；联合测试不放宽生产预算或吞 CRC。23 bytes 只代表 host SDK 能及时发送，不证明 MCU UART/任务时序。
 
-SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 seed，Cloud session 随机源未随重启轮换。此项不证明凭据 Flash、旧 Cloud session 失效、新 Prepare/Settemp 成功、运行中双板断电、完整 HTTP/OTA 矩阵、真实 CAN/UART/RTOS/ACL 或首次物理激活。默认 v3、非食用宏 0 和生产接口不变，完整 B3.3/B4 仍待验收。
+SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 seed，Cloud session 随机源未随重启轮换。默认无水位配置的联测不证明新Settemp接受；显式水位夹具的限定证据见下文。两种配置均不证明凭据 Flash、旧 Cloud session 失效、新 Prepare、实际加热、运行中双板断电、完整 HTTP/OTA 矩阵、真实 CAN/UART/RTOS/ACL 或首次物理激活。默认 v3、非食用宏 0 和协议字段不变，完整 B3.3/B4 仍待验收。
 
 测试同时输出 SDK 输入/owner 队列与累计发送失败计数。历史回执集中释放的背压依靠重传恢复，失败数独立报告；新命令及重放阶段必须不新增失败，并核对输入/全部队列排空、原 TTL 与 6-byte 控制帧前缀，不能把丢包或未完成发送算作去重成功。这些只读观察不改变生产队列或门禁。
 
 ## Motion 主循环验证（2026-10-08）
 
-`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。33个独立进程包含原八项启动/恢复与SDK crypto、12项产品占用/历史结果HTTP、4项USB/UART维护及9项OTA认证/预约/上传失败测试。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
+`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。34个独立进程包含原八项启动/恢复与SDK crypto、12项产品占用/历史结果HTTP、4项USB/UART维护、9项OTA认证/预约/上传失败及一项GPIO采样/输入校验。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
 
 新增 `http-product-guards` 经生产 UART 接受 Clean，核对15个读取入口和动作/配置写入拒绝；合法raw Read可用，畸形Stop/Interrupt/disable不能取消，新增CAN只允许读取，持久任务和Clean等待状态不变。`http-product-stop-0..8` 分别覆盖Stop、Stop-all、queue cancel、单轴/广播disable、raw Stop/Interrupt/disable及control reset；实际广播Abort/Stop和对应F3完整帧必须出现，未停稳不删持久决策、不误报OTA安全，reset的200只表示软件状态清理及Stop提交。`http-product-stop-failure` 注入FE提交失败，核对503、成功Abort和原证据保留。
+
+`sdk-water-sampling` 默认检查未配置的水位输入不能变成valid；`--water-fixture --case sdk-water-sampling` 仅在host编译时选GPIO21主动高低水位，SDK只提供digitalRead电平，生产100ms/五次去抖计算valid和恢复，pipe输入必须为整数0/1。HX711仍不存在，非食用执行开关仍0，不直接改业务资源或授权。`--water-fixture`不是PIO环境、固件烧录或设备仿真入口。父双main工具的同名参数覆盖低水位拒绝不发行、恢复后Settemp=46接受及目标回流、重复/冲突API和原TTL内重放；实际MQTT ACK、UART及永久账本对照通过，没有新运动或喂养记录。
+
+2026-10-08批准并修复v4目标投影：空闲显示当前设备目标；冲奶显示本次Prepare锁定的温度。原宝宝配方不变，下一Prepare仍使用自身请求/缓存配方。修复仅在`MotionProductRuntime::project`，共享`ProductSession::displaySnapshot`及默认v3保持原样；不添加目标NVS持久化、加热或门禁。`python3 tools/test_motion_product_runtime.py --sanitize --case temperature`检查这一区分及新配置/运行快照隔离；机械/Flash为替身，不证明完整main的新Prepare成功或实际温控。
 
 `http-history-debug` 用Store正常接口预存已停稳历史结果，读取和距离/限制配置写入、队列运行/取消仍可用，RAM/NVS/HTTP读回一致，历史业务记录字节不变。OTA安全前置可达，空manifest返回400而非因历史结果被阻挡；不证明认证成功、OTA预约或Flash安装。新增HTTP夹具显式保存与嵌入草案匹配的轴1=2mm、轴3=40mm/rev，未改变默认标定或证明回零/机械就绪；无匹配标定时boot配置可能未应用，不能拿此夹具当默认就绪证明。完整恢复/认证OTA矩阵及物理联调仍待验证。
 

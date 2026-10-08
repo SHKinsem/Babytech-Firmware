@@ -18,13 +18,15 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         "http-maintenance-busy",
         "http-ota-auth", "http-ota-controls", "http-ota-write-failure", "http-ota-image-invalid",
         "http-ota-hash-mismatch", "http-ota-disconnect-abort", "http-ota-start-unsafe",
-        "http-ota-challenge-expiry", "http-ota-session-wrap",
+        "http-ota-challenge-expiry", "http-ota-session-wrap", "sdk-water-sampling",
         *tuple("http-product-stop-" + str(i) for i in range(9)))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--water-fixture", action="store_true",
+                        help="Host-only GPIO21 active-high low-water input; firmware defaults remain unchanged")
     parser.add_argument("--case", action="append", choices=CASES)
     parser.add_argument("--pipe", action="store_true", help="Run actual Motion main with JSONL host SDK UART I/O")
     parser.add_argument("--seed-history", action="store_true", help="Initially archive four historical LocalTouch results")
@@ -81,6 +83,8 @@ def main():
         flags += ["-Wno-deprecated-declarations", "-Wl,-dead_strip", "-framework", "Security", "-framework", "CoreFoundation"]
     else:
         flags += ["-Wl,--gc-sections"]
+    if args.water_fixture:
+        flags += ["-DBABYTECH_LOW_WATER_PIN=21", "-DBABYTECH_LOW_WATER_ACTIVE_LOW=0"]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
     for include in includes:
