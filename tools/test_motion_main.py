@@ -19,6 +19,7 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         "http-ota-auth", "http-ota-controls", "http-ota-write-failure", "http-ota-image-invalid",
         "http-ota-hash-mismatch", "http-ota-disconnect-abort", "http-ota-start-unsafe",
         "http-ota-challenge-expiry", "http-ota-session-wrap", "sdk-water-sampling",
+        "sdk-result-delete-commit", "sdk-result-delete-applied",
         "http-recovery-guards", "http-recovery-stop-failure",
         *tuple("http-recovery-stop-" + str(i) for i in range(9)),
         *tuple("http-product-stop-" + str(i) for i in range(9)))
@@ -38,6 +39,8 @@ def main():
     parser.add_argument("--state-file", type=Path, help="Persist/restore raw fake SDK NVS snapshot array")
     parser.add_argument("--context-file", type=Path, help="Initial real Cloud feeding_context JSON for bt-main-test")
     parser.add_argument("--boot-id", type=int, help="Host SDK random seed, 1..uint32_max-32 (not literal UART boot ID)")
+    parser.add_argument("--result-delete-fault", choices=("commit", "commit-applied"),
+                        help="Explicit historical host pipe: fail first stored-result deletion commit")
     parser.add_argument("--build-output", type=Path, help="Build binary at PATH and return without executing any scenario")
     args = parser.parse_args()
     if args.prepare_fixture and not args.pipe and (not args.case or
@@ -49,6 +52,8 @@ def main():
         parser.error("sdk-prepare-* cases require explicit --prepare-fixture")
     if args.pipe and args.case:
         parser.error("--pipe and --case are mutually exclusive")
+    if args.result_delete_fault and (not args.pipe or args.prepare_fixture):
+        parser.error("--result-delete-fault requires historical --pipe")
     if not args.pipe and (args.seed_history or args.state_file is not None or
                           args.context_file is not None or args.boot_id is not None):
         parser.error("history/state/context/boot options require --pipe")
@@ -140,7 +145,7 @@ def main():
             if args.seed_history:
                 pipe_args.append("--seed-history")
             for name, value in (("--state-file", args.state_file), ("--context-file", args.context_file),
-                                ("--boot-id", args.boot_id)):
+                                ("--boot-id", args.boot_id), ("--result-delete-fault", args.result_delete_fault)):
                 if value is not None:
                     pipe_args += [name, str(value)]
             subprocess.run(pipe_args, env=env, check=True, timeout=300)

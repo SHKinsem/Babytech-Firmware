@@ -85,7 +85,7 @@ SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 see
 
 ## Motion 主循环验证（2026-10-08）
 
-显式主机 Prepare 场景单独运行，不加入默认45进程或默认历史结果 pipe；新 Prepare 联测使用上方的显式参数：
+显式主机 Prepare 场景单独运行，不加入默认47进程或默认历史结果 pipe；新 Prepare 联测使用上方的显式参数：
 
 ```bash
 python3 tools/test_motion_main.py --sanitize --prepare-fixture \
@@ -98,7 +98,11 @@ python3 tools/test_motion_main.py --sanitize --prepare-fixture \
 
 三个独立进程通过ASan/UBSan，共108项检查；默认34进程亦通过。此处Brain是脚本ReadOnlyLink peer，不运行真实Brain main/Cloud/broker；五段等待不是完整机械脚本或电机运动/传感器闭环证明。完整新Prepare双main链路、真实Flash/CAN/UART/RTOS和B4仍待验证，默认设备非食用宏0及v3不变。
 
-`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。45个独立进程包含原八项启动/恢复与SDK crypto、12项产品占用/历史结果HTTP、4项USB/UART维护、9项OTA认证/预约/上传失败、一项GPIO采样/输入校验及11项恢复中HTTP。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
+`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。47个独立进程包含原八项启动/恢复与SDK crypto、12项产品占用/历史结果HTTP、4项USB/UART维护、9项OTA认证/预约/上传失败、一项GPIO采样/输入校验、11项恢复中HTTP及两项历史结果删除commit故障。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
+
+`sdk-result-delete-commit` / `sdk-result-delete-applied` 经真实结果owner和Store删除原最老一项，分别模拟未持久化、已持久化但commit报错。两者均保持最后验证的RAM四项并锁存既有StorageFault，不反复重写；持久记录分别保留四项/三项，其他NVS不变。这两个SDK用例人工提供匹配receipt，不是Cloud落库证明。父项目 `Test/dual_main_broker_check.py --sanitize --result-delete-fault commit`（或 `commit-applied`）另以隔离broker、真实Cloud三表提交及当前boot UART回执验证相同故障；保留完整SDK disk只重建Motion，Brain不重建，普通读取实际持久结果后补传，不清NVS、不重装。原真实stored回执重放后，未删除项仅写一次；已删除项由Motion实际拒绝且不写盘。显式host pipe故障选项不是PIO组合、设备串口命令或生产门禁；不证明Flash撕裂、正在冲奶时的删除失败或实机B4。
+
+2026-10-08 终版默认47个隔离主循环进程全部通过ASan/UBSan；父联测两种删除故障分别2182/2082步、各四条Cloud记录通过。SDK用例与实际Cloud联测的证据范围保持上述区分，不作为实板验收。
 
 恢复中HTTP测试用正常Motion Store接口预存一条Prepare intent，再运行实际setup/loop；不是Cloud重新发行任务。`http-recovery-guards`覆盖诊断读取、动作/参数/称重/Wi-Fi写入拒绝、合法raw只读与畸形raw不取消、OTA安全拒绝；原请求/事件/执行ID、消费水位及完整SDK disk不变。`http-recovery-stop-0..8`逐进程验证九种既有Stop/disable/reset入口，核对完整广播Abort后Stop及对应F3帧，不因软件reset的200或Stop的202删除intent或宣称停稳。
 

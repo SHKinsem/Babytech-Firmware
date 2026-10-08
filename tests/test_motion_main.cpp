@@ -274,6 +274,40 @@ void uartContext(v4::Pairing pair) {
 #include "motion_main_prepare_fixture.h"
 #include "motion_main_dual_pipe_fixture.h"
 
+void resultDeleteFault(bool applied) {
+    using namespace motion_main_dual_pipe;
+    Options args;
+    args.seedHistory = true;
+    seed(args);
+    setup();
+    const auto original = productState.state();
+    const auto disk = fake_brain::io.disk;
+    ResultDeleteCommitFault fault;
+    fault.arm(applied ? "commit-applied" : "commit");
+    const auto sets = fake_brain::count(fake_brain::Op::Set);
+    const auto commits = fake_brain::count(fake_brain::Op::Commit);
+    CloudReceipt receipt;
+    std::strcpy(receipt.deviceId, device);
+    std::strcpy(receipt.eventId, original.pendingResults[0].eventId);
+    check(resultDelivery.receipt(receipt), "matching archived receipt refused");
+    tick();
+    check(fault.hit && productState.faulted() && !productState.ready() &&
+          sameMotionState(productState.state(), original), "commit fault falsely published new RAM state");
+    check(!resultDelivery.receipt(receipt), "faulted owner accepted another deletion");
+    tick(20);
+    check(fake_brain::count(fake_brain::Op::Set) == sets + 1 &&
+          fake_brain::count(fake_brain::Op::Commit) == commits + 1, "latched deletion rewrote storage");
+    auto expectedDisk = disk;
+    if (applied) expectedDisk["productstate"]["record"] = {fault.candidate, fake_brain::Type::Blob};
+    check(fake_brain::io.disk == expectedDisk, "fault changed unrelated NVS evidence");
+    MotionStateStore fresh;
+    check(fresh.load(pairing()) == MotionLoad::Ready && fresh.state().pendingResultCount == (applied ? 3 : 4),
+          "fresh Store did not read durable deletion truth");
+    for (const auto& frame : motion_io::canTx)
+        check(readOnlyQuery(frame), "historical deletion fault generated a motor action");
+    fake_brain::verifyFaults();
+}
+
 void waterInputValidation() {
     using motion_main_dual_pipe::input;
     for (const auto* raw : {"{\"low_water_level\":true}", "{\"low_water_level\":2}",
@@ -304,6 +338,8 @@ int main(int argc, char** argv) {
         else if (which == "sdk-prepare-flow" || which == "sdk-prepare-home-missing" ||
                  which == "sdk-prepare-marker-missing") motion_main_prepare::run(which);
         else if (which == "sdk-water-sampling") { waterSampling(); waterInputValidation(); }
+        else if (which == "sdk-result-delete-commit" || which == "sdk-result-delete-applied")
+            resultDeleteFault(which == "sdk-result-delete-applied");
         else if (which == "recovery-intent" || which == "recovery-default-budget") recovery(seedPair(), which == "recovery-default-budget");
         else if (which == "http-workbench" || which == "http-partial-tx") workbench(seedPair(), which == "http-partial-tx");
         else if (which == "uart-context-command") uartContext(seedPair());

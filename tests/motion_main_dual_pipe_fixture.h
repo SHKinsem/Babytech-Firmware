@@ -27,7 +27,7 @@ void parse(DynamicJsonDocument& doc, const std::string& raw) {
 struct Options {
     bool seedHistory = false, prepare = false, installation = false, pairCommitFault = false;
     bool pairCommitApplied = false;
-    std::string stateFile, contextFile;
+    std::string stateFile, contextFile, resultDeleteFault;
     uint32_t bootSeed = 0x16543;
 };
 uint32_t decimal(const std::string& text, uint32_t maximum) {
@@ -70,6 +70,10 @@ Options options(int argc, char** argv) {
             } else if (arg == "--context-file") {
                 require(result.contextFile.empty(), "duplicate context-file");
                 result.contextFile = value;
+            } else if (arg == "--result-delete-fault") {
+                require(result.resultDeleteFault.empty() && (value == "commit" || value == "commit-applied"),
+                        "invalid result deletion fault");
+                result.resultDeleteFault = value;
             } else if (arg == "--boot-id") {
                 require(!bootSeen, "duplicate boot-id");
                 bootSeen = true;
@@ -83,6 +87,8 @@ Options options(int argc, char** argv) {
             result.contextFile.empty() && !result.stateFile.empty()),
             "installation pipe requires only explicit state-file");
     require(!result.pairCommitFault || result.installation, "NVS fault requires installation fixture");
+    require(result.resultDeleteFault.empty() || (!result.installation && !result.prepare),
+            "result deletion fault requires historical pipe");
     return result;
 }
 std::string readFile(const std::string& path, size_t limit) {
@@ -239,7 +245,41 @@ void persist(const std::string& path, JsonArrayConst state) {
     }
     std::filesystem::rename(temp, path);
 }
+// Only the explicit host history fixture targets the first result deletion.
+// The production Store still performs the write, fault latch and recovery.
+class ResultDeleteCommitFault {
+public:
+    void arm(const std::string& mode) {
+        if (mode.empty()) return;
+        require(productState.ready() && productState.state().pendingResultCount == 4 &&
+                productState.state().slot.kind == MotionSlotKind::Empty && !fake_brain::io.durableOnSet,
+                "result deletion fault requires four archived results");
+        eventId = productState.state().pendingResults[0].eventId;
+        fake_brain::io.before = [this, applied = mode == "commit-applied"](const fake_brain::Call& call) {
+            if (hit || call.op != fake_brain::Op::Commit || call.name != "productstate") return;
+            const auto& handle = fake_brain::io.handles.at(call.handle);
+            const auto& value = handle.pending.at("record");
+            MotionState next, expected = productState.state();
+            require(value.type == fake_brain::Type::Blob &&
+                    decodeMotionState(value.bytes.data(), value.bytes.size(), next) &&
+                    expected.pendingResultCount == 4 && eventId == expected.pendingResults[0].eventId,
+                    "fault targeted an unexpected write");
+            for (size_t i = 1; i < expected.pendingResultCount; ++i)
+                expected.pendingResults[i - 1] = expected.pendingResults[i];
+            expected.pendingResults[--expected.pendingResultCount] = MotionExecutionSlot{};
+            require(sameMotionState(next, expected), "fault write was not the exact first-result deletion");
+            candidate = value.bytes;
+            hit = true;
+            fake_brain::fail(call.op, call.occurrence, ESP_FAIL, applied);
+        };
+    }
+    ~ResultDeleteCommitFault() { fake_brain::io.before = {}; }
+    bool hit = false;
+    std::string eventId;
+    fake_brain::Bytes candidate;
+};
 struct Reporter {
+    ResultDeleteCommitFault* deleteFault = nullptr;
     size_t uartCursor = 0, canCursor = 0, httpCursor = 0;
     void report(const Options& args, bool restored, bool quit = false) {
         verify(args.prepare);
@@ -252,6 +292,9 @@ struct Reporter {
         const auto kind = state.slot.kind;
         doc["execution_slot"] = unsigned(kind);
         doc["target_temp"] = product.targetTemp();
+        doc["store_ready"] = productState.ready(); doc["store_faulted"] = productState.faulted();
+        doc["nvs_set_count"] = fake_brain::count(fake_brain::Op::Set);
+        doc["nvs_commit_count"] = fake_brain::count(fake_brain::Op::Commit);
         if (args.prepare) {
             doc["prepare_fixture"] = true; doc["execution_authorized"] = product.executionAuthorized();
             doc["queue_run_id"] = queue.runId();
@@ -297,13 +340,11 @@ struct Reporter {
         doc["diagnostic_boot_id"] = debugLog.bootId();
         const auto pair = productBoardLink.verifiedPairing();
         if (args.installation) {
-            doc["store_ready"] = productState.ready(); doc["runtime_paired"] = pair != nullptr;
+            doc["runtime_paired"] = pair != nullptr;
             doc["queue_run_id"] = queue.runId();
             doc["maintenance"] = productBoardLink.maintenance().active();
             doc["install_pair_commit_fault_hit"] = std::any_of(fake_brain::io.faults.begin(),
                 fake_brain::io.faults.end(), [](const auto& fault) { return fault.hit; });
-            doc["nvs_set_count"] = fake_brain::count(fake_brain::Op::Set);
-            doc["nvs_commit_count"] = fake_brain::count(fake_brain::Op::Commit);
             v4::Pairing stored;
             const auto loaded = loadBoardPairing(v4::Role::Motion, stored);
             doc["pairing_load"] = unsigned(loaded);
@@ -321,7 +362,20 @@ struct Reporter {
             }
             require(state.pendingResultCount == 0 && state.slot.kind == MotionSlotKind::Empty,
                     "installation fixture unexpectedly executed product motion");
-        } else require(pair && productState.ready(), "pipe pairing/Store unavailable after boot");
+        } else require(pair && (productState.ready() || (!args.resultDeleteFault.empty() &&
+                    deleteFault && deleteFault->hit && productState.faulted())),
+                    "pipe pairing/Store unavailable after boot");
+        if (!args.resultDeleteFault.empty()) {
+            require(deleteFault, "missing result deletion fault observer");
+            doc["result_delete_fault_hit"] = deleteFault->hit;
+            doc["result_delete_event_id"] = deleteFault->eventId;
+            doc["result_delete_candidate_hex"] = hex(deleteFault->candidate.data(), deleteFault->candidate.size());
+            const auto& bytes = fake_brain::io.disk.at("productstate").at("record").bytes;
+            MotionState persisted;
+            require(decodeMotionState(bytes.data(), bytes.size(), persisted), "invalid durable fault record");
+            auto durableIds = doc.createNestedArray("durable_result_event_ids");
+            for (size_t i = 0; i < persisted.pendingResultCount; ++i) durableIds.add(persisted.pendingResults[i].eventId);
+        }
         auto ids = doc.createNestedArray("result_event_ids");
         auto results = doc.createNestedArray("events");
         for (size_t i = 0; i < state.pendingResultCount; ++i) {
@@ -461,7 +515,10 @@ int run(int argc, char** argv) {
     setup();
     main_install_nvs::PairCommitFault fault;
     fault.arm(args.pairCommitFault, args.pairCommitApplied);
+    ResultDeleteCommitFault deleteFault;
+    deleteFault.arm(args.resultDeleteFault);
     Reporter reporter;
+    reporter.deleteFault = &deleteFault;
     reporter.report(args, restored);
     std::string line;
     while (readLine(line)) {
