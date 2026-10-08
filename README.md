@@ -1,5 +1,15 @@
 # Babytech Firmware
 
+## 冲奶中三入口竞争与停止（2026-10-08）
+
+父项目测试入口为 `Test/dual_main_broker_check.py --sanitize --prepare-fixture --prepare-contention http|screen`。运行两端实际main、UART原字节及隔离broker/Cloud；在原Prepare接受后，交错提交第二个Cloud Prepare、屏幕Start/Initialize意图，以及六个工作台动作/参数/称重/OTA写入。Cloud忙拒绝不取得发行序号，屏幕不占本地序号或持久pending，工作台诊断仍可读取。之后分别从Motion HTTP或Brain屏幕Stop停止原任务，检查广播Abort后Stop、新鲜停稳反馈、原请求的`stopped/E_STOPPED`终态、三表commit与匹配stored回执，不将Stop提交当完成。
+
+Brain host real-pipe新增严格校验的`display_intent`和`stop_click`，仅向SDK view提供输入，决定仍由生产main/owner执行；不是实际触摸命中测试或固件串口命令。Motion Prepare pipe只读上报实际执行ID，UART二进制Stop观察仅在该场景显式启用，核对当前双方boot及原执行目标。竞争场景的单轴五段脚本使用`wait 2000`留出操作时间，正常Prepare仍为`wait 400`，不模拟每个电机动作。
+
+stored后继续排空SDK与全部owner队列，以竞争前独立基线检查控制帧前缀，覆盖Stop提交/归档等待/回执全过程，再检查原ACK/ledger/序号及从Stop开始到结束的全部CAN；不允许晚到的回零/使能/重放。缺轴注入必须显式撤销才恢复反馈，不能放宽生产停稳判定。测试不新增生产门禁、PIO/仿真模式、协议/schema/NVS变更，不代替全阶段故障切点、联合升级/安装或实板Flash/UART/CAN/RTOS/ACL与B4验收。
+
+终版HTTP/屏幕Stop分别519/533步通过，累计SDK发送失败均0；前次屏幕532步曾累计1、阶段未定位，不声称每次零背压或特定重传已经证明。正常Prepare537步/6次queue run、运行中Brain重建400步、默认历史1728步/4结果和Brain13类/16进程回归通过。独立限定Code/QA复审关闭缺轴恢复、尾段审计与过晚前缀基线三项测试P2，reviewer实际运行55项Python，未编译或运行broker。
+
 ## 新 Prepare 双主循环验证（2026-10-08）
 
 父项目 `.venv/bin/python Test/dual_main_broker_check.py --sanitize --prepare-fixture --broker-python /tmp/babytech-mqtt-test-env/bin/python` 已通过517步实际双main/隔离Cloud联测：Motion不预存宝宝配置/历史结果，正常retained经Brain/UART同步；SDK HX711位流由真实HTTP去皮/100g标定得到300g，上传明确单轴/五wait脚本并经原HTTP初始化。实际API发行150ml/42C/25g每100ml，UART原命令/接受与MQTT ACK、永久账本精确一致；五阶段顺序和每段至少400ms、初始化加五段共6次队列运行，生成唯一37.5g目标终态。

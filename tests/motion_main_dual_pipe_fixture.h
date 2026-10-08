@@ -241,6 +241,7 @@ struct Reporter {
         if (args.prepare) {
             doc["prepare_fixture"] = true; doc["execution_authorized"] = product.executionAuthorized();
             doc["queue_run_id"] = queue.runId();
+            doc["execution_id"] = state.slot.executionId;
             doc["demo_stage"] = babytech::display::displayStageKey(demo.stage());
             doc["can_start"] = product.canStart(); doc["stationary"] = productHardware.stationary();
             doc["scale_json"] = std::string(scaleStatusJson().c_str());

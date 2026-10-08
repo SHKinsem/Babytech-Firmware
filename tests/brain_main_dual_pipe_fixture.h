@@ -206,6 +206,8 @@ struct DualStep {
     std::optional<bool> connected;
     std::vector<fake::Packet> incoming;
     nvs::Bytes uart;
+    babytech::display::DisplayIntent intent = babytech::display::DisplayIntent::None;
+    bool stopClick = false;
     bool quit = false;
 };
 DualStep dualParseStep(const std::string& value) {
@@ -215,7 +217,8 @@ DualStep dualParseStep(const std::string& value) {
         const std::string key = item.key().c_str();
         check(key.size() == item.key().size(), "invalid real pipe step key");
         check(key == "advance_ms" || key == "connected" || key == "incoming" ||
-              key == "uart_rx" || key == "quit", "unknown real pipe step field");
+              key == "uart_rx" || key == "quit" || key == "display_intent" || key == "stop_click",
+              "unknown real pipe step field");
     }
     DualStep step;
     if (input.containsKey("advance_ms")) {
@@ -230,6 +233,16 @@ DualStep dualParseStep(const std::string& value) {
     if (input.containsKey("quit")) {
         check(input["quit"].is<bool>(), "invalid real pipe quit flag");
         step.quit = input["quit"].as<bool>();
+    }
+    if (input.containsKey("display_intent")) {
+        const auto intent = dualText(input["display_intent"], 32);
+        check(intent == "initialize" || intent == "start_feeding", "invalid real pipe display intent");
+        step.intent = intent == "initialize" ? babytech::display::DisplayIntent::Initialize
+                                             : babytech::display::DisplayIntent::StartFeeding;
+    }
+    if (input.containsKey("stop_click")) {
+        check(input["stop_click"].is<bool>(), "invalid real pipe stop click");
+        step.stopClick = input["stop_click"].as<bool>();
     }
     if (input.containsKey("uart_rx")) step.uart = dualHexBytes(input["uart_rx"], dualUartLimit);
     if (input.containsKey("incoming")) {
@@ -339,6 +352,8 @@ void runRealBridge(const DualOptions& options) {
         // All parsing and budget checks finish before clock, SDK or UART changes.
         fake::io.now += step.advance;
         if (step.connected) fake::io.connectOk = fake::io.loopOk = *step.connected;
+        fake_main::intent = step.intent;
+        fake_main::stopClick = step.stopClick;
         for (const auto& packet : step.incoming) fake::io.incoming.push_back(packet);
         fake_main::uartRx.insert(fake_main::uartRx.end(), step.uart.begin(), step.uart.end());
         loop();
@@ -352,6 +367,12 @@ void runRealBridge(const DualOptions& options) {
     fake::cleanupLifetimeResources();
 }
 void checkRealBridgeInputs() {
+    const auto start = dualParseStep("{\"display_intent\":\"start_feeding\",\"stop_click\":true}");
+    const auto initialize = dualParseStep("{\"display_intent\":\"initialize\"}");
+    check(start.intent == babytech::display::DisplayIntent::StartFeeding && start.stopClick &&
+          initialize.intent == babytech::display::DisplayIntent::Initialize && !initialize.stopClick &&
+          dualParseStep("{}").intent == babytech::display::DisplayIntent::None,
+          "real pipe altered display intent");
     const auto step = dualParseStep("{\"advance_ms\":1000,\"connected\":false,\"uart_rx\":\"00abff\","
         "\"incoming\":[{\"topic\":\"devices/bt-main-test/config\",\"payload\":\"{ \\\"x\\\": 1 }\",\"retained\":true}]}");
     check(step.advance == 1000 && step.connected == false && step.uart == nvs::Bytes({0, 0xab, 0xff}) &&
@@ -372,6 +393,8 @@ void checkRealBridgeInputs() {
             "{\"advance_ms\":01}", "{\"advance_ms\":+1}", "{\"quit\":1}", "{\"advance_ms\":true}",
             "{\"advance_ms\":-1}", "{\"advance_ms\":1.5}", "{\"advance_ms\":1001}", "{\"connected\":0}",
             "{\"uart_rx\":\"0\"}", "{\"uart_rx\":\"AA\"}", "{\"uart_rx\":null}", "{\"usb\":\"SIM ON\"}",
+            "{\"display_intent\":true}", "{\"display_intent\":\"stop\"}", "{\"display_intent\":\"\"}",
+            "{\"stop_click\":1}", "{\"stop_click\":null}",
             "{\"state\":[]}", "{\"incoming\":{}}", "{\"incoming\":[null]}",
             "{\"incoming\":[{\"topic\":\"devices/bt-main-test/status\",\"payload\":\"{}\",\"retained\":false}]}",
             "{\"incoming\":[{\"topic\":\"devices/bt-main-test/config\",\"payload\":42,\"retained\":false}]}",
