@@ -239,6 +239,7 @@ void uartContext(v4::Pairing pair) {
 }
 }
 #include "motion_main_dual_pipe_fixture.h"
+#include "motion_main_http_fixture.h"
 
 int main(int argc, char** argv) {
     try {
@@ -251,6 +252,11 @@ int main(int argc, char** argv) {
         else if (which == "recovery-intent" || which == "recovery-default-budget") recovery(seedPair(), which == "recovery-default-budget");
         else if (which == "http-workbench" || which == "http-partial-tx") workbench(seedPair(), which == "http-partial-tx");
         else if (which == "uart-context-command") uartContext(seedPair());
+        else if (which == "http-product-guards") motion_main_http::guards(seedPair());
+        else if (which == "http-history-debug") motion_main_http::history(seedPair());
+        else if (which == "http-product-stop-failure") motion_main_http::cancel(seedPair(), 0, true);
+        else if (which.rfind("http-product-stop-", 0) == 0)
+            motion_main_http::cancel(seedPair(), unsigned(std::stoul(which.substr(18))), false);
         else {
         if (which == "paired-boot") seedPair();
         else check(which == "empty-boot", "unknown case");

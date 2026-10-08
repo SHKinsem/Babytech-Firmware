@@ -12,7 +12,9 @@ import sys
 import tempfile
 
 CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-intent", "http-workbench",
-        "http-partial-tx", "uart-context-command", "sdk-crypto")
+        "http-partial-tx", "uart-context-command", "sdk-crypto", "http-product-guards",
+        "http-history-debug", "http-product-stop-failure",
+        *tuple("http-product-stop-" + str(i) for i in range(9)))
 
 
 def main():
