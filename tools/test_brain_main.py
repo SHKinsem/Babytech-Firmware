@@ -15,7 +15,7 @@ import tempfile
 
 CASES = ("simulation-complete", "simulation-stop", "simulation-context",
          "simulation-receipt", "simulation-offline", "simulation-offline-ack-lost", "panel-failure",
-         "bridge-input-validation", "real-readiness")
+         "bridge-input-validation", "real-readiness", "real-results", "real-results-write-failure")
 
 
 def main():
@@ -37,7 +37,7 @@ def main():
     includes = ("tests/fakes/brain_main", "tests/fakes/commissioning",
                 "tests/fakes/brain_state_store", "tests/fakes/cloud_link",
                 "tests/fakes/product_crypto", "shared/ProductBoardLink/test/arduino_stubs",
-                "main-controller/src", "shared/BoardProtocol/src", "shared/ProductBoardLink/src",
+                "main-controller/src", "device-controller/include", "shared/BoardProtocol/src", "shared/ProductBoardLink/src",
                 "shared/BabytechDisplayCore/src", "shared/BabytechCloudLink/src")
     sources = ["shared/BoardProtocol/src/" + name for name in
                ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]

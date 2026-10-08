@@ -5,6 +5,7 @@
 #include "WiFi.h"
 #include "BrainStateStore.h"
 #include "BoardPairingRecord.h"
+#include "MotionResultDelivery.h"
 #include <ArduinoJson.h>
 #include <array>
 #include <cstdio>
@@ -759,6 +760,7 @@ void run(const std::string& name) {
     fake::cleanupLifetimeResources();
 }
 }
+#include "brain_main_result_fixture.h"
 int main(int argc, char** argv) {
     try {
         if (argc >= 2 && std::string(argv[1]) == "real-readiness") {
@@ -767,6 +769,10 @@ int main(int argc, char** argv) {
             std::printf("PASS Brain real-readiness %s\n", argc == 3 ? "max-sequence" : "offline-local"); return 0;
         }
         check(argc == 2, "one isolated case required");
+        if (std::string(argv[1]) == "real-results" || std::string(argv[1]) == "real-results-write-failure") {
+            runRealResults(std::string(argv[1]) == "real-results-write-failure");
+            std::printf("PASS Brain main Motion result recovery %s\n", argv[1]); return 0;
+        }
         if (std::string(argv[1]) == "bridge-input-validation") {
             checkBridgeInputs(); std::puts("PASS Brain bridge input validation"); return 0;
         }

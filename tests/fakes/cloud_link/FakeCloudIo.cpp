@@ -307,7 +307,7 @@ bool PubSubClient::loop() {
 }
 bool PubSubClient::publish(const char* topic, const char* payload, bool retained) {
     fake::io.published.push_back({topic, payload, retained});
-    return connected_ && fake::io.publishOk;
+    return connected_ && fake::io.publishOk && fake::io.rejectedPublishTopic != topic;
 }
 void PubSubClient::deliver(const std::string& topic, const std::string& payload) {
     fake::check(callback_ != nullptr, "MQTT callback not registered");

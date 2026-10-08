@@ -124,7 +124,8 @@ class SourceArchiveTest(unittest.TestCase):
             self.assertTrue((extracted / "main-controller/src/brain_cloud_dispatcher.h").is_file())
             self.assertTrue((extracted / "main-controller/src/brain_context_sync.h").is_file())
             for name in ("device-controller/include/MotionResultDelivery.h",
-                         "main-controller/src/brain_result_delivery.h", "tests/test_result_delivery.cpp"):
+                         "main-controller/src/brain_result_delivery.h", "tests/test_result_delivery.cpp",
+                         "tests/brain_main_result_fixture.h"):
                 self.assertTrue((extracted / name).is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ProductResultQuery.cpp").is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ProductResultQuery.h").is_file())

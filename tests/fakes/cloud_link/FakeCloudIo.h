@@ -45,6 +45,7 @@ struct Io {
     bool connectOk = true;
     bool loopOk = true;
     bool publishOk = true;
+    std::string rejectedPublishTopic;
     bool deferNextQueueSend = false;
     std::deque<bool> subscriptionResults;
     std::vector<Task> tasks;
