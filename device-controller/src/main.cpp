@@ -168,7 +168,9 @@ bool safeForOta() { return !commissioningActive() && !otaWriterBusy() &&
     !motor.operationBusy() && !wifiSetup.busy() && motor.otaMotionSafe(); }
 bool otaHealthy() { return canStarted && wifiSetup.apReady() &&
                            WiFi.softAPIP() != IPAddress(0,0,0,0); }
+#if MOTION_UART_PEER == MOTION_UART_PEER_BRAIN
 uint32_t lastBrainByteAt = 0;
+#endif
 int scaleDoutPin = kScaleDoutPin;
 int scaleSckPin = kScaleSckPin;
 
@@ -699,8 +701,8 @@ void loadScalePins() {
     preferences.end();
     const int doutPin = packed & 0xFF;
     const int sckPin = (packed >> 8) & 0xFF;
-    const bool checksumValid = ((packed >> 16) & 0xFF) == (doutPin ^ 0xFF) &&
-                               ((packed >> 24) & 0xFF) == (sckPin ^ 0xFF);
+    const bool checksumValid = ((packed >> 16) & 0xFF) == static_cast<uint32_t>(doutPin ^ 0xFF) &&
+                               ((packed >> 24) & 0xFF) == static_cast<uint32_t>(sckPin ^ 0xFF);
     if (checksumValid && scalePinsAllowed(doutPin, sckPin)) {
         scaleDoutPin = doutPin;
         scaleSckPin = sckPin;
