@@ -176,6 +176,9 @@ public:
     void demoWatch(uint8_t id, bool enabled) { demoWatched_[id] = enabled; }
     bool demoDriverFault(uint8_t id) const;
     bool demoFlags(uint8_t id, uint8_t& flags, uint32_t& age) const;
+    // Freeze this bounded budget at Stop; normal motion evidence stays 600 ms.
+    uint16_t stopEvidenceWindow() const { return physicalEvidenceWindow(false); }
+    bool stopEvidence(uint8_t id, uint32_t stopAt, uint16_t windowMs) const;
     bool operationBusy() const;
     bool stopping() const { return anyStopPending(); }
     bool hasFault() const { return faultTag_ && strcmp(faultTag_, "none") != 0; }

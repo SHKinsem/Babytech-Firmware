@@ -64,6 +64,9 @@ static void test_demo_polling_does_not_starve_queue_await() {
 static void test_stop_proof_is_not_product_readiness() {
     fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
     assert(motor.begin(4, 5, 500000));
+    auto budget = motor.queries().config();
+    budget.queriesPerSecond = 100; budget.gapMs = 2; budget.timeoutMs = 20;
+    assert(motor.queries().configure(budget)); // Single-axis 600 ms lower bound.
     DemoConfig config; config.axes.push_back({1, 10, 0, true});
     DemoMotorExecutor executor(motor, queue, rotation); executor.configure(config);
     assert(!executor.stopConfirmed());
@@ -127,9 +130,34 @@ static void test_boot_stop_inventory_without_executable_config() {
     std::cout << "PASS boot stop inventory survives rejected parameters without enabling scripts\n";
 }
 
+static void test_default_five_axis_flow_stop() {
+    fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
+    assert(motor.begin(4, 5, 500000)); motor.setAutoQueriesEnabled(false);
+    DemoMotorExecutor executor(motor, queue, rotation); DemoFlowController flow(executor);
+    DemoConfig config;
+    for (uint8_t id = 1; id <= 5; ++id) config.axes.push_back({id, 10, 0, false});
+    assert(flow.apply(config)); executor.configure(config);
+    setMillis(20); flow.stop(20);
+    for (uint8_t id = 1; id <= 5; ++id) {
+        setMillis(20 + 300 * id);
+        injectRx(makePosition(id, 0)); injectRx(makeVelocity(id, 0));
+        const uint8_t flags[] = {0x3A, 1, 0x6B}; injectRx(makeFrame(id, flags, 3)); motor.poll(false);
+        flow.tick(millis());
+        if (id < 5) assert(flow.busy());
+    }
+    assert(!flow.busy() && std::strcmp(flow.reason(), "stopped") == 0);
+    assert(executor.stopConfirmed() && !motor.snapshot(1).positionValid);
+    assert(!executor.evidence(1).fresh && executor.stopEvidence(1).fresh);
+    assert(!flow.stationary()); // Ordinary/start/reference checks still use 600 ms.
+    assert(motor.queries().config().queriesPerSecond == 10);
+    setMillis(6000); assert(!executor.stopConfirmed());
+    std::cout << "PASS actual five-axis Flow Stop uses bounded window, ordinary feedback stays 600 ms\n";
+}
+
 int main() {
     test_demo_polling_does_not_starve_queue_await();
     test_stop_proof_is_not_product_readiness();
+    test_default_five_axis_flow_stop();
     test_boot_stop_inventory_without_executable_config();
     fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
     assert(motor.begin(4,5,500000));

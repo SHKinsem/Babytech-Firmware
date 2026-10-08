@@ -48,6 +48,7 @@ public:
     virtual bool available() const = 0;
     virtual bool configurationValid() const { return true; }
     virtual DemoEvidence evidence(uint8_t id) const = 0;
+    virtual DemoEvidence stopEvidence(uint8_t id) const { return evidence(id); }
     virtual bool start(const DemoScript& script, bool initializing,
                        const std::array<int32_t, 256>& zeros, uint32_t now) = 0;
     virtual DemoExecution execution() const = 0;
@@ -78,7 +79,7 @@ public:
     void tick(uint32_t now);
     babytech::display::DisplaySnapshot snapshot() const;
 private:
-    bool settled(bool zero) const;
+    bool settled(bool zero, bool stopping = false) const;
     bool begin(int index, uint32_t now);
     void fail(DisplayError error, const char* reason, uint32_t now);
     DemoExecutor& executor_;

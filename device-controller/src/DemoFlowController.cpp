@@ -19,11 +19,11 @@ bool DemoFlowController::apply(DemoConfig config) {
     reason_ = config_.configured ? "initialization_required" : "configuration_required";
     return true;
 }
-bool DemoFlowController::settled(bool zero) const {
+bool DemoFlowController::settled(bool zero, bool stopping) const {
     if (!executor_.healthy() || !executor_.configurationValid() || config_.axes.empty()) return false;
     for (const auto& axis : config_.axes) {
         if (zero && !axis.zero) continue;
-        const auto e = executor_.evidence(axis.id);
+        const auto e = stopping ? executor_.stopEvidence(axis.id) : executor_.evidence(axis.id);
         if (!e.fresh || !e.stationary || e.fault) return false;
         const int64_t delta = int64_t(e.position) - zeros_[axis.id];
         if (zero && axis.zero && (delta > axis.tolerance || delta < -axis.tolerance)) return false;
@@ -107,7 +107,7 @@ void DemoFlowController::stop(uint32_t now) {
 }
 void DemoFlowController::tick(uint32_t now) {
     if (resetPending_) {
-        if (settled(false)) {
+        if (settled(false, true)) {
             resetPending_ = false;
             if (reference_) {
                 stage_ = settled(true) ? DisplayStage::Ready : DisplayStage::NotReady;
@@ -121,7 +121,7 @@ void DemoFlowController::tick(uint32_t now) {
     }
     if (stopping_) {
         // Adapter must return post-stop evidence, not the pre-stop sample.
-        if (settled(false)) { stopping_ = false; reason_ = "stopped"; }
+        if (settled(false, true)) { stopping_ = false; reason_ = "stopped"; }
         else if (uint32_t(now - stopAt_) >= 3000) {
             stopping_ = false; reference_ = false; stage_ = DisplayStage::Error;
             error_ = executor_.healthy() ? DisplayError::Unknown : DisplayError::CanFault;

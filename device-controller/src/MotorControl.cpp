@@ -1940,6 +1940,17 @@ MotorControl::Snapshot MotorControl::snapshot(uint8_t id) const {
     s.enableAck=n.enableAck; s.enableTimedOut=n.enableTimedOut;
     s.stopPending=n.stopRequested; s.fault=faultAppliesTo(id); return s;
 }
+bool MotorControl::stopEvidence(uint8_t id, uint32_t stopAt, uint16_t windowMs) const {
+    if (!id || windowMs < kFeedbackFreshMs || windowMs > 5000) return false;
+    const auto& n = nodes_[id];
+    const uint32_t now = millis();
+    return n.positionValid && n.velocityValid && n.flagsValid &&
+        ageWithin(now, n.positionMs, windowMs) && ageWithin(now, n.velocityMs, windowMs) &&
+        ageWithin(now, n.flagsMs, windowMs) &&
+        isStrictlyNewerThan(n.positionMs, stopAt) && isStrictlyNewerThan(n.velocityMs, stopAt) &&
+        isStrictlyNewerThan(n.flagsMs, stopAt) &&
+        n.velocityTenths >= -kStopSpeedTenths && n.velocityTenths <= kStopSpeedTenths;
+}
 bool MotorControl::operationBusy() const {
     if (configPending()) return true;
     if (job_.active || experimentId_ || home_.active) return true;

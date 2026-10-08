@@ -61,26 +61,32 @@ public:
         return !config_ || demoRotationMatches(*config_, rotation_);
     }
     DemoEvidence evidence(uint8_t id) const override {
-        const uint32_t elapsedAfterStop = uint32_t(millis() - stopAt_);
+        return observation(id, 600);
+    }
+    DemoEvidence stopEvidence(uint8_t id) const override {
+        return observation(id, stopWindowMs_);
+    }
+private:
+    DemoEvidence observation(uint8_t id, uint16_t windowMs) const {
         const auto s = motor_.snapshot(id);
         DemoEvidence e;
-        e.fresh = s.positionValid && s.velocityValid;
-        uint8_t flags; uint32_t age;
-        e.fresh = e.fresh && motor_.demoFlags(id, flags, age);
-        if (postStop_) e.fresh = e.fresh && s.positionAge < elapsedAfterStop &&
-            s.velocityAge < elapsedAfterStop;
+        if (postStop_) e.fresh = motor_.stopEvidence(id, stopAt_, windowMs);
+        else {
+            uint8_t flags; uint32_t age;
+            e.fresh = s.positionValid && s.velocityValid && motor_.demoFlags(id, flags, age);
+        }
         e.stationary = s.velocity >= -5 && s.velocity <= 5;
         e.position = s.position; e.fault = motor_.demoDriverFault(id);
         return e;
     }
+public:
     // Stop confirmation is not Ready: enabled holding drivers, invalid zeros,
     // script/rotation mismatch and latched faults do not erase fresh stop proof.
     bool stopConfirmed() const {
         if (!postStop_ || !motor_.ready() || !stopAxisCount_ ||
             queue_.active() || motor_.operationBusy()) return false;
         for (size_t i = 0; i < stopAxisCount_; ++i) {
-            const auto e = evidence(stopAxes_[i]);
-            if (!e.fresh || !e.stationary) return false;
+            if (!motor_.stopEvidence(stopAxes_[i], stopAt_, stopWindowMs_)) return false;
         }
         return true;
     }
@@ -111,6 +117,7 @@ public:
     bool stop() override {
         marking_ = false;
         stopAt_ = millis(); postStop_ = true;
+        stopWindowMs_ = motor_.stopEvidenceWindow();
         return queue_.cancel("demo_stop").code < 300;
     }
     bool reset() override {
@@ -118,6 +125,7 @@ public:
             if (driverRestarted(axis.id)) armed_[axis.id] = false;
         const bool sent = queue_.clearControlState().code < 300;
         stopAt_ = millis(); postStop_ = true; markerFailed_ = false; marking_ = false;
+        stopWindowMs_ = motor_.stopEvidenceWindow();
         return sent;
     }
 private:
@@ -134,6 +142,7 @@ private:
     size_t stopAxisCount_ = 0;
     size_t probe_ = 0;
     uint32_t probeAt_ = 0, stopAt_ = 0;
+    uint16_t stopWindowMs_ = 600;
     bool postStop_ = false;
     std::array<bool, 256> armed_{};
     bool marking_ = false, markSent_ = false, markerFailed_ = false;

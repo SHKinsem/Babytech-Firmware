@@ -448,6 +448,44 @@ void queue_lifecycle() {
     CHECK(!r.motor.operationBusy()); CHECK(r.motor.hasUnsettledMotionEvidence());
     r.fastQueries(); r.prove(); CHECK(r.motor.otaMotionSafe());
 }
+void demo_stop_window() {
+    Rig r;
+    for(uint8_t id=1;id<=5;++id) r.motor.demoWatch(id,true);
+    const auto window=r.motor.stopEvidenceWindow();
+    CHECK(window>=600 && window<=5000);
+    r.feed(1); hw::frame(1,{0x3A,1,0x6B}); r.motor.poll(false);
+    const uint32_t stopAt=hw::now;
+    CHECK(!r.motor.stopEvidence(1,stopAt,window));
+    r.feed(1);
+    CHECK(!r.motor.stopEvidence(1,stopAt,window)); // Pre-Stop flags are not proof.
+    hw::frame(1,{0x3A,1,0x6B}); r.motor.poll(false);
+    CHECK(r.motor.stopEvidence(1,stopAt,window));
+    CHECK(!r.motor.stopEvidence(2,stopAt,window));
+    const auto stamp=hw::now;
+    hw::now=stamp+601;
+    CHECK(!r.motor.snapshot(1).positionValid && !r.motor.snapshot(1).velocityValid);
+    uint8_t flags; uint32_t age;
+    CHECK(!r.motor.demoFlags(1,flags,age));
+    CHECK(r.motor.stopEvidence(1,stopAt,window));
+    auto c=r.motor.queries().config(); c.queriesPerSecond=100;c.gapMs=2;c.timeoutMs=20;
+    CHECK(r.motor.queries().configure(c));
+    CHECK(r.motor.stopEvidenceWindow()<window);
+    CHECK(r.motor.stopEvidence(1,stopAt,window)); // Captured budget does not shrink retroactively.
+    hw::now=stamp+window; CHECK(r.motor.stopEvidence(1,stopAt,window));
+    ++hw::now; CHECK(!r.motor.stopEvidence(1,stopAt,window));
+    c.queriesPerSecond=1;c.gapMs=1000;c.cooldownMs=1000;CHECK(r.motor.queries().configure(c));
+    CHECK(r.motor.stopEvidenceWindow()==5000);
+    CHECK(!r.motor.stopEvidence(1,stopAt,window)); // New budget cannot revive old proof.
+    CHECK(!r.motor.stopEvidence(1,stopAt,5001));
+    CHECK(!r.motor.stopEvidence(1,stopAt,599));
+    r.feed(1,30);hw::frame(1,{0x3A,1,0x6B});r.motor.poll(false);
+    CHECK(!r.motor.stopEvidence(1,stopAt,window));
+    r.feed(1);CHECK(r.motor.stopEvidence(1,stopAt,window));
+    hw::now=UINT32_MAX-2;
+    const auto wrappedStop=hw::now;
+    hw::now=2;r.feed(1,0,false);hw::frame(1,{0x3A,1,0x6B});r.motor.poll(false);
+    CHECK(r.motor.stopEvidence(1,wrappedStop,window));
+}
 int main() {
     struct Case {const char* name;void(*run)();};
     const Case cases[]={{"harmless/held-enable",harmless},{"inherit/reset/raw/owner",inheritance},
@@ -464,7 +502,8 @@ int main() {
         {"latency missing moving timeout",latency_missing_moving},
         {"window expansion cannot revive and 600ms minimum",expansion_and_minimum},
         {"receipt TTL survives shrink but expiry survives expansion",shrink_expand_receipt},
-        {"millis wrap/zero Stop",wrap},{"actual queue lifecycle",queue_lifecycle}};
+        {"millis wrap/zero Stop",wrap},{"actual queue lifecycle",queue_lifecycle},
+        {"Demo Stop budget frozen/bounded/post-Stop only",demo_stop_window}};
     unsigned failed=0;
     for(const auto& test:cases) {
         try {test.run();std::cout<<"PASS "<<test.name<<'\n';}

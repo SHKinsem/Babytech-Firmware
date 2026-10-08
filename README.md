@@ -1,5 +1,11 @@
 # Babytech Firmware
 
+## Motion 主循环验证（2026-10-08）
+
+`python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。八个独立进程覆盖空/已配对启动、默认和显式保存预算下的 Intent 恢复、工作台/部分 CAN TX、目标 Stop、reset 不冒充物理停稳、已有配置 UART 重建/幂等查询及 SDK crypto 校验。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
+
+主循环测试发现默认 10 query/s 无法让五轴位置/速度/flags 同时满足原 600ms 停稳窗口。经用户批准，Stop/reset 等待和恢复停稳证明使用 Stop 时冻结的预算窗口（600–5000ms），仍要求全部配置轴反馈严格晚于 Stop 且速度在原静止阈值内；普通动作、启动/回零检查仍为 600ms，查询速率和 3 秒 Stop 等待期限不变。缺反馈、运动和过期仍不能确认。测试 SDK 不代表真实 CAN 采样关联、电气、NVS Flash、RTOS 时序或带电 OTA 安全；上传始终拒绝的 Flash 替身不会伪造安装成功。完整双 main + broker 恢复矩阵和实机验收仍待完成。
+
 ## B1.0 屏幕迁入状态（2026-10-06）
 
 两块板固件统一在本仓库管理：`main-controller` 已迁入父项目 DisplayController 的屏幕/触摸/UART v3 基线、显示库与 N16R8 板型，`device-controller` 继续作为 Motion。Brain 已通过本地及不含父项目的临时副本构建、LVGL host UI 测试，尚未烧录或验证真实触摸。原 DisplayController 的源码/构建入口已退役，仅保留迁移说明；旧 Brain 网页及其专属配置/页面测试也已移除，历史实现从 Git 获取。
