@@ -23,7 +23,7 @@ void parse(DynamicJsonDocument& doc, const std::string& raw) {
     require(stream.peek() == std::char_traits<char>::eof(), "trailing pipe JSON bytes");
 }
 struct Options {
-    bool seedHistory = false;
+    bool seedHistory = false, prepare = false;
     std::string stateFile, contextFile;
     uint32_t bootSeed = 0x16543;
 };
@@ -43,7 +43,11 @@ Options options(int argc, char** argv) {
     bool bootSeen = false;
     for (int i = 0; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--seed-history") {
+        if (arg == "--prepare-fixture") {
+            require(!result.prepare && BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1,
+                    "Prepare pipe requires explicitly built host fixture");
+            result.prepare = true;
+        } else if (arg == "--seed-history") {
             require(!result.seedHistory, "duplicate seed-history");
             result.seedHistory = true;
         } else {
@@ -63,6 +67,8 @@ Options options(int argc, char** argv) {
             } else throw std::runtime_error("unknown pipe option: " + arg);
         }
     }
+    require(!result.prepare || (!result.seedHistory && result.contextFile.empty()),
+            "Prepare pipe cannot seed history/context");
     return result;
 }
 std::string readFile(const std::string& path, size_t limit) {
@@ -127,12 +133,12 @@ ProductContext context(const Options& args) {
 }
 void seed(const Options& args) {
     const auto pair = pairing();
-    const auto cached = context(args);
+    const auto cached = args.prepare ? ProductContext{} : context(args);
     PairingInstaller installer;
     require(installer.installFirst(v4::Role::Motion, pair) == PairingInstall::Installed,
             "pipe pairing install failed");
     MotionStateStore store;
-    require(store.installInitial(pair, &cached) == MotionWrite::Stored, "pipe Store install failed");
+    require(store.installInitial(pair, args.prepare ? nullptr : &cached) == MotionWrite::Stored, "pipe Store install failed");
     if (!args.seedHistory) return;
     auto brainPair = pair;
     brainPair.role = v4::Role::Brain;
@@ -158,11 +164,15 @@ void seed(const Options& args) {
             store.state().cloudSequence == 0 && store.state().slot.kind == MotionSlotKind::Empty,
             "historical fixture watermarks/slot invalid");
 }
-void snapshot(JsonArray output) {
+bool sdkType(unsigned type, size_t size, bool prepare) {
+    return (type <= 2 && (type != 2 || size == 4)) ||
+        (prepare && ((type == 6 && size == 2) || (type == 7 && size == 4)));
+}
+void snapshot(JsonArray output, bool prepare) {
     for (const auto& space : fake_brain::io.disk) {
         for (const auto& entry : space.second) {
             const auto type = unsigned(entry.second.type);
-            require(type <= 2, "snapshot has unsupported SDK type (expected blob/string/u32)");
+            require(sdkType(type, entry.second.bytes.size(), prepare), "unsupported SDK snapshot type/length");
             auto row = output.createNestedObject();
             row["namespace"] = space.first; row["key"] = entry.first;
             row["type"] = type;
@@ -170,7 +180,7 @@ void snapshot(JsonArray output) {
         }
     }
 }
-void restore(const std::string& path) {
+void restore(const std::string& path, bool prepare) {
     const auto raw = readFile(path, fileLimit);
     DynamicJsonDocument doc(documentCapacity);
     parse(doc, raw);
@@ -182,7 +192,7 @@ void restore(const std::string& path) {
         const auto row = value.as<JsonObjectConst>();
         require(row.size() == 4 && row["namespace"].is<std::string>() &&
                 row["key"].is<std::string>() && row["type"].is<unsigned>() &&
-                !row["type"].is<bool>() && row["type"].as<unsigned>() <= 2 &&
+                !row["type"].is<bool>() &&
                 row["hex"].is<std::string>(), "snapshot row fields invalid");
         const auto space = row["namespace"].as<std::string>();
         const auto key = row["key"].as<std::string>();
@@ -190,16 +200,18 @@ void restore(const std::string& path) {
                 !key.empty() && key.size() <= 15 && key.find('\0') == std::string::npos,
                 "snapshot NVS name invalid");
         require(!disk[space].count(key), "duplicate snapshot NVS key");
-        disk[space][key] = {unhex(row["hex"].as<std::string>(), 4096),
-                            static_cast<fake_brain::Type>(row["type"].as<unsigned>())};
+        auto bytes = unhex(row["hex"].as<std::string>(), 4096);
+        const auto type = row["type"].as<unsigned>();
+        require(sdkType(type, bytes.size(), prepare), "unsupported restored SDK type/length");
+        disk[space][key] = {std::move(bytes), static_cast<fake_brain::Type>(type)};
     }
     require(fake_brain::io.handles.empty(), "handles before snapshot restore");
     fake_brain::io.disk = std::move(disk);
 }
-void verify() {
+void verify(bool prepare) {
     fake_motion_nvs::verifyNoEraseOrInit();
     require(fake_brain::io.handles.empty(), "pipe NVS handle leak");
-    require(!product.executionAuthorized(), "pipe non-consumable macro must remain zero");
+    require(product.executionAuthorized() == prepare, "pipe execution switch disagrees with explicit fixture");
 }
 void persist(const std::string& path, JsonArrayConst state) {
     if (path.empty()) return;
@@ -214,9 +226,9 @@ void persist(const std::string& path, JsonArrayConst state) {
     std::filesystem::rename(temp, path);
 }
 struct Reporter {
-    size_t uartCursor = 0, canCursor = 0;
+    size_t uartCursor = 0, canCursor = 0, httpCursor = 0;
     void report(const Options& args, bool restored, bool quit = false) {
-        verify();
+        verify(args.prepare);
         DynamicJsonDocument doc(documentCapacity);
         doc["now_ms"] = motion_io::now;
         doc["uart_tx"] = motion_io::uartTx.empty() ? std::string() :
@@ -226,6 +238,37 @@ struct Reporter {
         const auto kind = state.slot.kind;
         doc["execution_slot"] = unsigned(kind);
         doc["target_temp"] = product.targetTemp();
+        if (args.prepare) {
+            doc["prepare_fixture"] = true; doc["execution_authorized"] = product.executionAuthorized();
+            doc["queue_run_id"] = queue.runId();
+            doc["demo_stage"] = babytech::display::displayStageKey(demo.stage());
+            doc["can_start"] = product.canStart(); doc["stationary"] = productHardware.stationary();
+            doc["scale_json"] = std::string(scaleStatusJson().c_str());
+            doc["fixture_config"] = motion_main_prepare::config;
+            const auto& state = productState.state();
+            auto barrier = doc.createNestedObject("context_barrier");
+            barrier["present"] = state.context.present; barrier["cleared"] = state.context.cleared;
+            barrier["profile_version"] = state.context.profileVersion; barrier["baby_id"] = state.context.babyId;
+            barrier["powder_g_per_100ml"] = state.context.powderGPer100Ml;
+            barrier["digest"] = hex(state.context.digest, sizeof(state.context.digest));
+            auto decision = doc.createNestedObject("cloud_decision");
+            decision["kind"] = unsigned(state.cloudResult.kind);
+            decision["accepted"] = state.cloudResult.accepted; decision["reason"] = state.cloudResult.reason;
+            decision["outcome"] = unsigned(state.cloudResult.outcome);
+            decision["digest"] = hex(state.cloudResult.digest, sizeof(state.cloudResult.digest));
+            std::array<uint8_t, kRequestIdentityMaxSize> identity{};
+            const auto count = state.cloudResult.kind == MotionResultKind::Ordinary
+                ? encodeRequestIdentity(state.cloudResult.request, identity.data(), identity.size()) : 0;
+            require(state.cloudResult.kind != MotionResultKind::Ordinary || count, "invalid stored request identity");
+            decision["request_identity"] = hex(identity.data(), count);
+            auto responses = doc.createNestedArray("http_responses");
+            for (size_t i = httpCursor; i < server.responses.size(); ++i) {
+                const auto& response = server.responses[i];
+                auto row = responses.createNestedObject();
+                row["path"] = response.uri; row["status"] = response.status; row["body"] = response.body;
+                row["handler_called"] = response.handlerCalled; row["send_calls"] = response.sendCalls;
+            }
+        }
         doc["low_water_pin"] = BABYTECH_LOW_WATER_PIN;
         doc["low_water_valid"] = lowWaterValid; doc["low_water"] = lowWater;
         doc["cloud_sequence"] = state.cloudSequence; doc["local_sequence"] = state.localSequence;
@@ -258,19 +301,23 @@ struct Reporter {
             auto data = row.createNestedArray("data");
             for (size_t n = 0; n < frame.data_length_code; ++n) data.add(frame.data[n]);
         }
-        snapshot(doc.createNestedArray("snapshot"));
+        snapshot(doc.createNestedArray("snapshot"), args.prepare);
         require(!doc.overflowed(), "pipe report overflow");
         persist(args.stateFile, doc["snapshot"].as<JsonArrayConst>());
         std::string encoded;
         serializeJson(doc, encoded);
         std::cout << "DUAL_MOTION=" << encoded << '\n' << std::flush;
         uartCursor = motion_io::uartTx.size(); canCursor = motion_io::canTx.size();
+        httpCursor = server.responses.size();
     }
 };
 struct Input {
     fake_brain::Bytes uart;
     unsigned advance = 0, missing = 0, moving = 0, lowWaterLevel = HIGH;
     bool feedback = false, quit = false;
+    int32_t hxRaw = motion_io::hxRaw;
+    bool hxReady = motion_io::hxReady;
+    std::optional<WebServer::Request> http;
 };
 Input input(const std::string& line) {
     DynamicJsonDocument doc(65536);
@@ -280,7 +327,9 @@ Input input(const std::string& line) {
     for (JsonPairConst field : object) {
         const std::string key = field.key().c_str();
         require(key == "uart_rx" || key == "advance_ms" || key == "feedback" ||
-                key == "missing_axis" || key == "moving_axis" || key == "low_water_level" || key == "quit",
+                key == "missing_axis" || key == "moving_axis" || key == "low_water_level" || key == "quit" ||
+                (BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1 &&
+                 (key == "hx_raw" || key == "hx_ready" || key == "http")),
                 "unknown pipe input field");
     }
     Input result;
@@ -307,6 +356,38 @@ Input input(const std::string& line) {
         if (object.containsKey(key)) require(object[key].is<bool>(), "pipe boolean type invalid");
     if (object.containsKey("feedback")) result.feedback = object["feedback"].as<bool>();
     if (object.containsKey("quit")) result.quit = object["quit"].as<bool>();
+    if (object.containsKey("hx_raw")) {
+        const auto value = object["hx_raw"];
+        require(value.is<int32_t>() && !value.is<bool>() && value.as<int32_t>() > -8388608 &&
+                value.as<int32_t>() < 8388607, "HX raw must be signed 24-bit sample");
+        result.hxRaw = value.as<int32_t>();
+    }
+    if (object.containsKey("hx_ready")) {
+        require(object["hx_ready"].is<bool>(), "HX ready must be bool");
+        result.hxReady = object["hx_ready"].as<bool>();
+    }
+    if (object.containsKey("http")) {
+        const auto request = object["http"];
+        require(request.is<JsonObjectConst>() && request.size() == 3 &&
+                request["path"].is<std::string>() && request["method"].is<std::string>() &&
+                request["arguments"].is<JsonObjectConst>(), "invalid HTTP SDK request");
+        WebServer::Request parsed;
+        parsed.uri = request["path"].as<std::string>();
+        const auto method = request["method"].as<std::string>();
+        require((method == "GET" || method == "POST") && !parsed.uri.empty() &&
+                parsed.uri.size() <= 128 && parsed.uri.find('\0') == std::string::npos,
+                "invalid HTTP SDK method/path");
+        parsed.method = method == "GET" ? HTTP_GET : HTTP_POST;
+        for (JsonPairConst argument : request["arguments"].as<JsonObjectConst>()) {
+            require(argument.value().is<std::string>(), "HTTP SDK argument must be text");
+            const std::string key = argument.key().c_str(), value = argument.value().as<std::string>();
+            require(!key.empty() && key.size() <= 64 && key.size() == argument.key().size() &&
+                    value.size() <= 8192 && value.find('\0') == std::string::npos,
+                    "invalid HTTP SDK argument length");
+            parsed.arguments.emplace_back(key, value);
+        }
+        result.http = std::move(parsed);
+    }
     require(!result.quit || (result.uart.empty() && !result.advance && object.size() == 1),
             "quit must be a standalone input");
     return result;
@@ -326,10 +407,11 @@ int run(int argc, char** argv) {
     const auto args = options(argc, argv);
     fake_motion_nvs::reset();
     const bool restored = !args.stateFile.empty() && std::filesystem::exists(args.stateFile);
-    if (restored) restore(args.stateFile);
+    if (restored) restore(args.stateFile, args.prepare);
     else seed(args);
     require(fake_brain::io.handles.empty(), "pipe fixture handles before setup");
     motion_io::randomCounter = args.bootSeed;
+    motion_io::flowFeedback = args.prepare;
     setup();
     Reporter reporter;
     reporter.report(args, restored);
@@ -340,6 +422,8 @@ int run(int argc, char** argv) {
         motion_io::automaticFeedback = next.feedback;
         motion_io::missingId = next.missing; motion_io::movingId = next.moving;
         motion_io::lowWaterLevel = next.lowWaterLevel;
+        motion_io::hxRaw = next.hxRaw; motion_io::hxReady = next.hxReady;
+        if (next.http) server.enqueue(*next.http);
         motion_io::uartRx.insert(motion_io::uartRx.end(), next.uart.begin(), next.uart.end());
         const auto start = motion_io::now;
         // loop's actual SDK delay(1) counts toward the requested elapsed time.

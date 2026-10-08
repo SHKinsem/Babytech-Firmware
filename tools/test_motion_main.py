@@ -38,9 +38,11 @@ def main():
     parser.add_argument("--boot-id", type=int, help="Host SDK random seed, 1..uint32_max-32 (not literal UART boot ID)")
     parser.add_argument("--build-output", type=Path, help="Build binary at PATH and return without executing any scenario")
     args = parser.parse_args()
-    if args.prepare_fixture and (args.pipe or not args.case or
+    if args.prepare_fixture and not args.pipe and (not args.case or
                                  any(case not in PREPARE_CASES for case in args.case)):
-        parser.error("--prepare-fixture requires explicit sdk-prepare-* cases, not --pipe")
+        parser.error("--prepare-fixture requires explicit sdk-prepare-* cases when not using --pipe")
+    if args.prepare_fixture and args.pipe and (args.case or args.seed_history or args.context_file):
+        parser.error("Prepare pipe cannot seed history/context or run named cases")
     if args.case and any(case in PREPARE_CASES for case in args.case) and not args.prepare_fixture:
         parser.error("sdk-prepare-* cases require explicit --prepare-fixture")
     if args.pipe and args.case:
@@ -131,6 +133,8 @@ def main():
             return
         if args.pipe:
             pipe_args = [str(binary), "dual-bridge"]
+            if args.prepare_fixture:
+                pipe_args.append("--prepare-fixture")
             if args.seed_history:
                 pipe_args.append("--seed-history")
             for name, value in (("--state-file", args.state_file), ("--context-file", args.context_file),

@@ -265,10 +265,10 @@ void uartContext(v4::Pairing pair) {
     check(!product.executionAuthorized() && productState.state().slot.kind == MotionSlotKind::Empty, "setting temperature authorized physical feed");
 }
 }
-#include "motion_main_dual_pipe_fixture.h"
 #include "motion_main_http_fixture.h"
 #include "motion_main_ota_fixture.h"
 #include "motion_main_prepare_fixture.h"
+#include "motion_main_dual_pipe_fixture.h"
 
 void waterInputValidation() {
     using motion_main_dual_pipe::input;

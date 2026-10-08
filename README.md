@@ -1,5 +1,13 @@
 # Babytech Firmware
 
+## 新 Prepare 双主循环验证（2026-10-08）
+
+父项目 `.venv/bin/python Test/dual_main_broker_check.py --sanitize --prepare-fixture --broker-python /tmp/babytech-mqtt-test-env/bin/python` 已通过517步实际双main/隔离Cloud联测：Motion不预存宝宝配置/历史结果，正常retained经Brain/UART同步；SDK HX711位流由真实HTTP去皮/100g标定得到300g，上传明确单轴/五wait脚本并经原HTTP初始化。实际API发行150ml/42C/25g每100ml，UART原命令/接受与MQTT ACK、永久账本精确一致；五阶段顺序和每段至少400ms、初始化加五段共6次队列运行，生成唯一37.5g目标终态。
+
+原TERMINAL字节经Brain发布，独立SQLite读事务核对事件/喂养记录/永久receipt三表已提交。独立开关一直扣留stored，包括API线程等待期间，核对Motion仍保留结果后才放行；真实匹配UART CloudReceipt删除对应项，宝宝屏障、消费水位、原接受决策与请求摘要不变。Prepare成功来自终态，不能把原接受ACK的outcome改成喂养完成。重复API、同ID改水量冲突及原TTL内原MQTT重放不新增UART决策/ACK、执行或记录；SDK入队失败0。
+
+仅显式host `--pipe --prepare-fixture` 编译既有非食用宏1；默认历史pipe仍0。SDK pipe只提供HX信号、排队HTTP和只读观察，普通模式拒绝这些输入及称重标量类型；Prepare模式快照仅额外允许实际去皮使用的U16(6)/I32(7)并校验长度。不新增PIO环境、设备仿真、固件串口命令或生产协议/schema/NVS格式。默认历史联测1728步/4结果及34个Motion main场景亦通过；单轴五wait和SDK I/O不是整机电机运动、真实App/Flash/UART/CAN/RTOS/ACL或B4验收，运行中断电和完整组合恢复仍开放。
+
 ## 双主循环结果与命令验证（2026-10-08）
 
 父项目 `Test/dual_main_broker_check.py --sanitize` 通过 host-only `test_brain_main.py --real-pipe` 与 `test_motion_main.py --pipe`，运行两端生产 `setup()/loop()` 的独立进程。SDK UART 原字节双向中继，Brain 原始 MQTT 发布/订阅映射到隔离 Paho/broker 和真实 Cloud；不使用脚本 Motion peer、伪造 ACK 或落库回执。首次通过正常 Motion Store 接口准备四条历史 LocalTouch 完成/失败结果，不执行新冲奶。
@@ -14,7 +22,7 @@ SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 see
 
 ## Motion 主循环验证（2026-10-08）
 
-显式主机 Prepare 场景单独运行，不加入默认34进程或已有历史结果 pipe：
+显式主机 Prepare 场景单独运行，不加入默认34进程或默认历史结果 pipe；新 Prepare 联测使用上方的显式参数：
 
 ```bash
 python3 tools/test_motion_main.py --sanitize --prepare-fixture \
