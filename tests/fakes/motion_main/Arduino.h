@@ -97,6 +97,9 @@ inline std::vector<uint8_t> uartTx;
 inline std::string usbTx;
 inline unsigned restarts = 0;
 inline bool critical = false;
+inline bool freezeClock = false;
+inline size_t uartReadCount = 0;
+inline uint32_t lastUartReadAt = 0;
 }
 class HardwareSerial {
 public:
@@ -108,7 +111,12 @@ public:
     explicit operator bool() const { return true; }
     int available() { return int(rx().size()); }
     int availableForWrite() { return 64; }
-    int read() { auto& q = rx(); if (q.empty()) return -1; const int c = q.front(); q.pop_front(); return c; }
+    int read() {
+        auto& q = rx(); if (q.empty()) return -1;
+        const int c = q.front(); q.pop_front();
+        if (number_ != 0) { ++motion_io::uartReadCount; motion_io::lastUartReadAt = motion_io::now; }
+        return c;
+    }
     size_t write(const uint8_t* p, size_t n) {
         if (number_ == 0) motion_io::usbTx.append(reinterpret_cast<const char*>(p), n);
         else motion_io::uartTx.insert(motion_io::uartTx.end(), p, p + n);

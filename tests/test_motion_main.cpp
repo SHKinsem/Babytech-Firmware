@@ -255,6 +255,10 @@ int main(int argc, char** argv) {
         else if (which == "http-product-guards") motion_main_http::guards(seedPair());
         else if (which == "http-history-debug") motion_main_http::history(seedPair());
         else if (which == "http-product-stop-failure") motion_main_http::cancel(seedPair(), 0, true);
+        else if (which == "http-maintenance-usb") motion_main_http::maintenance(seedPair(), 0);
+        else if (which == "http-maintenance-uart-release") motion_main_http::maintenance(seedPair(), 1);
+        else if (which == "http-maintenance-uart-expiry") motion_main_http::maintenance(seedPair(), 2);
+        else if (which == "http-maintenance-busy") motion_main_http::maintenanceBusy(seedPair());
         else if (which.rfind("http-product-stop-", 0) == 0)
             motion_main_http::cancel(seedPair(), unsigned(std::stoul(which.substr(18))), false);
         else {

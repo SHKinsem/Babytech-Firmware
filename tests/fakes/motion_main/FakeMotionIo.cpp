@@ -2,7 +2,7 @@
 #include <esp_mac.h>
 #include <stdexcept>
 unsigned long millis() { return motion_io::now; }
-void delay(unsigned long ms) { motion_io::now += uint32_t(ms); }
+void delay(unsigned long ms) { if (!motion_io::freezeClock) motion_io::now += uint32_t(ms); }
 void delayMicroseconds(unsigned) {}
 void pinMode(int, int) {}
 void digitalWrite(int, int) { ++motion_io::gpioWrites; }

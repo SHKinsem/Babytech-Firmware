@@ -238,4 +238,250 @@ void history(v4::Pairing pair) {
     check(fake_motion_ota::update.beginCalls == 0 && !motion_io::restarts,
           "historical OTA admission wrote Flash/restarted");
 }
+
+void usb(const char* line, const char* response) {
+    const size_t before = motion_io::usbTx.size();
+    const std::string input = std::string(line) + "\n";
+    motion_io::usbRx.insert(motion_io::usbRx.end(), input.begin(), input.end());
+    tick(12);
+    if (!motion_io::usbRx.empty() ||
+        motion_io::usbTx.substr(before).find(std::string("[maint] ") + response + "\n") == std::string::npos)
+        throw std::runtime_error(std::string(line) + " expected=" + response + " output=" + motion_io::usbTx.substr(before));
+}
+
+// A support peer uses actual discovery/maintenance codecs over the SDK UART.
+// No direct assignment to Motion's reservation state or manual maintenance ACK.
+class MaintenancePeer {
+    v4::Parser parser_;
+    BoardDiscovery discovery_;
+    BoardMaintenance maintenance_;
+    size_t offset_ = 0;
+    unsigned renewals_ = 0;
+    uint32_t lastLeaseAt_ = 0;
+    static size_t send(const v4::Frame& frame) {
+        uint8_t bytes[v4::kMaxFrame];
+        const auto size = v4::encode(frame, bytes, sizeof bytes);
+        check(size != 0, "support frame encoding failed");
+        motion_io::uartRx.insert(motion_io::uartRx.end(), bytes, bytes + size);
+        return size;
+    }
+public:
+    explicit MaintenancePeer(v4::Pairing pair) {
+        pair.role = v4::Role::Brain;
+        std::swap(pair.localPhysicalId, pair.peerPhysicalId);
+        check(discovery_.begin(pair.role, pair.localPhysicalId, 0x200000006ULL,
+              DiscoveryPairState::Ready, &pair) &&
+              maintenance_.begin(pair.role, pair.localPhysicalId, 0x200000006ULL, &pair),
+              "support peer begin failed");
+    }
+    void step() {
+        bool leaseSent = false;
+        size_t leaseSize = 0;
+        v4::Frame frame;
+        while (offset_ < motion_io::uartTx.size()) {
+            if (!parser_.push(motion_io::uartTx[offset_++], motion_io::now, frame)) continue;
+            if (frame.kind == v4::Kind::Discovery) discovery_.receive(frame, motion_io::now);
+            else if (frame.kind == v4::Kind::MigrationMaintenance) maintenance_.receive(frame, motion_io::now);
+        }
+        discovery_.poll(motion_io::now);
+        maintenance_.poll(motion_io::now);
+        if (const auto* outgoing = discovery_.outgoing()) { send(*outgoing); discovery_.queued(); }
+        if (const auto* outgoing = maintenance_.outgoing()) {
+            if (outgoing->payload[0] == 2) ++renewals_;
+            leaseSent = outgoing->payload[0] == 1 || outgoing->payload[0] == 2;
+            leaseSize = send(*outgoing); maintenance_.queued();
+        }
+        const auto readsBefore = motion_io::uartReadCount;
+        tick();
+        if (leaseSent) {
+            check(motion_io::uartRx.empty() && motion_io::uartReadCount - readsBefore == leaseSize,
+                  "lease frame not consumed exactly once in its recorded loop");
+            lastLeaseAt_ = motion_io::lastUartReadAt;
+        }
+    }
+    void acquire(bool allowed) {
+        check(discovery_.request("bt-motion-main", motion_io::now), "discovery request failed");
+        for (unsigned i = 0; i < 100 && discovery_.result().state != DiscoveryState::Found; ++i) step();
+        check(discovery_.result().state == DiscoveryState::Found &&
+              discovery_.result().pairingState == DiscoveryPairState::Ready,
+              "actual main discovery response missing");
+        check(maintenance_.request("bt-motion-main", discovery_.result(),
+              "0123456789abcdef0123456789abcdef", motion_io::now), "UART reservation request failed");
+        for (unsigned i = 0; i < 100 && maintenance_.state() == BoardMaintenanceState::Pending; ++i) step();
+        check(maintenance_.state() == (allowed ? BoardMaintenanceState::Active : BoardMaintenanceState::Unsafe) &&
+              productBoardLink.maintenanceActive() == allowed, "actual main reservation decision mismatch");
+    }
+    void release() {
+        check(maintenance_.release(motion_io::now), "UART reservation release request failed");
+        for (unsigned i = 0; i < 100 && maintenance_.state() == BoardMaintenanceState::Releasing; ++i) step();
+        check(maintenance_.state() == BoardMaintenanceState::Released &&
+              !productBoardLink.maintenanceActive(), "UART release did not unlock Motion");
+    }
+    void keepAlive() {
+        for (unsigned i = 0; i < BoardMaintenance::kLeaseMs / 10 + 50; ++i) {
+            step();
+            check(maintenance_.state() == BoardMaintenanceState::Active &&
+                  productBoardLink.maintenanceActive(), "healthy renewing lease expired");
+        }
+        check(renewals_ >= 5, "keepalive did not send actual UART renewals");
+    }
+    void expire() {
+        check(lastLeaseAt_ && productBoardLink.maintenanceActive() && motion_io::uartRx.empty(),
+              "expiry lacks last consumed lease frame");
+        // Freeze only the host SDK clock for each boundary iteration; XMotor
+        // delays and loop's delay(1) otherwise move time during the observation.
+        // No peer poll or release is sent, and ordinary tests keep advancing time.
+        check(uint32_t(motion_io::now - lastLeaseAt_) < BoardMaintenance::kLeaseMs - 1,
+              "fixture already passed exact expiry boundary");
+        motion_io::now = lastLeaseAt_ + BoardMaintenance::kLeaseMs - 1;
+        motion_io::freezeClock = true;
+        loop();
+        check(productBoardLink.maintenanceActive() &&
+              motion_io::now == lastLeaseAt_ + BoardMaintenance::kLeaseMs - 1,
+              "reservation released before 3000 ms");
+        ++motion_io::now;
+        loop();
+        check(!productBoardLink.maintenanceActive(), "reservation not released at 3000 ms");
+        motion_io::freezeClock = false;
+    }
+};
+
+void commissioningGuards() {
+    const auto saved = fake_brain::io.disk;
+    const auto before = motion_io::canTx.size();
+    const auto generation = motor.movementGeneration();
+    reads();
+    for (const auto& route : std::array<Route, 16>{{
+            {"/api/enable", {{"id", "1"}, {"enabled", "1"}}},
+            {"/api/enable-all", {{"enabled", "1"}}},
+            {"/api/command", {{"hex", "01F3AB01006B"}}},
+            {"/api/move", {{"id", "1"}, {"angle", "10"}, {"speed", "6"}}},
+            {"/api/limits", {}}, {"/api/polling", {{"enabled", "0"}}},
+            {"/api/scale/config", {}}, {"/api/scale/tare", {}}, {"/api/scale/calibrate", {}},
+            {"/api/control/reset", {}}, {"/api/query-budget", {}}, {"/api/sync-settings", {}},
+            {"/api/queue/start", {{"program", "wait 100"}, {"repeat", "1"}}},
+            {"/api/motor-distance", {{"id", "1"}, {"rotationDistance", "8"}}},
+            {"/api/demo/config", {{"json", demoConfigJson.c_str()}}},
+            {"/api/demo/action", {{"action", "initialize"}}}
+        }}) expect(route, 409, "commissioning_active");
+    expect({"/api/command", {{"hex", "01FE980000"}}}, 400);
+    // 1F is supported read-only firmware info; idle probing never emits it.
+    const auto beforeRead = motion_io::canTx.size();
+    expect({"/api/command", {{"hex", "011F6B"}}}, 202);
+    unsigned explicitReads = 0;
+    for (size_t i = beforeRead; i < motion_io::canTx.size(); ++i) {
+        const auto& f = motion_io::canTx[i];
+        if (f.extd && !f.rtr && f.identifier == (1u << 8) &&
+            f.data_length_code == 2 && f.data[0] == 0x1f && f.data[1] == 0x6b) ++explicitReads;
+    }
+    check(explicitReads == 1, "explicit raw Read was missing/duplicated or replaced by idle queries");
+    expect({"/api/ota/session", {}}, 409, "machine_not_safe");
+    check(commissioningActive() && !safeForOta() && fake_brain::io.disk == saved &&
+          motor.movementGeneration() == generation && !queue.active(),
+          "commissioning guards changed reservation, NVS or motion");
+    for (size_t i = before; i < motion_io::canTx.size(); ++i)
+        check(readOnlyQuery(motion_io::canTx[i]) ||
+              (motion_io::canTx[i].extd && !motion_io::canTx[i].rtr &&
+               motion_io::canTx[i].identifier == (1u << 8) && motion_io::canTx[i].data_length_code == 2 &&
+               motion_io::canTx[i].data[0] == 0x1f && motion_io::canTx[i].data[1] == 0x6b),
+              "commissioning read/rejection sent mutation or cancellation");
+}
+
+void commissioningStops() {
+    const auto saved = fake_brain::io.disk;
+    const auto before = motion_io::canTx.size();
+    const auto generation = motor.movementGeneration();
+    for (size_t i = 0; i < cancellations.size() - 1; ++i) {
+        const auto start = motion_io::canTx.size();
+        // Without a product owner queue/cancel is the ordinary debug 200 route.
+        expect(cancellations[i], i == 2 ? 200 : 202);
+        check(commissioningActive(), "HTTP cancellation silently released maintenance");
+        struct Expected { uint8_t id; std::vector<uint8_t> bytes; };
+        std::vector<Expected> expected;
+        if (i == 1 || i == 2 || i == 4) {
+            expected.push_back({0, {0x9c, 0x48, 0x6b}});
+            expected.push_back({0, {0xfe, 0x98, 0, 0x6b}});
+        } else if (i == 0 || i == 5) expected.push_back({1, {0xfe, 0x98, 0, 0x6b}});
+        else if (i == 6) {
+            expected.push_back({1, {0x9c, 0x48, 0x6b}});
+            expected.push_back({1, {0xfe, 0x98, 0, 0x6b}});
+        }
+        if (i == 3 || i == 4 || i == 7) expected.push_back({uint8_t(i == 4 ? 0 : 1), {0xf3, 0xab, 0, 0, 0x6b}});
+        size_t seen = 0;
+        for (size_t n = start; n < motion_io::canTx.size(); ++n) {
+            const auto& f = motion_io::canTx[n];
+            if (readOnlyQuery(f)) continue;
+            check(seen < expected.size(), "maintenance cancellation emitted extra non-query frame");
+            const auto& e = expected[seen++];
+            check(f.extd && !f.rtr && f.identifier == uint32_t(e.id) << 8 &&
+                  f.data_length_code == e.bytes.size() && std::equal(e.bytes.begin(), e.bytes.end(), f.data),
+                  "maintenance cancellation frame target/DLC/payload/order differ");
+        }
+        check(seen == expected.size(), "maintenance cancellation omitted a required frame");
+    }
+    onlyReadOrStop(before, true);
+    check(fake_brain::io.disk == saved && motor.movementGeneration() == generation &&
+          !safeForOta() && !fake_motion_ota::update.beginCalls && !motion_io::restarts,
+          "maintenance Stop changed durable state/new motion or admitted OTA");
+}
+
+void stationaryReplies() {
+    // Fresh SDK CAN packets, not directly assigned controller safety flags.
+    for (uint8_t id = 1; id <= 5; ++id) {
+        motion_io::reply(id, {0x36, 0, 0, 0, 0, 0, 0x6b});
+        motion_io::reply(id, {0x35, 0, 0, 0, 0x6b});
+        motion_io::reply(id, {0x3a, 1, 0x6b});
+    }
+    tick();
+}
+void maintenance(v4::Pairing pair, unsigned mode) {
+    fake_motion_ota::updateAvailable = true;
+    savedDebugProfile(); setup(); stationaryReplies();
+    const auto durable = fake_brain::io.disk;
+    const auto enteringCan = motion_io::canTx.size();
+    const auto generation = motor.movementGeneration();
+    MaintenancePeer peer(pair);
+    if (mode == 0) { usb("MAINT BEGIN", "active"); check(commissioningSession.active(), "USB session not active"); }
+    else peer.acquire(true);
+    check(fake_brain::io.disk == durable && motor.movementGeneration() == generation,
+          "maintenance acquisition changed durable state or motion");
+    for (size_t i = enteringCan; i < motion_io::canTx.size(); ++i)
+        check(readOnlyQuery(motion_io::canTx[i]), "maintenance acquisition cancelled or moved a motor");
+    commissioningGuards(); commissioningStops();
+    const auto exitingCan = motion_io::canTx.size();
+    if (mode == 0) {
+        tick(310);
+        check(commissioningSession.active(), "USB session incorrectly expired as UART lease");
+        usb("MAINT END", "unsafe");
+        check(commissioningSession.active(), "unsafe USB END silently cleared session");
+        // Explicit post-Stop CAN SDK replies, not elapsed time, establish safety.
+        stationaryReplies(); usb("MAINT END", "inactive");
+    } else if (mode == 1) { peer.keepAlive(); peer.release(); }
+    else {
+        peer.keepAlive(); peer.expire();
+    }
+    check(!commissioningActive() && fake_brain::io.disk == durable,
+          "maintenance exit changed durable state or left routes locked");
+    check(motor.movementGeneration() == generation, "maintenance exit replayed motion");
+    for (size_t i = exitingCan; i < motion_io::canTx.size(); ++i)
+        check(readOnlyQuery(motion_io::canTx[i]), "maintenance exit emitted cancellation/mutation");
+    const auto persisted = fake_brain::io.disk;
+    expect({"/api/polling", {{"enabled", "0"}}}, 200);
+    check(fake_brain::io.disk == persisted && !motor.autoQueriesEnabled(),
+          "maintenance exit failed harmless debug restoration");
+}
+
+void maintenanceBusy(v4::Pairing pair) {
+    savedDebugProfile(); setup(); BrainPeer productPeer(pair); productPeer.connect(); clean(productPeer);
+    const auto saved = fake_brain::io.disk;
+    const auto execution = std::string(productState.state().slot.executionId);
+    const auto before = motion_io::canTx.size();
+    usb("MAINT BEGIN", "unsafe");
+    MaintenancePeer support(pair); support.acquire(false);
+    check(!commissioningActive() && productRuntime.ownsMotion() &&
+          execution == productState.state().slot.executionId && fake_brain::io.disk == saved,
+          "refused maintenance stole product ownership/evidence");
+    for (size_t i = before; i < motion_io::canTx.size(); ++i)
+        check(readOnlyQuery(motion_io::canTx[i]), "refused maintenance emitted Stop/mutation");
+}
 } // namespace motion_main_http

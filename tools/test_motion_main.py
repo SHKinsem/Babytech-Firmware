@@ -14,6 +14,8 @@ import tempfile
 CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-intent", "http-workbench",
         "http-partial-tx", "uart-context-command", "sdk-crypto", "http-product-guards",
         "http-history-debug", "http-product-stop-failure",
+        "http-maintenance-usb", "http-maintenance-uart-release", "http-maintenance-uart-expiry",
+        "http-maintenance-busy",
         *tuple("http-product-stop-" + str(i) for i in range(9)))
 
 
