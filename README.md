@@ -8,9 +8,11 @@
 
 2026-10-08 真实模式就绪上报：公开 `can_start` 不再固定 false，而按新鲜且空闲停稳的 Motion Start 权限、双方精确同步的宝宝/配方，以及现有冲突请求/维护状态计算。每次周期/probe 编码在 UI loop 重新求值，避免前面的配置/命令回调使旧布尔值过时。屏幕离线启动不依赖 Cloud，Cloud 发行不依赖本地触控序号容量；信息性 Stop 查询、历史待上传结果本身不阻止下一瓶，Motion 队列满与机械检查仍生效。Unknown 动作不重放，本地持久 pending 不因此清除；未开启非食用能力的 Motion 仍不能启动，不代表食用或实机验收。下面按日期排列的开发证据中固定 false 是当时边界，以本段为当前行为。
 
-`python3 tools/test_brain_main.py --sanitize` 包含11个case/12个独立进程。`--case real-readiness` 的离线缓存/最大本地序号fixture运行生产main和实际UART适配器，测试peer返回编码身份、配置证明和状态；各38个probe核对true/false，覆盖配置更新/墓碑、接受后旧idle、ACK未入队、本地Stop及恢复。历史outbox/信息性查询不过拦，屏幕离线实际发送，本地序号满不挡Cloud。测试peer不是Motion main，SDK/物理时序/Flash/broker仍不在此证据内，真实Motion默认非食用能力仍关闭。
+`python3 tools/test_brain_main.py --sanitize` 包含12个case/15个独立进程。`--case real-readiness` 的离线缓存/最大本地序号fixture运行生产main和实际UART适配器，测试peer返回编码身份、配置证明和状态；各38个probe核对true/false，覆盖配置更新/墓碑、接受后旧idle、ACK未入队、本地Stop及恢复。历史outbox/信息性查询不过拦，屏幕离线实际发送，本地序号满不挡Cloud。测试peer不是Motion main，SDK/物理时序/Flash/broker仍不在此证据内，真实Motion默认非食用能力仍关闭。
 
 `--case real-results --case real-results-write-failure` 将生产Brain主循环/网络/UART适配器接到实际Motion `ReadOnlyLink`、`MotionStateStore` 和 `MotionResultDelivery`。夹具用Store正常接口预存四条历史完成/失败结果（Cloud/local交替），不模拟执行电机。测试事件发布失败、无新鲜STATUS/配置同步时补传、当前宝宝已换而原JSON/宝宝/配方不变、非stored/错设备/不匹配回执、UART回执丢失、Motion owner重建及删除commit失败后重载；精确回执逐项删除，非outbox持久证据保持不变，Brain不发Command/Stop。SDK/NVS/网络/时钟是替身，stored是注入输入，不证明Cloud事务、真实broker、Motion setup/loop、双板重启、CAN或Flash原子性；不能据此关闭完整B3.3/B4。
+
+`--case real-auth-offline` 用三个独立冷启动进程分别模拟MQTT CONNECT被拒绝、command订阅失败、config订阅失败。每次重连继续注入同一拒绝；本地Initialize在NotReady阶段派发，脚本Motion回覆Ready后才派发Prepare，生产Brain保留原宝宝/配方及序号，两个动作各只发送一次。持续三次连接尝试后仍无Cloud会话/消息处理/发布、屏幕本地可用，不擦配对或改凭据。覆盖实际main/网络worker/本地owner和UART适配器，不复制派发逻辑；SDK拒绝返回值和Motion回复是测试输入，不证明真实密码校验、Mosquitto ACL、机械执行、触摸布局、Flash或RTOS时序。
 
 App/屏幕文案唯一手写来源仍在父项目 `Shared/feeding_flow_ui/feeding_flow_ui.json`。父项目 `python3 Tools/generate_feeding_flow_ui.py` 自动更新本仓库生成 header，`--check` 检查内容及源哈希；生成物须随固件 commit 提交。独立 clone 编译锁定的 header，不读取父项目或下载文案，禁止手改 generated 文件。
 

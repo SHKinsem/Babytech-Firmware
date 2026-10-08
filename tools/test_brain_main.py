@@ -15,7 +15,8 @@ import tempfile
 
 CASES = ("simulation-complete", "simulation-stop", "simulation-context",
          "simulation-receipt", "simulation-offline", "simulation-offline-ack-lost", "panel-failure",
-         "bridge-input-validation", "real-readiness", "real-results", "real-results-write-failure")
+         "bridge-input-validation", "real-readiness", "real-results", "real-results-write-failure",
+         "real-auth-offline")
 
 
 def main():
@@ -90,6 +91,10 @@ def main():
                 # a mutation of the production Store's live/private state.
                 subprocess.run([str(binary), case, "max-sequence"], env=env, check=True, timeout=30)
                 process_count += 1
+            if case == "real-auth-offline":
+                for failure in ("command-subscribe-failed", "config-subscribe-failed"):
+                    subprocess.run([str(binary), case, failure], env=env, check=True, timeout=30)
+                    process_count += 1
     print("PASS production Brain main: " + str(len(args.case or CASES)) +
           " cases, " + str(process_count) + " isolated processes")
 

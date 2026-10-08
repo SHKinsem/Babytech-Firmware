@@ -761,8 +761,14 @@ void run(const std::string& name) {
 }
 }
 #include "brain_main_result_fixture.h"
+#include "brain_main_offline_fixture.h"
 int main(int argc, char** argv) {
     try {
+        if (argc >= 2 && std::string(argv[1]) == "real-auth-offline") {
+            check(argc == 2 || (argc == 3 && (std::string(argv[2]) == "command-subscribe-failed" ||
+                  std::string(argv[2]) == "config-subscribe-failed")), "invalid offline fixture variant");
+            runColdOffline(argc == 3 ? argv[2] : "connect-rejected"); return 0;
+        }
         if (argc >= 2 && std::string(argv[1]) == "real-readiness") {
             check(argc == 2 || (argc == 3 && std::string(argv[2]) == "max-sequence"), "invalid readiness fixture variant");
             runRealReadiness(argc == 3);
