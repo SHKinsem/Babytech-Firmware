@@ -32,6 +32,8 @@ public:
     // registration/removal is UI-loop-owned and independent of product handlers.
     void setContextHandler(ContextHandler handler, void* context);
     void setReceiptHandler(ReceiptHandler handler, void* context);
+    // Re-evaluate on the UI loop at encoding, after inbound config/commands.
+    void setCanStartHandler(bool (*handler)()) { canStartHandler_ = handler; }
     // Mode changes rotate immediately, invalidating old-mode queued traffic.
     void resetCommandSession() { if (started_) cloud_.requestReconnect(); }
     bool publishSimulationEvent(const v4::Pairing& pairing, const boardlink::TerminalEvent& event);
@@ -85,6 +87,7 @@ private:
     ContextHandler contextHandler_ = nullptr;
     void* contextOwner_ = nullptr;
     ReceiptHandler receiptHandler_ = nullptr;
+    bool (*canStartHandler_)() = nullptr;
     void* receiptOwner_ = nullptr;
     bool started_ = false;
     bool attempted_ = false;

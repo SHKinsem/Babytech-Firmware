@@ -62,6 +62,22 @@ const char* cloudAdmission() {
 }
 babytech::brain::BrainCloudDispatcher<babytech::display::ControllerLink,
   babytech::brain::BrainNetwork> cloudDispatcher(controllerLink, network, installNowMs, cloudAdmission);
+bool cloudCanStart() {
+  const uint32_t nowMs = uint32_t(millis());
+  if (cloudAdmission() || cloudDispatcher.ordinaryBusy() || cloudDispatcher.resultPending() || cloudDispatcher.stopInFlight() ||
+      localDispatcher.busy() || controllerLink.intentPending() ||
+      controllerLink.stopSendState() == babytech::boardlink::StopSendState::Pending ||
+      !controllerLink.connected(nowMs) || !contextSync.canPrepare()) return false;
+  const auto* status = controllerLink.lastTelemetry();
+  if (simulationModeGuard.unresolved(status, true, controllerLink.lastTelemetryReceivedAtMs(), nowMs)) return false;
+  const auto& context = productState.state().context;
+  // Cloud issuance is independent of the local touch sequence and connectivity.
+  // Motion owns mechanical readiness, including remaining result queue capacity.
+  return status && uint32_t(nowMs - controllerLink.lastTelemetryReceivedAtMs()) < 1500 &&
+    !status->motionBusy && !status->activeExecutionId[0] && status->stationary &&
+    status->snapshot.startEnabled && status->feedingContextConfigured &&
+    status->contextVersion == context.profileVersion && !std::strcmp(status->babyId, context.babyId);
+}
 babytech::brain::BrainTouchStop touchStop;
 void localStopEvent(lv_event_t* event) {
   if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
@@ -197,6 +213,7 @@ void setup() {
   network.setProductHandlers(dispatchCloudCommand, dispatchCloudStop, nullptr);
   network.setContextHandler(receiveCloudContext, nullptr);
   network.setReceiptHandler(receiveCloudReceipt, nullptr);
+  network.setCanStartHandler(cloudCanStart);
   controllerLink.setTerminalHandler(receiveMotionTerminal);
   cloudDispatcher.setPrepareReadyHandler(contextReady);
   cloudDispatcher.setConfigurationYieldHandler(yieldConfiguration);
@@ -225,7 +242,7 @@ void loop() {
     // at its deadline rather than first recording a simulated success.
   }
   network.poll(controllerLink.lastTelemetry(), controllerLink.connected(nowMs), nowMs,
-               controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false,
+               controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), cloudCanStart(),
                simulating() ? &simulation->status() : nullptr);
   if (simulation) simulation->poll(uint32_t(millis()));
   // Drain a queued urgent Stop before installer/recovery may perform Flash I/O.

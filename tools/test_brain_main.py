@@ -15,7 +15,7 @@ import tempfile
 
 CASES = ("simulation-complete", "simulation-stop", "simulation-context",
          "simulation-receipt", "simulation-offline", "simulation-offline-ack-lost", "panel-failure",
-         "bridge-input-validation")
+         "bridge-input-validation", "real-readiness")
 
 
 def main():
@@ -81,9 +81,17 @@ def main():
         if args.pipe:
             subprocess.run([str(binary), "broker-bridge"], env=env, check=True, timeout=300)
             return
+        process_count = 0
         for case in args.case or CASES:
             subprocess.run([str(binary), case], env=env, check=True, timeout=30)
-    print("PASS production Brain main: " + str(len(args.case or CASES)) + " cases")
+            process_count += 1
+            if case == "real-readiness":
+                # Separate boot: max sequence is a valid persisted fixture, not
+                # a mutation of the production Store's live/private state.
+                subprocess.run([str(binary), case, "max-sequence"], env=env, check=True, timeout=30)
+                process_count += 1
+    print("PASS production Brain main: " + str(len(args.case or CASES)) +
+          " cases, " + str(process_count) + " isolated processes")
 
 
 if __name__ == "__main__":

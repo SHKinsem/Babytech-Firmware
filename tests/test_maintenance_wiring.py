@@ -265,7 +265,8 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(stopDrain, loop.index("installer.poll("))
         self.assertLess(stopDrain, loop.index("pendingRecovery.poll("))
         self.assertLess(loop.index("view.poll(uint32_t(millis()))"), loop.index("network.poll("))
-        self.assertIn("controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), false", loop)
+        self.assertIn("controllerLink.lastTelemetryReceivedAtMs(), controllerLink.connected(nowMs), cloudCanStart()", loop)
+        self.assertIn("network.setCanStartHandler(cloudCanStart)", setup)
         ordinary = function_body(self.brain, "const char* cloudAdmission()")
         self.assertIn("productState.ready()", ordinary)
         self.assertIn("productState.state().pending", ordinary)
@@ -273,6 +274,19 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertIn("cloudDispatcher.stop(stop, generation, nowMs)", stop)
         for forbidden in ("productState", "commissioningSession", "pendingRecovery", "network.connected"):
             self.assertNotIn(forbidden, stop)
+
+    def test_public_readiness_does_not_add_local_sequence_network_or_history_gates(self):
+        readiness = function_body(self.brain, "bool cloudCanStart()")
+        for expected in ("cloudAdmission()", "contextSync.canPrepare()", "status->snapshot.startEnabled",
+                         "cloudDispatcher.resultPending()", "StopSendState::Pending",
+                         "simulationModeGuard.unresolved("):
+            self.assertIn(expected, readiness)
+        for forbidden in ("localDispatcher.canStart", "localSequence", "network.connected",
+                          "eventPending", "resultDelivery", "clearPending", "requestCommand"):
+            self.assertNotIn(forbidden, readiness)
+        network = (ROOT / "main-controller/src/brain_network.cpp").read_text()
+        encoding = function_body(network, "bool BrainNetwork::publishStatus(")
+        self.assertIn("canStartHandler_ ? canStartHandler_() : canStart", encoding)
 
     def test_local_touch_shares_store_uart_without_boot_replay_or_cloud_gate(self):
         self.assertEqual(self.brain.count("BrainStateStore productState;"), 1)

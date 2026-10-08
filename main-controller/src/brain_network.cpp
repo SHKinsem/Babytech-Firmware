@@ -115,7 +115,8 @@ bool BrainNetwork::publishStatus(const boardlink::Status* lastMotion, bool motio
                               session, *simulation, challenge);
     else
         writeStatus(status_.to<JsonObject>(), cloud_.deviceId(), FIRMWARE_VERSION,
-                    lastMotion, freshMotion, session, challenge, commandsEnabled, canStart);
+                    lastMotion, freshMotion, session, challenge, commandsEnabled,
+                    canStartHandler_ ? canStartHandler_() : canStart);
     if (!encodeStatusJson(status_, payload_, sizeof(payload_))) return false;
     CloudLink::StatusPublishOptions options;
     options.probeReply = challenge != nullptr;

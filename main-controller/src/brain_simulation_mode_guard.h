@@ -7,8 +7,8 @@
 
 namespace babytech { namespace brain {
 
-// Protects only a developer mode change, not normal product admission. An
-// acceptance ACK is not proof that the physical action has already stopped.
+// Tracks accepted motion for mode changes and public readiness, not command
+// admission. An acceptance ACK is not proof the physical action has stopped.
 class BrainSimulationModeGuard {
 public:
     void observeAccepted(const boardlink::CommandResult& result, uint32_t nowMs,

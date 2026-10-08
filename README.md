@@ -4,7 +4,11 @@
 
 两块板固件统一在本仓库管理：`main-controller` 已迁入父项目 DisplayController 的屏幕/触摸/UART v3 基线、显示库与 N16R8 板型，`device-controller` 继续作为 Motion。Brain 已通过本地及不含父项目的临时副本构建、LVGL host UI 测试，尚未烧录或验证真实触摸。原 DisplayController 的源码/构建入口已退役，仅保留迁移说明；旧 Brain 网页及其专属配置/页面测试也已移除，历史实现从 Git 获取。
 
-默认 Brain 仍是 UART v3 屏幕角色；成对选择 v4 后已接 Wi-Fi/MQTT、状态投影、Cloud命令单次UART派发、优先Stop和屏幕本地持久请求。屏幕 Initialize 无需Cloud/宝宝缓存，Start使用已保存且与Motion匹配的有效缓存；两者由Motion最终机械准入。Motion v4 产品命令接收/持久执行和监督Stop已接验证路径，默认非食用产品开关仍为0，公开`can_start=false`保留。Brain自动配置缓存/同步及双板记录与Cloud回执运行桥接已接；组合恢复、最终安装激活和实机验收未完成。Motion默认路径仍直连Cloud，v4不启动产品MQTT，独立调试网页保留。完整迁移按父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md` B1–B4推进，不把构建成功写成产品迁移完成。
+默认 Brain 仍是 UART v3 屏幕角色；成对选择 v4 后已接 Wi-Fi/MQTT、状态投影、Cloud命令单次UART派发、优先Stop和屏幕本地持久请求。屏幕 Initialize 无需Cloud/宝宝缓存，Start使用已保存且与Motion匹配的有效缓存；两者由Motion最终机械准入。Motion v4 产品命令接收/持久执行和监督Stop已接验证路径，默认非食用产品开关仍为0。Brain自动配置缓存/同步及双板记录与Cloud回执运行桥接已接；组合恢复、最终安装激活和实机验收未完成。Motion默认路径仍直连Cloud，v4不启动产品MQTT，独立调试网页保留。完整迁移按父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md` B1–B4推进，不把构建成功写成产品迁移完成。
+
+2026-10-08 真实模式就绪上报：公开 `can_start` 不再固定 false，而按新鲜且空闲停稳的 Motion Start 权限、双方精确同步的宝宝/配方，以及现有冲突请求/维护状态计算。每次周期/probe 编码在 UI loop 重新求值，避免前面的配置/命令回调使旧布尔值过时。屏幕离线启动不依赖 Cloud，Cloud 发行不依赖本地触控序号容量；信息性 Stop 查询、历史待上传结果本身不阻止下一瓶，Motion 队列满与机械检查仍生效。Unknown 动作不重放，本地持久 pending 不因此清除；未开启非食用能力的 Motion 仍不能启动，不代表食用或实机验收。下面按日期排列的开发证据中固定 false 是当时边界，以本段为当前行为。
+
+`python3 tools/test_brain_main.py --sanitize` 现为9个case/10个独立进程。新增 `--case real-readiness` 的离线缓存/最大本地序号fixture运行生产main和实际UART适配器，测试peer返回编码身份、配置证明和状态；各38个probe核对true/false，覆盖配置更新/墓碑、接受后旧idle、ACK未入队、本地Stop及恢复。历史outbox/信息性查询不过拦，屏幕离线实际发送，本地序号满不挡Cloud。测试peer不是Motion main，SDK/物理时序/Flash/broker仍不在此证据内，真实Motion默认非食用能力仍关闭。
 
 App/屏幕文案唯一手写来源仍在父项目 `Shared/feeding_flow_ui/feeding_flow_ui.json`。父项目 `python3 Tools/generate_feeding_flow_ui.py` 自动更新本仓库生成 header，`--check` 检查内容及源哈希；生成物须随固件 commit 提交。独立 clone 编译锁定的 header，不读取父项目或下载文案，禁止手改 generated 文件。
 
