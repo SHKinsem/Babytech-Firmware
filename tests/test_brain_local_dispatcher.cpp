@@ -189,7 +189,8 @@ struct Rig {
         link.beforeRequest = [this](const CommandMessage& message, uint32_t) {
             CHECK(store.ready() && store.state().pending);
             CHECK(sameProductRequest(store.state().pendingRequest, message.request));
-            CHECK(nvs::count(Op::Commit) >= 2);
+            // A simulated reboot resets call counters, not the durable record.
+            CHECK(nvs::count(Op::Commit) >= 1);
             BrainState persisted;
             const auto& bytes = nvs::io.disk.at("brainstate").at("record").bytes;
             CHECK(decodeBrainState(bytes.data(), bytes.size(), persisted));
@@ -477,9 +478,11 @@ void timing() {
             if (age < 1500) CHECK(rig.start());
             else unchanged(rig, [&] { CHECK(!rig.start()); });
         });
-    for (bool wrap : {false, true}) for (uint32_t elapsed : {0u, 120u, 4949u, 4950u, 5000u, 5001u})
-        scenario("Flash consumes original TTL / " + std::to_string(wrap) + "/" + std::to_string(elapsed), [=] {
-            Rig rig; nowMs = wrap ? UINT32_MAX - 10u : 100u; rig.link.receivedAt = nowMs;
+    for (bool initialize : {false, true}) for (bool wrap : {false, true})
+        for (uint32_t elapsed : {0u, 120u, 4949u, 4950u, 5000u, 5001u})
+        scenario("Flash consumes original TTL / " + std::to_string(initialize) + "/" +
+                 std::to_string(wrap) + "/" + std::to_string(elapsed), [=] {
+            Rig rig(initialize); nowMs = wrap ? UINT32_MAX - 10u : 100u; rig.link.receivedAt = nowMs;
             const uint32_t started = nowMs; const unsigned commit = nvs::count(Op::Commit);
             nvs::io.before = [&](const nvs::Call& call) {
                 if (call.op == Op::Commit && call.occurrence == commit + 1) {
@@ -487,15 +490,20 @@ void timing() {
                     rig.link.receivedAt = nowMs;
                 }
             };
-            CHECK(rig.start() == (elapsed < 4950)); nvs::io.before = {};
-            CHECK(rig.store.ready() && rig.store.state().pending && rig.store.state().localSequence == 1);
-            const auto pending = rig.store.state();
+            CHECK(rig.start(initialize) == (elapsed < 4950)); nvs::io.before = {};
+            CHECK(rig.store.ready() && rig.store.state().pending == (elapsed < 4950) &&
+                  rig.store.state().localSequence == 1);
             if (elapsed < 4950) {
                 CHECK(rig.link.commands.size() == 1 && rig.link.sentAt[0] == uint32_t(started + elapsed));
                 CHECK(rig.link.commands[0].remainingTtlMs == 5000 - elapsed);
             } else {
-                CHECK(!rig.link.attempts && !rig.d.busy()); reason(rig.d, "result_unknown");
-                rebootPending(pending);
+                CHECK(!rig.link.attempts && !rig.d.busy()); reason(rig.d, "expired");
+                const auto cleared = rig.store.state();
+                unchanged(rig, [&] { for (unsigned tick = 0; tick < 32; ++tick) rig.d.poll(nowMs); });
+                nvs::reboot(); BrainStateStore fresh;
+                CHECK(fresh.load(pairing()) == BrainLoad::Ready && sameBrainState(fresh.state(), cleared));
+                CHECK(rig.start(initialize) && rig.link.commands.size() == 1);
+                CHECK(rig.link.commands[0].request.sequence == 2);
             }
         });
     scenario("SHA elapsed is included, with no extra TTL after reservation", [] {
@@ -510,17 +518,76 @@ void timing() {
         CHECK(rig.start()); rig.link.beforePreflight = {};
         CHECK(rig.link.sentAt[0] == clicked + 123 && rig.link.commands[0].remainingTtlMs == 4877);
     });
-    scenario("link disappears during reserve: no send, durable query-only evidence", [] {
+    scenario("link disappears during reserve: clear only unsent pending and keep sequence", [] {
         Rig rig;
         nvs::io.before = [&](const nvs::Call& call) { if (call.op == Op::Commit) rig.link.board = false; };
         CHECK(!rig.start()); nvs::io.before = {};
         CHECK(rig.link.attempts == 1 && rig.link.commands.empty() && !rig.d.busy());
-        reason(rig.d, "result_unknown");
-        rebootPending(rig.store.state());
+        reason(rig.d, "busy");
+        CHECK(!rig.store.state().pending && rig.store.state().localSequence == 1);
+        unchanged(rig, [&] { for (unsigned tick = 0; tick < 32; ++tick) rig.d.poll(nowMs); });
+        rig.link.board = true;
+        CHECK(rig.start() && rig.link.commands.size() == 1 && rig.link.commands[0].request.sequence == 2);
     });
 }
 
 void storage() {
+    for (bool expired : {false, true}) for (auto op : {Op::Set, Op::Commit, Op::Read})
+        for (bool apply : {false, true}) {
+            if (apply && op == Op::Read) continue;
+            scenario("unsent cleanup failure preserves verified evidence / " +
+                     std::to_string(expired) + "/" + std::to_string(unsigned(op)) + "/" +
+                     std::to_string(apply), [=] {
+                Rig rig; BrainState pending;
+                clockHook = [&] {
+                    pending = rig.store.state();
+                    nvs::fail(op, nvs::count(op) + (op == Op::Read ? 3 : 1), ESP_FAIL, apply);
+                    if (expired) nowMs += 5000;
+                    else rig.link.allowSend = false;
+                };
+                CHECK(!rig.start()); clockHook = {}; nvs::verifyFaults();
+                CHECK(rig.store.faulted() && sameBrainState(rig.store.state(), pending));
+                CHECK(!rig.d.busy() && rig.link.commands.empty() && !rig.link.cancellations);
+                reason(rig.d, "storage_fault");
+                unchanged(rig, [&] { for (unsigned tick = 0; tick < 32; ++tick) {
+                    rig.d.poll(nowMs); CHECK(!rig.start());
+                } });
+                nvs::reboot(); BrainStateStore fresh;
+                CHECK(fresh.load(pairing()) == BrainLoad::Ready && fresh.state().localSequence == 1);
+                CHECK(fresh.state().pending == (!apply && op != Op::Read));
+                if (fresh.state().pending) rebootPending(pending);
+            });
+        }
+    scenario("unsent cleanup matches original request, never replacement", [] {
+        Rig rig; BrainState replacement;
+        rig.link.beforeRequest = {};
+        clockHook = [&] {
+            const auto original = rig.store.state().pendingRequest;
+            CHECK(rig.store.clearPending(original) == BrainWrite::Stored);
+            CHECK(rig.store.reserveLocal(request(ProductCommand::Initialize, 2)) == BrainWrite::Stored);
+            replacement = rig.store.state();
+            rig.link.allowSend = false;
+        };
+        CHECK(!rig.start()); clockHook = {};
+        CHECK(sameBrainState(rig.store.state(), replacement) && rig.link.commands.empty());
+        CHECK(!rig.link.cancellations); reason(rig.d, "storage_fault");
+        rebootPending(replacement);
+    });
+    for (bool expired : {false, true}) scenario("unsent cleanup SHA failure retains evidence / " +
+        std::to_string(expired), [=] {
+        Rig rig; BrainState pending;
+        // The fault also disables fixture-only record decoding; admission refuses.
+        rig.link.beforeRequest = {};
+        clockHook = [&] {
+            pending = rig.store.state(); crypto::fail = true;
+            if (expired) nowMs += 5000;
+            else rig.link.allowSend = false;
+        };
+        CHECK(!rig.start()); clockHook = {}; crypto::reset();
+        CHECK(rig.store.faulted() && sameBrainState(rig.store.state(), pending));
+        CHECK(!rig.d.busy() && rig.link.commands.empty() && !rig.link.cancellations);
+        reason(rig.d, "storage_fault"); rebootPending(pending);
+    });
     const struct { Op op; unsigned occurrence; } faults[] = {
         {Op::OpenRO, 1}, {Op::Query, 1}, {Op::Read, 1}, {Op::OpenRW, 1},
         {Op::Query, 2}, {Op::Read, 2}, {Op::Set, 1}, {Op::Commit, 1},
@@ -650,12 +717,21 @@ void responses() {
             unchanged(rig, [&] { for (unsigned tick = 0; tick < 32; ++tick) rig.d.poll(nowMs + tick); });
             rebootPending(pending);
         });
-    scenario("send failure after preflight retains reserved pending without retry", [] {
-        Rig rig; rig.link.allowSend = false;
-        CHECK(!rig.start() && !rig.d.busy() && rig.link.attempts == 1 && rig.store.state().pending);
-        reason(rig.d, "result_unknown"); const auto pending = rig.store.state();
-        unchanged(rig, [&] { for (unsigned tick = 0; tick < 32; ++tick) { rig.d.poll(nowMs); CHECK(!rig.start()); } });
-        CHECK(!rig.link.cancellations); rebootPending(pending);
+    for (bool initialize : {false, true}) scenario("immediate admission refusal clears unsent, no automatic retry / " +
+        std::to_string(initialize), [=] {
+        Rig rig(initialize); rig.link.allowSend = false;
+        auto expected = rig.store.state(); expected.localSequence = 1;
+        CHECK(!rig.start(initialize) && !rig.d.busy() && rig.link.attempts == 1);
+        CHECK(sameBrainState(rig.store.state(), expected)); reason(rig.d, "busy");
+        unchanged(rig, [&] { for (unsigned tick = 0; tick < 32; ++tick) rig.d.poll(nowMs); });
+        CHECK(!rig.link.cancellations && rig.link.commands.empty());
+        nvs::reboot(); BrainStateStore fresh;
+        CHECK(fresh.load(pairing()) == BrainLoad::Ready && sameBrainState(fresh.state(), expected));
+        rig.link.allowSend = true;
+        CHECK(rig.start(initialize) && rig.link.commands.size() == 1 && rig.link.attempts == 2);
+        CHECK(rig.link.commands[0].request.sequence == 2);
+        CHECK(std::strcmp(rig.link.commands[0].request.commandId, request(
+            initialize ? ProductCommand::Initialize : ProductCommand::Prepare, 1).commandId));
     });
     scenario("new same-boot dispatcher cannot steal direct-send ownership", [] {
         Rig rig; CHECK(rig.start()); Dispatcher competitor(rig.link, rig.store, clockNow);
@@ -703,12 +779,13 @@ struct TelemetryLink : ReadOnlyLink {
 struct ShortWire : v4::ByteSink {
     std::vector<uint8_t> bytes;
     v4::Parser observer;
+    bool forceZero = false;
     unsigned writes = 0, shorts = 0, zeros = 0, commands = 0, results = 0, queries = 0, stops = 0;
     bool idle() const override { return bytes.empty(); }
     size_t available() const override { return 128 - bytes.size(); }
     size_t write(const uint8_t* data, size_t length) override {
         CHECK(length <= available());
-        const size_t take = (++writes % 5) ? std::min(length, size_t(17)) : 0;
+        const size_t take = (++writes % 5 && !forceZero) ? std::min(length, size_t(17)) : 0;
         if (take < length) ++shorts;
         if (!take) ++zeros;
         bytes.insert(bytes.end(), data, data + take); return take;
@@ -728,7 +805,7 @@ struct ShortWire : v4::ByteSink {
     }
 };
 void production() {
-    for (unsigned mode = 0; mode < 5; ++mode) scenario("real Brain/Motion links and stores / " + std::to_string(mode), [=] {
+    for (unsigned mode = 0; mode < 8; ++mode) scenario("real Brain/Motion links and stores / " + std::to_string(mode), [=] {
         commandCalls = queryCalls = stopCalls = 0; motionAccepts = mode != 1;
         const bool initialize = mode == 2;
         const auto c = context();
@@ -773,9 +850,58 @@ void production() {
             for (unsigned tick = 0; tick < 1000 && !brain.commandAvailable(nowMs); ++tick) step();
             CHECK(brain.commandAvailable(nowMs));
         }
+        if (mode == 5 || mode == 6) {
+            const auto before = brainStore.state();
+            const auto motionBefore = store.state();
+            const auto motionDisk = nvs::io.disk.at("productstate");
+            clockHook = [&] {
+                CHECK(brainStore.state().pending && brainStore.state().localSequence == 1);
+                if (mode == 5) nowMs += 5000;
+                else {
+                    const auto other = request(ProductCommand::Initialize, 99);
+                    ResultQuery competing;
+                    competing.source = other.source; competing.sequence = other.sequence;
+                    std::strcpy(competing.deviceId, other.deviceId);
+                    std::strcpy(competing.commandId, other.commandId);
+                    CHECK(brain.requestResult(competing, nowMs));
+                }
+            };
+            CHECK(!d.dispatch(intent, nowMs)); clockHook = {};
+            auto expected = before; expected.localSequence = 1;
+            CHECK(sameBrainState(brainStore.state(), expected) && !d.busy());
+            CHECK(!std::strcmp(d.reason(), mode == 5 ? "expired" : "busy"));
+            if (mode == 6) CHECK(brain.resultLookupState() == ResultLookupState::Pending);
+            for (unsigned tick = 0; tick < 1000; ++tick) { step(); d.poll(nowMs); }
+            CHECK(!commandCalls && !toMotion.commands && sameMotionState(store.state(), motionBefore));
+            CHECK(nvs::io.disk.at("productstate") == motionDisk);
+            CHECK(sameBrainState(brainStore.state(), expected));
+            if (mode == 6) {
+                CHECK(queryCalls == 1 && toMotion.queries == 1 &&
+                      brain.resultLookupState() == ResultLookupState::Complete);
+                brain.cancelResultQuery();
+            }
+            for (unsigned tick = 0; tick < 1000 && !brain.commandAvailable(nowMs); ++tick) step();
+            CHECK(brain.commandAvailable(nowMs));
+        }
         CHECK(d.dispatch(intent, nowMs)); CHECK(d.busy() && brainStore.state().pending);
         const auto reserved = brainStore.state();
-        if (mode == 3) {
+        if (mode == 7) {
+            const auto disk = nvs::io.disk; const auto calls = nvs::io.calls.size();
+            const auto motionBefore = store.state();
+            const unsigned writes = toMotion.writes, zeros = toMotion.zeros;
+            toMotion.forceZero = true;
+            for (unsigned tick = 0; tick < 60 && d.busy(); ++tick) { step(); d.poll(nowMs); }
+            CHECK(!d.busy() && !std::strcmp(d.reason(), "result_unknown"));
+            CHECK(toMotion.writes > writes && toMotion.writes - writes == toMotion.zeros - zeros);
+            CHECK(sameBrainState(brainStore.state(), reserved) && nvs::io.disk == disk &&
+                  nvs::io.calls.size() == calls && !commandCalls && !toMotion.commands);
+            toMotion.forceZero = false;
+            for (unsigned tick = 0; tick < 1000; ++tick) { step(); d.poll(nowMs); }
+            CHECK(!commandCalls && !toMotion.commands && !toMotion.queries && !queryCalls);
+            CHECK(sameBrainState(brainStore.state(), reserved) && sameMotionState(store.state(), motionBefore));
+            CHECK(nvs::io.disk == disk && nvs::io.calls.size() == calls);
+            CHECK(!d.dispatch(intent, nowMs)); rebootPending(reserved);
+        } else if (mode == 3) {
             // Real binary Stop cancels the ordinary sender before any command frame.
             CHECK(d.stop(nowMs)); d.poll(nowMs);
             CHECK(!d.busy() && brainStore.state().pending);
@@ -825,19 +951,21 @@ void production() {
             CHECK(!d.busy() && !brainStore.state().pending && commandCalls == 1 && toMotion.commands == 1);
             CHECK(sameProductRequest(receivedCommand.request, reserved.pendingRequest));
             CHECK(!std::strcmp(d.reason(), motionAccepts ? "accepted" : "not_ready"));
-            CHECK(store.state().localSequence == 1 && !queryCalls);
+            const unsigned sequence = (mode == 5 || mode == 6) ? 2 : 1;
+            CHECK(brainStore.state().localSequence == sequence && store.state().localSequence == sequence);
+            CHECK(queryCalls == (mode == 6 ? 1u : 0u));
             CHECK(store.state().localResult.kind == MotionResultKind::Ordinary);
             CHECK(store.state().localResult.accepted == motionAccepts);
             CHECK(sameProductRequest(store.state().localResult.request, reserved.pendingRequest));
             CHECK(store.state().slot.kind == (motionAccepts ? MotionSlotKind::Intent : MotionSlotKind::Empty));
             const auto motionBefore = store.state();
             for (unsigned tick = 0; tick < 200; ++tick) { step(); d.poll(nowMs); }
-            CHECK(commandCalls == 1 && toBrain.results == 1);
+            CHECK(commandCalls == 1 && toBrain.results == (mode == 6 ? 2u : 1u));
             CHECK(sameMotionState(store.state(), motionBefore));
             nvs::reboot(); BrainStateStore loadedBrain; MotionStateStore loadedMotion;
             CHECK(loadedBrain.load(pairing()) == BrainLoad::Ready && !loadedBrain.state().pending);
             CHECK(loadedMotion.load(pairing(v4::Role::Motion)) == MotionLoad::Ready);
-            CHECK(loadedBrain.state().localSequence == 1 && loadedMotion.state().localSequence == 1);
+            CHECK(loadedBrain.state().localSequence == sequence && loadedMotion.state().localSequence == sequence);
         }
         CHECK(toMotion.shorts && toBrain.shorts && toMotion.zeros && toBrain.zeros);
         std::printf("  real link frames: commands=%u results=%u queries=%u stops=%u (test handler, no MotionRuntime)\n",

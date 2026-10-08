@@ -90,18 +90,16 @@ public:
             reason_ = "storage_fault";
             return false;
         }
-        // Persistence/SHA consumes the original TTL. Even an unsent reserved
-        // request remains evidence; only a definitive Motion result may clear it.
+        // Only this dispatch knows it has not yet admitted the reserved request.
+        // Never apply this cleanup after enqueue or to recovered pending records.
         const uint32_t sendAt = clock_();
         const uint32_t elapsed = uint32_t(sendAt - startedAt);
         if (elapsed >= kTtlMs || kTtlMs - elapsed <= v4::kCommandFirstFrameBudgetMs) {
-            reason_ = "result_unknown";
-            return false;
+            return rejectUnsent(request, "expired");
         }
         outgoing.remainingTtlMs = uint16_t(kTtlMs - elapsed);
         if (!link_.requestCommand(outgoing, sendAt)) {
-            reason_ = "result_unknown";
-            return false;
+            return rejectUnsent(request, "busy");
         }
         sentSequence_ = request.sequence;
         std::strcpy(sentCommandId_, request.commandId);
@@ -139,6 +137,12 @@ public:
     }
 
 private:
+    bool rejectUnsent(const boardlink::ProductRequest& request, const char* reason) {
+        // Exact-match clearing preserves the consumed sequence and other owners.
+        reason_ = store_.clearPending(request) == boardlink::BrainWrite::Stored
+            ? reason : "storage_fault";
+        return false;
+    }
     bool available(uint32_t nowMs, bool blocked) const {
         if (blocked || active_ || !store_.ready() || store_.state().pending ||
             store_.state().localSequence >= v4::kMaxSequence || !link_.connected(nowMs)) return false;

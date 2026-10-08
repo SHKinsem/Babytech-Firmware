@@ -51,6 +51,7 @@ public:
     void cancelContext();
     // Only a newly authorized request may be sent, once. The caller owns local
     // durable reservation / Cloud freshness and must query uncertain outcomes.
+    // False: this command was not enqueued. True: admitted, not proof of delivery.
     bool requestCommand(const CommandMessage& command, uint32_t nowMs);
     // Read-only transport preflight before reserving a local durable identity.
     bool commandAvailable(uint32_t nowMs) const;

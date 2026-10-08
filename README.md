@@ -128,7 +128,7 @@ OTA场景通过实际USB `OTA CODE` 和已注册HTTP接口取得nonce、验证�
 
 默认 Brain 仍是 UART v3 屏幕角色；成对选择 v4 后已接 Wi-Fi/MQTT、状态投影、Cloud命令单次UART派发、优先Stop和屏幕本地持久请求。屏幕 Initialize 无需Cloud/宝宝缓存，Start使用已保存且与Motion匹配的有效缓存；两者由Motion最终机械准入。Motion v4 产品命令接收/持久执行和监督Stop已接验证路径，默认非食用产品开关仍为0。Brain自动配置缓存/同步及双板记录与Cloud回执运行桥接已接；组合恢复、最终安装激活和实机验收未完成。Motion默认路径仍直连Cloud，v4不启动产品MQTT，独立调试网页保留。完整迁移按父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md` B1–B4推进，不把构建成功写成产品迁移完成。
 
-2026-10-08 真实模式就绪上报：公开 `can_start` 不再固定 false，而按新鲜且空闲停稳的 Motion Start 权限、双方精确同步的宝宝/配方，以及现有冲突请求/维护状态计算。每次周期/probe 编码在 UI loop 重新求值，避免前面的配置/命令回调使旧布尔值过时。屏幕离线启动不依赖 Cloud，Cloud 发行不依赖本地触控序号容量；信息性 Stop 查询、历史待上传结果本身不阻止下一瓶，Motion 队列满与机械检查仍生效。Unknown 动作不重放，本地持久 pending 不因此清除；未开启非食用能力的 Motion 仍不能启动，不代表食用或实机验收。下面按日期排列的开发证据中固定 false 是当时边界，以本段为当前行为。
+2026-10-08 真实模式就绪上报：公开 `can_start` 不再固定 false，而按新鲜且空闲停稳的 Motion Start 权限、双方精确同步的宝宝/配方，以及现有冲突请求/维护状态计算。每次周期/probe 编码在 UI loop 重新求值，避免前面的配置/命令回调使旧布尔值过时。屏幕离线启动不依赖 Cloud，Cloud 发行不依赖本地触控序号容量；信息性 Stop 查询、历史待上传结果本身不阻止下一瓶，Motion 队列满与机械检查仍生效。Unknown 动作不重放，已入发送器/恢复的本地持久 pending 不因此清除；同次dispatch确定未入发送器的清理另于当日获批并接入，见本地触控owner节。未开启非食用能力的 Motion 仍不能启动，不代表食用或实机验收。下面按日期排列的开发证据中固定 false 是当时边界，以本段为当前行为。
 
 `python3 tools/test_brain_main.py --sanitize` 包含13个case/16个独立进程，包括新增真实 pipe 输入校验。`--case real-readiness` 的离线缓存/最大本地序号fixture运行生产main和实际UART适配器，测试peer返回编码身份、配置证明和状态；各38个probe核对true/false，覆盖配置更新/墓碑、接受后旧idle、ACK未入队、本地Stop及恢复。历史outbox/信息性查询不过拦，屏幕离线实际发送，本地序号满不挡Cloud。测试peer不是Motion main，SDK/物理时序/Flash/broker仍不在此证据内，真实Motion默认非食用能力仍关闭。
 
@@ -319,7 +319,9 @@ Cloud Unknown最小放行已获用户2026-10-07确认：原TTL耗尽，过期后
 
 `BrainLocalDispatcher`与Cloud/pending恢复共用UI loop、UART及唯一BrainStateStore，不新增线程、动作队列或持久格式。Initialize使用原屏幕NotReady/Error准入，不要求Cloud或宝宝缓存，也不以缺少停稳证书阻止Motion既有监督恢复。Start仍要求新鲜、空闲停稳的Motion及匹配版本/宝宝的有效完整缓存，由Motion核验配方/资源/四条结果队列容量。原始STATUS保留Motion readiness，Controller显示和Cloud投影独立准入，不能把遥测本身当动作授权。
 
-触控先检查UART可入槽，再持久保存下一local_seq、canonical ID及完整配方快照，随后仅发送一次COMMAND；原5秒TTL包含准备/Flash/SHA时间。精确COMMAND_RESULT接受或拒绝才清接受pending，不等于冲奶完成或删除Motion事件。超时、Stop取消、换boot及未知保留pending交原只读恢复；已持久但后续未发送同样保留，不套用Cloud RAM放行。对此明确未发送情形的简化清理尚待单独决策，未实现。
+触控先检查UART可入槽，再持久保存下一local_seq、canonical ID及完整配方快照，随后仅发送一次COMMAND；原5秒TTL包含准备/Flash/SHA时间。已入发送器后仅精确COMMAND_RESULT接受或拒绝才清接受pending，不等于冲奶完成或删除Motion事件。超时、Stop取消（即使零字节）、换boot及未知保留pending交原只读恢复，不套用Cloud RAM放行。
+
+2026-10-08 用户批准并接入最小例外：仅本次dispatch占号成功、调用发送器前TTL/首帧预算耗尽，或requestCommand即时返回false（从未入槽），才通过原Store精确清pending，保留已消费序号。分别返回expired/busy，不制造Motion拒绝或终态，不取消其他owner；下一次显式点击用新ID/序号，无自动重试。占号失败不清理，清槽/回读/SHA失败报storage_fault并保留最后核验RAM；commit失败不能推定disk未写入，普通重启读实际记录。已入槽/恢复的pending不适用。UART/MQTT/NVS/SQLite/配对不变，仅Brain需更新，不需要重配对或额外编译组合；生产烧录仍须单独授权。验证入口为 `python3 tools/test_brain_local_dispatcher.py --sanitize`，真实UART core组合使用测试Motion决策handler，不是MotionRuntime或物理Flash验收。
 
 新显式触控可让信息性Stop查询退出，不取消正在恢复的普通Cloud请求或实际Stop传输；维护/坏Store/持久pending仍只阻止普通请求。`tools/test_brain_local_dispatcher.py --sanitize`使用生产Store/codec/core及边界替身，不是实板触摸、完整main/RTOS/CAN/Flash或Cloud上传验收。公开can_start仍false，自动配置/记录桥接等待B3；受控动作仅显式非食用验证能力，默认关闭，不允许食用结果。
 
