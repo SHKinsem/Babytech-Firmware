@@ -19,6 +19,20 @@ No network worker is executed in this offline test. It does not prove physical
 power cycling/Flash, old MQTT credential retirement, image upgrades or B4.
 Default v3, non-consumable switch 0, production firmware and protocol are unchanged.
 
+Pairing-commit interruption coverage uses the same parent tool with
+`--install-storage-fault brain` or `--install-storage-fault motion`. Only explicit
+host installation pipes accept `--install-nvs-fault pair-commit`; after actual
+setup, the fake SDK fails the selected board's first pairing commit without
+applying it. The already committed business record survives. Both processes
+are reconstructed with their complete disks, then Brain USB explicitly resumes
+installation using the original embedded identity/epoch. Two later offline
+boots perform zero SDK blob Set/Commit calls and do not reinstall or move.
+Same-boot Brain storage faults reject another install; a Motion storage fault
+can accept an explicit Brain retry but still returns the fault, preserving all
+bytes. Neither path clears records or adds a production gate. This covers one
+partial-install commit-error cut, not errors after persistence, arbitrary
+Flash power loss or mixed firmware-image upgrades.
+
 ## 原执行上的 Cloud Stop（2026-10-08）
 
 父项目 `Test/dual_main_broker_check.py --sanitize --prepare-fixture --prepare-contention cloud` 已通过604步实际双main/原UART/隔离broker与Cloud联测。先真实发行并接受Prepare序号1，再发行独立Stop序号2；Brain按当前Motion STATUS绑定原Product执行ID，二进制UART Stop使用Cloud来源、当前双方boot和准确目标，不混进普通COMMAND。

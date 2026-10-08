@@ -1,4 +1,5 @@
 #pragma once
+#include "main_install_nvs_fixture.h"
 
 namespace {
 // Offline installation exercises the real UI/main owner, not a fabricated
@@ -12,6 +13,8 @@ void runInstallBridge(const DualOptions& options) {
     fake_main::uartWriteLimit = 23;
     WiFi.state = 0;  // SDK Wi-Fi reports disconnected; no worker is executed.
     setup();
+    main_install_nvs::PairCommitFault fault;
+    fault.arm(options.pairCommitFault);
     for (;;) {
         check(!simulating() && fake_main::uartTx.size() <= dualUartLimit &&
               fake_main::usb.output.size() <= dualUartLimit, "installation output budget exceeded");
@@ -22,6 +25,9 @@ void runInstallBridge(const DualOptions& options) {
         report["motion_connected"] = controllerLink.connected(millis());
         report["installer_status"] = installer.status(); report["installer_reason"] = installer.reason();
         report["writes_requested"] = installer.mayHaveWritten();
+        report["install_pair_commit_fault_hit"] = fault.hit();
+        report["nvs_set_count"] = nvs::count(nvs::Op::Set);
+        report["nvs_commit_count"] = nvs::count(nvs::Op::Commit);
         report["maintenance"] = commissioningSession.active();
         report["local_sequence"] = std::to_string(productState.state().localSequence);
         report["pending"] = productState.state().pending;
@@ -68,6 +74,7 @@ void runInstallBridge(const DualOptions& options) {
     }
     check(!nvs::count(nvs::Op::Erase) && !nvs::count(nvs::Op::Init) && nvs::io.handles.empty(),
           "installation unsafe NVS operation/leak");
+    nvs::verifyFaults();
     fake::cleanupLifetimeResources();
 }
 }  // namespace

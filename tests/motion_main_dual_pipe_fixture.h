@@ -1,10 +1,12 @@
 // Host SDK transport only: production Motion setup/loop owns UART and results.
 // Historical terminals are initial Store fixtures, never simulated live feeds.
 #pragma once
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
+#include "main_install_nvs_fixture.h"
 
 namespace motion_main_dual_pipe {
 static_assert(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 0 ||
@@ -23,7 +25,7 @@ void parse(DynamicJsonDocument& doc, const std::string& raw) {
     require(stream.peek() == std::char_traits<char>::eof(), "trailing pipe JSON bytes");
 }
 struct Options {
-    bool seedHistory = false, prepare = false, installation = false;
+    bool seedHistory = false, prepare = false, installation = false, pairCommitFault = false;
     std::string stateFile, contextFile;
     uint32_t bootSeed = 0x16543;
 };
@@ -60,6 +62,9 @@ Options options(int argc, char** argv) {
             if (arg == "--state-file") {
                 require(result.stateFile.empty(), "duplicate state-file");
                 result.stateFile = value;
+            } else if (arg == "--install-nvs-fault") {
+                require(!result.pairCommitFault && value == "pair-commit", "invalid installation NVS fault");
+                result.pairCommitFault = true;
             } else if (arg == "--context-file") {
                 require(result.contextFile.empty(), "duplicate context-file");
                 result.contextFile = value;
@@ -75,6 +80,7 @@ Options options(int argc, char** argv) {
     require(!result.installation || (!result.prepare && !result.seedHistory &&
             result.contextFile.empty() && !result.stateFile.empty()),
             "installation pipe requires only explicit state-file");
+    require(!result.pairCommitFault || result.installation, "NVS fault requires installation fixture");
     return result;
 }
 std::string readFile(const std::string& path, size_t limit) {
@@ -292,6 +298,10 @@ struct Reporter {
             doc["store_ready"] = productState.ready(); doc["runtime_paired"] = pair != nullptr;
             doc["queue_run_id"] = queue.runId();
             doc["maintenance"] = productBoardLink.maintenance().active();
+            doc["install_pair_commit_fault_hit"] = std::any_of(fake_brain::io.faults.begin(),
+                fake_brain::io.faults.end(), [](const auto& fault) { return fault.hit; });
+            doc["nvs_set_count"] = fake_brain::count(fake_brain::Op::Set);
+            doc["nvs_commit_count"] = fake_brain::count(fake_brain::Op::Commit);
             v4::Pairing stored;
             const auto loaded = loadBoardPairing(v4::Role::Motion, stored);
             doc["pairing_load"] = unsigned(loaded);
@@ -447,12 +457,14 @@ int run(int argc, char** argv) {
     motion_io::randomCounter = args.bootSeed;
     motion_io::flowFeedback = args.prepare;
     setup();
+    main_install_nvs::PairCommitFault fault;
+    fault.arm(args.pairCommitFault);
     Reporter reporter;
     reporter.report(args, restored);
     std::string line;
     while (readLine(line)) {
         const auto next = input(line);
-        if (next.quit) { reporter.report(args, restored, true); return 0; }
+        if (next.quit) { fake_brain::verifyFaults(); reporter.report(args, restored, true); return 0; }
         motion_io::automaticFeedback = next.feedback;
         motion_io::missingId = next.missing; motion_io::movingId = next.moving;
         motion_io::lowWaterLevel = next.lowWaterLevel;
@@ -481,6 +493,7 @@ int run(int argc, char** argv) {
         reporter.report(args, restored);
     }
     reporter.report(args, restored, true);
+    fake_brain::verifyFaults();
     return 0;
 }
 }  // namespace motion_main_dual_pipe
