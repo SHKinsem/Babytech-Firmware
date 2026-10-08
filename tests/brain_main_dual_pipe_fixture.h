@@ -202,6 +202,7 @@ void dualWriteSnapshot(JsonArray records, const nvs::Database& disk = nvs::io.di
     }
 }
 struct DualStep {
+    std::string usb;
     uint32_t advance = 0;
     std::optional<bool> connected;
     std::vector<fake::Packet> incoming;
@@ -210,17 +211,23 @@ struct DualStep {
     bool stopClick = false;
     bool quit = false;
 };
-DualStep dualParseStep(const std::string& value) {
+DualStep dualParseStep(const std::string& value, bool installation = false) {
     auto input = dualJson(value, dualInputLimit);
     check(input.is<JsonObject>(), "real pipe step must be an object");
     for (const auto item : input.as<JsonObjectConst>()) {
         const std::string key = item.key().c_str();
         check(key.size() == item.key().size(), "invalid real pipe step key");
         check(key == "advance_ms" || key == "connected" || key == "incoming" ||
-              key == "uart_rx" || key == "quit" || key == "display_intent" || key == "stop_click",
+              key == "uart_rx" || key == "quit" || key == "display_intent" || key == "stop_click" ||
+              (installation && key == "usb"),
               "unknown real pipe step field");
     }
     DualStep step;
+    if (input.containsKey("usb")) {
+        step.usb = dualText(input["usb"], 128);
+        check(!step.usb.empty() && step.usb.find_first_of("\r\n") == std::string::npos,
+              "installation USB input must be one bounded line");
+    }
     if (input.containsKey("advance_ms")) {
         check(input["advance_ms"].is<uint32_t>() && input["advance_ms"].as<uint32_t>() <= 1000,
               "invalid real pipe advance_ms");
@@ -367,6 +374,19 @@ void runRealBridge(const DualOptions& options) {
     fake::cleanupLifetimeResources();
 }
 void checkRealBridgeInputs() {
+    check(dualParseStep("{\"usb\":\"MAINT BEGIN\"}", true).usb == "MAINT BEGIN",
+          "installation pipe changed USB command");
+    for (const auto& value : {"{\"usb\":null}", "{\"usb\":\"\"}",
+            "{\"usb\":\"MAINT BEGIN\\nPAIR STATUS\"}", "{\"usb\":\"x\\u0000y\"}",
+            "{\"usb\":\"x\\ry\"}"}) {
+        bool rejected = false;
+        try { dualParseStep(value, true); } catch (const std::exception&) { rejected = true; }
+        check(rejected, "installation pipe accepted malformed USB line");
+    }
+    bool oversizedUsb = false;
+    try { dualParseStep("{\"usb\":\"" + std::string(129, 'x') + "\"}", true); }
+    catch (const std::exception&) { oversizedUsb = true; }
+    check(oversizedUsb, "installation pipe accepted oversized USB line");
     const auto start = dualParseStep("{\"display_intent\":\"start_feeding\",\"stop_click\":true}");
     const auto initialize = dualParseStep("{\"display_intent\":\"initialize\"}");
     check(start.intent == babytech::display::DisplayIntent::StartFeeding && start.stopClick &&

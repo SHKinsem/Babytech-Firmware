@@ -23,7 +23,7 @@ void parse(DynamicJsonDocument& doc, const std::string& raw) {
     require(stream.peek() == std::char_traits<char>::eof(), "trailing pipe JSON bytes");
 }
 struct Options {
-    bool seedHistory = false, prepare = false;
+    bool seedHistory = false, prepare = false, installation = false;
     std::string stateFile, contextFile;
     uint32_t bootSeed = 0x16543;
 };
@@ -43,7 +43,10 @@ Options options(int argc, char** argv) {
     bool bootSeen = false;
     for (int i = 0; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--prepare-fixture") {
+        if (arg == "--install-fixture") {
+            require(!result.installation, "duplicate install-fixture");
+            result.installation = true;
+        } else if (arg == "--prepare-fixture") {
             require(!result.prepare && BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1,
                     "Prepare pipe requires explicitly built host fixture");
             result.prepare = true;
@@ -69,6 +72,9 @@ Options options(int argc, char** argv) {
     }
     require(!result.prepare || (!result.seedHistory && result.contextFile.empty()),
             "Prepare pipe cannot seed history/context");
+    require(!result.installation || (!result.prepare && !result.seedHistory &&
+            result.contextFile.empty() && !result.stateFile.empty()),
+            "installation pipe requires only explicit state-file");
     return result;
 }
 std::string readFile(const std::string& path, size_t limit) {
@@ -282,7 +288,28 @@ struct Reporter {
         doc["boot_seed"] = args.bootSeed;
         doc["diagnostic_boot_id"] = debugLog.bootId();
         const auto pair = productBoardLink.verifiedPairing();
-        require(pair && productState.ready(), "pipe pairing/Store unavailable after boot");
+        if (args.installation) {
+            doc["store_ready"] = productState.ready(); doc["runtime_paired"] = pair != nullptr;
+            doc["queue_run_id"] = queue.runId();
+            doc["maintenance"] = productBoardLink.maintenance().active();
+            v4::Pairing stored;
+            const auto loaded = loadBoardPairing(v4::Role::Motion, stored);
+            doc["pairing_load"] = unsigned(loaded);
+            if (loaded == PairingLoad::Ready) {
+                auto output = doc.createNestedObject("pairing");
+                output["device_id"] = stored.deviceId; output["epoch"] = stored.epoch;
+                output["local"] = stored.localPhysicalId; output["peer"] = stored.peerPhysicalId;
+            }
+            if (productState.ready() && state.context.present) {
+                doc["context_digest"] = hex(state.context.digest, sizeof(state.context.digest));
+                doc["context_version"] = state.context.profileVersion;
+                doc["context_cleared"] = state.context.cleared;
+                doc["baby_id"] = state.context.babyId;
+                doc["powder_g_per_100ml"] = state.context.powderGPer100Ml;
+            }
+            require(state.pendingResultCount == 0 && state.slot.kind == MotionSlotKind::Empty,
+                    "installation fixture unexpectedly executed product motion");
+        } else require(pair && productState.ready(), "pipe pairing/Store unavailable after boot");
         auto ids = doc.createNestedArray("result_event_ids");
         auto results = doc.createNestedArray("events");
         for (size_t i = 0; i < state.pendingResultCount; ++i) {
@@ -412,7 +439,10 @@ int run(int argc, char** argv) {
     fake_motion_nvs::reset();
     const bool restored = !args.stateFile.empty() && std::filesystem::exists(args.stateFile);
     if (restored) restore(args.stateFile, args.prepare);
-    else seed(args);
+    else {
+        require(!args.installation, "installation snapshot must exist");
+        seed(args);
+    }
     require(fake_brain::io.handles.empty(), "pipe fixture handles before setup");
     motion_io::randomCounter = args.bootSeed;
     motion_io::flowFeedback = args.prepare;
@@ -426,6 +456,16 @@ int run(int argc, char** argv) {
         motion_io::automaticFeedback = next.feedback;
         motion_io::missingId = next.missing; motion_io::movingId = next.moving;
         motion_io::lowWaterLevel = next.lowWaterLevel;
+        if (args.installation && next.feedback) {
+            // SDK receives actual driver packet shapes, as in the existing
+            // maintenance main tests. No controller safety flags are assigned.
+            for (uint8_t id = 1; id <= 5; ++id) {
+                if (id == next.missing) continue;
+                motion_io::reply(id, {0x36, 0, 0, 0, 0, 0, 0x6b});
+                motion_io::reply(id, {0x35, 0, 0, uint8_t(id == next.moving ? 30 : 0), 0x6b});
+                motion_io::reply(id, {0x3a, 1, 0x6b});
+            }
+        }
         motion_io::hxRaw = next.hxRaw; motion_io::hxReady = next.hxReady;
         if (next.http) server.enqueue(*next.http);
         motion_io::uartRx.insert(motion_io::uartRx.end(), next.uart.begin(), next.uart.end());

@@ -764,8 +764,12 @@ void run(const std::string& name) {
 #include "brain_main_result_fixture.h"
 #include "brain_main_offline_fixture.h"
 #include "brain_main_dual_pipe_fixture.h"
+#include "brain_main_install_pipe_fixture.h"
 int main(int argc, char** argv) {
     try {
+        if (argc >= 2 && std::string(argv[1]) == "install-bridge") {
+            runInstallBridge(realBridgeOptions(argc, argv)); return 0;
+        }
         if (argc >= 2 && std::string(argv[1]) == "real-broker-bridge") {
             runRealBridge(realBridgeOptions(argc, argv)); return 0;
         }

@@ -1,5 +1,24 @@
 # Babytech Firmware
 
+## First-install offline restart validation (2026-10-08)
+
+From the parent repository run `python3 Test/dual_main_install_check.py --sanitize`.
+The host-only installation pipe starts both production mains without pairing,
+accepts USB commands only on Brain, and relays original UART chunks. It imports
+the full legacy context or tombstone, verifies both saved identities, exits
+maintenance and remains activation-pending until both processes are rebuilt
+with their original SDK disk. A second ordinary reboot reuses pairing without
+installation or motion. Every report checks existing NVS bytes, runtime state,
+CAN and control-frame prefixes; Brain's full context and Motion's barrier match
+an independent canonical digest.
+
+Both cases pass ASan/UBSan: active context 1044 steps, tombstone 950 steps,
+three generations per case. CAN stationary packets and saved bench rotation
+calibration are explicit SDK fixtures, not private safety-flag overrides.
+No network worker is executed in this offline test. It does not prove physical
+power cycling/Flash, old MQTT credential retirement, image upgrades or B4.
+Default v3, non-consumable switch 0, production firmware and protocol are unchanged.
+
 ## 原执行上的 Cloud Stop（2026-10-08）
 
 父项目 `Test/dual_main_broker_check.py --sanitize --prepare-fixture --prepare-contention cloud` 已通过604步实际双main/原UART/隔离broker与Cloud联测。先真实发行并接受Prepare序号1，再发行独立Stop序号2；Brain按当前Motion STATUS绑定原Product执行ID，二进制UART Stop使用Cloud来源、当前双方boot和准确目标，不混进普通COMMAND。
