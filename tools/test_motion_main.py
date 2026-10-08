@@ -20,6 +20,7 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         "http-ota-hash-mismatch", "http-ota-disconnect-abort", "http-ota-start-unsafe",
         "http-ota-challenge-expiry", "http-ota-session-wrap", "sdk-water-sampling",
         *tuple("http-product-stop-" + str(i) for i in range(9)))
+PREPARE_CASES = ("sdk-prepare-flow", "sdk-prepare-home-missing", "sdk-prepare-marker-missing")
 
 
 def main():
@@ -27,7 +28,9 @@ def main():
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--water-fixture", action="store_true",
                         help="Host-only GPIO21 active-high low-water input; firmware defaults remain unchanged")
-    parser.add_argument("--case", action="append", choices=CASES)
+    parser.add_argument("--prepare-fixture", action="store_true",
+                        help="Explicit host-only non-consumable Prepare test; no MCU build or physical motion")
+    parser.add_argument("--case", action="append", choices=(*CASES, *PREPARE_CASES))
     parser.add_argument("--pipe", action="store_true", help="Run actual Motion main with JSONL host SDK UART I/O")
     parser.add_argument("--seed-history", action="store_true", help="Initially archive four historical LocalTouch results")
     parser.add_argument("--state-file", type=Path, help="Persist/restore raw fake SDK NVS snapshot array")
@@ -35,6 +38,11 @@ def main():
     parser.add_argument("--boot-id", type=int, help="Host SDK random seed, 1..uint32_max-32 (not literal UART boot ID)")
     parser.add_argument("--build-output", type=Path, help="Build binary at PATH and return without executing any scenario")
     args = parser.parse_args()
+    if args.prepare_fixture and (args.pipe or not args.case or
+                                 any(case not in PREPARE_CASES for case in args.case)):
+        parser.error("--prepare-fixture requires explicit sdk-prepare-* cases, not --pipe")
+    if args.case and any(case in PREPARE_CASES for case in args.case) and not args.prepare_fixture:
+        parser.error("sdk-prepare-* cases require explicit --prepare-fixture")
     if args.pipe and args.case:
         parser.error("--pipe and --case are mutually exclusive")
     if not args.pipe and (args.seed_history or args.state_file is not None or
@@ -83,8 +91,10 @@ def main():
         flags += ["-Wno-deprecated-declarations", "-Wl,-dead_strip", "-framework", "Security", "-framework", "CoreFoundation"]
     else:
         flags += ["-Wl,--gc-sections"]
-    if args.water_fixture:
+    if args.water_fixture or args.prepare_fixture:
         flags += ["-DBABYTECH_LOW_WATER_PIN=21", "-DBABYTECH_LOW_WATER_ACTIVE_LOW=0"]
+    if args.prepare_fixture:
+        flags += ["-DBABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW=1"]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
     for include in includes:

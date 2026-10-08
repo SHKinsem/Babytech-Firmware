@@ -14,6 +14,19 @@ SDK、UI、NVS、时钟和 TCP 适配仍是替身；Brain 网络凭据重新 see
 
 ## Motion 主循环验证（2026-10-08）
 
+显式主机 Prepare 场景单独运行，不加入默认34进程或已有历史结果 pipe：
+
+```bash
+python3 tools/test_motion_main.py --sanitize --prepare-fixture \
+  --case sdk-prepare-flow --case sdk-prepare-home-missing --case sdk-prepare-marker-missing
+```
+
+仅这个host构建使用既有非食用宏1和GPIO21，不新增PIO环境、设备仿真或串口切换。SDK在DOUT1/SCK2提供有转换间隔的24位有符号HX711位流及第25个增益时钟；真实HTTP去皮/100g标定、滤波/超时及正常NVS保存得到300g。实际UART同步宝宝配置并Initialize，CAN SDK仅按精确home/F3/marker帧回复；失联粉量不能就绪，恢复可自动继续，缺home完成或marker不能误报Ready。
+
+正向使用明确上传的单轴测试配置和五个`wait 400`阶段，真实Queue/Flow/Runtime依次执行，150ml/42C/25g每100ml生成37.5g目标的持久终态；原请求重放不新增阶段或改变NVS。旧结果未收到Cloud回执，正常Complete显示hold结束后仍可Initialize并做第二瓶180ml/43C、目标45g，两条身份/结果分开保存且正常Store重开一致。粉比保持已同步配置，不能借改请求粉比绕过context契约。
+
+三个独立进程通过ASan/UBSan，共108项检查；默认34进程亦通过。此处Brain是脚本ReadOnlyLink peer，不运行真实Brain main/Cloud/broker；五段等待不是完整机械脚本或电机运动/传感器闭环证明。完整新Prepare双main链路、真实Flash/CAN/UART/RTOS和B4仍待验证，默认设备非食用宏0及v3不变。
+
 `python3 tools/test_motion_main.py --sanitize` 直接编译生产 `device-controller/src/main.cpp`，执行真实 `setup()/loop()`、已注册 HTTP handler、UART 回调及持久恢复 owner；保留 MotorControl/X42s、Queue、ProductSession/Runtime/Recovery/Store、WiFiSetup 和 WifiOta。34个独立进程包含原八项启动/恢复与SDK crypto、12项产品占用/历史结果HTTP、4项USB/UART维护、9项OTA认证/预约/上传失败及一项GPIO采样/输入校验。嵌入资产来自实际网页/流程 JSON；v4 Motion 不创建产品 MQTT worker，非食用宏仍为 0。
 
 新增 `http-product-guards` 经生产 UART 接受 Clean，核对15个读取入口和动作/配置写入拒绝；合法raw Read可用，畸形Stop/Interrupt/disable不能取消，新增CAN只允许读取，持久任务和Clean等待状态不变。`http-product-stop-0..8` 分别覆盖Stop、Stop-all、queue cancel、单轴/广播disable、raw Stop/Interrupt/disable及control reset；实际广播Abort/Stop和对应F3完整帧必须出现，未停稳不删持久决策、不误报OTA安全，reset的200只表示软件状态清理及Stop提交。`http-product-stop-failure` 注入FE提交失败，核对503、成功Abort和原证据保留。

@@ -268,6 +268,7 @@ void uartContext(v4::Pairing pair) {
 #include "motion_main_dual_pipe_fixture.h"
 #include "motion_main_http_fixture.h"
 #include "motion_main_ota_fixture.h"
+#include "motion_main_prepare_fixture.h"
 
 void waterInputValidation() {
     using motion_main_dual_pipe::input;
@@ -296,6 +297,8 @@ int main(int argc, char** argv) {
         const std::string which = argv[1];
         fake_motion_nvs::reset();
         if (which == "sdk-crypto") checks += motion_main_crypto_fixture::run();
+        else if (which == "sdk-prepare-flow" || which == "sdk-prepare-home-missing" ||
+                 which == "sdk-prepare-marker-missing") motion_main_prepare::run(which);
         else if (which == "sdk-water-sampling") { waterSampling(); waterInputValidation(); }
         else if (which == "recovery-intent" || which == "recovery-default-budget") recovery(seedPair(), which == "recovery-default-budget");
         else if (which == "http-workbench" || which == "http-partial-tx") workbench(seedPair(), which == "http-partial-tx");

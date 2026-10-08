@@ -7,7 +7,8 @@
 #include <sstream>
 
 namespace motion_main_dual_pipe {
-static_assert(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 0, "host Motion must not enable consumable execution");
+static_assert(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 0 ||
+              BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1, "invalid host execution switch");
 constexpr const char* device = "bt-main-test";
 constexpr size_t documentCapacity = 2 * 1024 * 1024;
 constexpr size_t fileLimit = 1024 * 1024;
