@@ -590,6 +590,51 @@ void streamingCrcAndDisconnection() {
     transfer(m, b, 2002);
     assert(b.result().state == DiscoveryState::Found);
 }
+
+void persistedSnapshotRefresh() {
+    auto m = motion();
+    const auto first = query();
+    m.receive(first, 10);
+    assert(m.outgoing());
+    const auto oldReply = wire(*m.outgoing());
+    const auto saved = pairing(Role::Motion);
+    assert(m.refreshPairing(DiscoveryPairState::Ready, &saved));
+    assert(wire(*m.outgoing()) == oldReply); // Do not rewrite a queued reply.
+    m.queued();
+    auto next = first;
+    next.senderBoot += 1;
+    next.messageId = 2;
+    m.receive(next, 20);
+    assert(m.outgoing()->senderBoot == kMotionBoot && m.outgoing()->receiverBoot == next.senderBoot);
+    assert(m.outgoing()->payload[13] == uint8_t(DiscoveryPairState::Ready));
+    Pairing decoded;
+    assert(decodePairingRecord(m.outgoing()->payload + 15, m.outgoing()->payload[14], decoded));
+    samePair(decoded, saved);
+    for (unsigned value = 0; value <= 255; ++value) {
+        if (value <= 4) continue;
+        const auto before = snapshot(m);
+        assert(!m.refreshPairing(DiscoveryPairState(value)) && snapshot(m) == before);
+    }
+    for (auto invalid : {pairing(Role::Brain), saved}) {
+        if (invalid.role == Role::Motion) std::strcpy(invalid.localPhysicalId, kForeign);
+        const auto before = snapshot(m);
+        assert(!m.refreshPairing(DiscoveryPairState::Ready, &invalid) && snapshot(m) == before);
+    }
+    const auto before = snapshot(m);
+    assert(!m.refreshPairing(DiscoveryPairState::Ready) && snapshot(m) == before);
+    assert(!m.refreshPairing(DiscoveryPairState::Missing, &saved) && snapshot(m) == before);
+    auto b = brain();
+    const auto brainBefore = snapshot(b);
+    assert(!b.refreshPairing(DiscoveryPairState::Missing) && snapshot(b) == brainBefore);
+    BoardDiscovery empty;
+    assert(!empty.refreshPairing(DiscoveryPairState::Missing));
+    m.queued();
+    assert(m.refreshPairing(DiscoveryPairState::IoError));
+    next.messageId = 3;
+    m.receive(next, 30);
+    assert(m.outgoing()->payload[13] == uint8_t(DiscoveryPairState::IoError) &&
+           m.outgoing()->length == 15 && m.outgoing()->payload[14] == 0);
+}
 }  // namespace
 
 int main() {
@@ -600,6 +645,7 @@ int main() {
     invalidRequestsAndQueries();
     invalidReplies();
     streamingCrcAndDisconnection();
+    persistedSnapshotRefresh();
     std::printf("Board discovery: %zu production-codec roundtrips, %zu atomic rejections; "
                 "identity, queue/deadline/wrap, exhaustion, CRC and disconnect tests passed; no NVS\n",
                 roundtrips, rejected);

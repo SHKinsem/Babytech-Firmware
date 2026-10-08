@@ -259,6 +259,8 @@ Brain v4唯一loop已接`BrainInstaller`。本地维护期间，`PAIR INSTALL <d
 
 **日常开机和保留NVS的重新烧录不需要重新配对或人工双板校验**；换板、记录缺失/损坏或身份冲突仍按既有受控恢复处理，不清空或静默认领。失败/超时不能报安装完成或用重新上电代替核对，先保留证据按同身份恢复。此决定替代原自动运行切换要求，不新增固件重启或运动命令。
 
+2026-10-08安装恢复修复：Motion的安装发现回复在收到Discovery支持帧时重新只读加载当前持久配对，而不是一直报告开机快照。否则Motion已保存、Brain单独重启后会发现Missing却读到Ready，报`records_invalid`无法续装。刷新只改变安装发现信息；不重启UART、不更改boot/运行时配对、不启动产品动作或MQTT、不写NVS，已排队的回复保持原字节。读取错误明确返回对应诊断，不沿用旧Ready。首次成功后整机重新上电规则不变。父项目`Test/dual_main_install_reset_check.py --sanitize --restart brain|motion`分别覆盖三个切点及档案/墓碑，存活板RAM/UART/预约不被重建；这是软件证据，不是Flash断电或联合镜像升级验收。
+
 2026-10-08已加入最终电脑端单Brain USB入口（在本子仓库根目录执行）：
 
 ```bash

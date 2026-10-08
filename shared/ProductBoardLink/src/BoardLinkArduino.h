@@ -112,6 +112,7 @@ private:
     BoardMaintenance maintenance_{};
     BoardInstall install_{};
     PairingLoad pairingState_ = PairingLoad::Missing;
+    v4::Role role_ = v4::Role::Brain;
     v4::Pairing pairing_{};
     char deviceId_[65]{};
     bool pairingVerified_ = false;

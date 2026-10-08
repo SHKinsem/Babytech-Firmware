@@ -714,6 +714,53 @@ void discoveryTxArbitration() {
     std::puts("PASS discovery shares ordinary TX slot with HELLO; idle/room/zero/short writes never interleave frames");
 }
 
+void discoveryUsesPersistedMotionPair() {
+    setup();
+    io.openError = ESP_ERR_NVS_NOT_FOUND;
+    ArduinoBoardLink brain;
+    assert(brain.begin(Role::Brain, 44, 43, 115200, true));
+    assert(brain.requestDiscovery(pairing().deviceId, 0));
+    drainTx(brain, 0);
+    const Bytes query = discoveryBytes(io.tx);
+    assert(frames(query).size() == 1);
+    for (bool initiallyPaired : {false, true}) {
+        for (auto current : {PairingLoad::Ready, PairingLoad::Missing, PairingLoad::Corrupt,
+                             PairingLoad::IoError, PairingLoad::IdentityMismatch}) {
+            setup(Role::Motion);
+            if (!initiallyPaired) io.openError = ESP_ERR_NVS_NOT_FOUND;
+            io.randomWords = {0, uint32_t(kPeerBoot)};
+            ArduinoBoardLink motion;
+            assert(motion.begin(Role::Motion, 44, 43, 115200, true));
+            // Change only SDK storage after setup, never restart the adapter.
+            io.openError = ESP_OK;
+            io.blob = record(pairing(Role::Motion));
+            storageState(current);
+            io.rx.insert(io.rx.end(), query.begin(), query.end());
+            drainTx(motion, 10);
+            const auto replies = frames(discoveryBytes(io.tx));
+            assert(replies.size() == 1);
+            const auto& reply = replies[0];
+            const auto expected = current == PairingLoad::Ready ? DiscoveryPairState::Ready :
+                current == PairingLoad::Missing ? DiscoveryPairState::Missing :
+                current == PairingLoad::Corrupt ? DiscoveryPairState::Corrupt :
+                current == PairingLoad::IdentityMismatch ? DiscoveryPairState::IdentityMismatch :
+                DiscoveryPairState::IoError;
+            assert(reply.senderBoot == kPeerBoot && reply.payload[13] == uint8_t(expected));
+            if (current == PairingLoad::Ready) {
+                Pairing saved;
+                assert(decodePairingRecord(reply.payload + 15, reply.payload[14], saved));
+                equalFields(saved, pairing(Role::Motion));
+            } else assert(reply.length == 15 && reply.payload[14] == 0);
+            assert(motion.pairingState() == (initiallyPaired ? PairingLoad::Ready : PairingLoad::Missing));
+            assert(bool(motion.verifiedPairing()) == initiallyPaired && motion.link().configured() == initiallyPaired);
+            assert(!motion.link().connected(10) && !motion.link().freshStatus(10));
+            assert(io.mutations == 0);
+            fake::assertReadOnly();
+        }
+    }
+    std::puts("PASS discovery reloads persisted Motion identity/errors without activating runtime or writing NVS");
+}
+
 void discoveryStartupFailures() {
     for (bool paired : {false, true}) {
         for (unsigned failure = 0; failure < 10; ++failure) {
@@ -1539,6 +1586,7 @@ int main() {
     rxBudget(true, true);
     discoveryRoundTrips();
     discoveryTxArbitration();
+    discoveryUsesPersistedMotionPair();
     discoveryStartupFailures();
     discoveryReplyShortWrites();
     failedInitRetry();

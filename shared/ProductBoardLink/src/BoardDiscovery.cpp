@@ -120,6 +120,17 @@ bool BoardDiscovery::request(const char* deviceId, uint32_t nowMs) {
     return true;
 }
 
+bool BoardDiscovery::refreshPairing(DiscoveryPairState state, const v4::Pairing* pairing) {
+    if (!initialized_ || role_ != v4::Role::Motion || !validState(state)) return false;
+    if (state == DiscoveryPairState::Ready) {
+        if (!pairing || !v4::validPairing(*pairing) || pairing->role != role_ ||
+            std::strcmp(pairing->localPhysicalId, physicalId_)) return false;
+    } else if (pairing) return false;
+    pairingState_ = state;
+    pairing_ = pairing ? *pairing : v4::Pairing{};
+    return true;
+}
+
 void BoardDiscovery::receive(const v4::Frame& frame, uint32_t nowMs) {
     if (!initialized_ || !completeFrame(frame) || frame.senderBoot == boot_) return;
     if (role_ == v4::Role::Motion) {

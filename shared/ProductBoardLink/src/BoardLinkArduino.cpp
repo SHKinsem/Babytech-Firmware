@@ -48,6 +48,7 @@ bool ArduinoBoardLink::begin(v4::Role role, int rxPin, int txPin, uint32_t baud,
     deviceId_[0] = 0;
     discoveryEnabled_ = false;
     discovery_ = BoardDiscovery{};
+    role_ = role;
     v4::Pairing pairing;
     pairingState_ = loadBoardPairing(role, pairing);
     if (pairingState_ == PairingLoad::Ready) {
@@ -127,7 +128,25 @@ void ArduinoBoardLink::poll(uint32_t nowMs, const Status* localStatus) {
         v4::Frame frame;
         if (!parser_.push(uint8_t(byte), nowMs, frame)) continue;
         if (frame.kind == v4::Kind::Discovery) {
-            if (discoveryEnabled_) discovery_.receive(frame, nowMs);
+            if (discoveryEnabled_) {
+                if (role_ == v4::Role::Motion) {
+                    // Installation can persist a pair without activating this
+                    // boot. A restarted Brain must discover the saved identity.
+                    v4::Pairing saved;
+                    const auto loaded = loadBoardPairing(role_, saved);
+                    DiscoveryPairState state = DiscoveryPairState::IoError;
+                    switch (loaded) {
+                        case PairingLoad::Ready: state = DiscoveryPairState::Ready; break;
+                        case PairingLoad::Missing: state = DiscoveryPairState::Missing; break;
+                        case PairingLoad::Corrupt: state = DiscoveryPairState::Corrupt; break;
+                        case PairingLoad::IdentityMismatch: state = DiscoveryPairState::IdentityMismatch; break;
+                        default: break;
+                    }
+                    if (!discovery_.refreshPairing(state, loaded == PairingLoad::Ready ? &saved : nullptr))
+                        discovery_.refreshPairing(DiscoveryPairState::IoError);
+                }
+                discovery_.receive(frame, nowMs);
+            }
         } else if (frame.kind == v4::Kind::MigrationRead) {
             if (discoveryEnabled_) records_.receive(frame, nowMs);
         } else if (frame.kind == v4::Kind::MigrationMaintenance) {

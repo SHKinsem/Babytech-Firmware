@@ -22,6 +22,8 @@ public:
     static constexpr uint32_t kTimeoutMs = 1000;
     bool begin(v4::Role role, const char* physicalId, uint64_t boot,
                DiscoveryPairState state, const v4::Pairing* pairing = nullptr);
+    // Refresh only the installation snapshot, not the runtime session/boot.
+    bool refreshPairing(DiscoveryPairState state, const v4::Pairing* pairing = nullptr);
     bool request(const char* deviceId, uint32_t nowMs);
     void receive(const v4::Frame& frame, uint32_t nowMs);
     void poll(uint32_t nowMs);
