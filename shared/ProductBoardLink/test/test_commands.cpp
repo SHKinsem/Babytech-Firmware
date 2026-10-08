@@ -344,6 +344,10 @@ void combinations() {
 
 void fieldValidation() {
     phase = "each field missing/type/unknown/duplicate";
+    const std::initializer_list<const char*> numericTokens = {"0", "1", "1.0"};
+    const std::initializer_list<const char*> stringTokens = {"\"1\"", "\"5000\"", "\"\""};
+    const std::initializer_list<const char*> uartOnlyKeys = {"source", "seq"};
+    const std::initializer_list<const char*> cloudOnlyKeys = {"command_seq", "command_session", "device_uptime_ms"};
     for (bool cloud : {false, true}) {
         for (unsigned kind = 1; kind < std::size(kNames); ++kind) {
             if (cloud && kind == 1) continue;
@@ -355,8 +359,7 @@ void fieldValidation() {
                 for (const char* token : {"null", "true", "false", "[]", "{}"})
                     reject(json(changed(fixture, field.first, token)), cloud);
                 const bool string = field.second[0] == '"';
-                for (const char* token : (string ? std::initializer_list<const char*>{"0", "1", "1.0"}
-                                                : std::initializer_list<const char*>{"\"1\"", "\"5000\"", "\"\""}))
+                for (const char* token : (string ? numericTokens : stringTokens))
                     reject(json(changed(fixture, field.first, token)), cloud);
                 reject(json(changed(removed(fixture, field.first), "unknown_field", field.second)), cloud);
                 auto duplicate = fixture;
@@ -385,8 +388,7 @@ void fieldValidation() {
             }
             for (const char* key : {"unknown", "ratio", "session", "command_session_challenge", "target_temp"})
                 reject(json(changed(fixture, key, "1")), cloud);
-            for (const char* key : (cloud ? std::initializer_list<const char*>{"source", "seq"}
-                                          : std::initializer_list<const char*>{"command_seq", "command_session", "device_uptime_ms"}))
+            for (const char* key : (cloud ? uartOnlyKeys : cloudOnlyKeys))
                 reject(json(changed(fixture, key, "1")), cloud);
             for (const char* key : kRecipe) {
                 const auto prepare = fields(command(), cloud);

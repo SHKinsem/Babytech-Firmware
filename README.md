@@ -515,7 +515,9 @@ cd ../..
 pio run -d device-controller
 ```
 
-GitHub Actions 执行前端与主机回归，并编译主控、设备 BRAIN 和 DISPLAY 配置，见 [CI 配置](.github/workflows/firmware-checks.yml)。浏览器 mock 测试与编译通过不代表实机验收完成。
+GitHub Actions 在 Ubuntu 执行前端与主机回归，并编译 Brain 默认/v4 和 Motion 默认/v4/peer=1 配置，最后恢复默认产物，见 [CI 配置](.github/workflows/firmware-checks.yml)。浏览器 mock 测试与编译通过不代表实机验收完成。
+
+Linux CI 与 macOS 本机测试都需要通过：生产源文件应显式包含所用标准函数的头文件，不能依赖 Arduino 或标准库间接包含；测试中条件选择的 `initializer_list` 必须拥有覆盖整个循环的存储生命周期。相关回归为 `python3 tools/test_motor_control_evidence.py --sanitize` 和 `python3 tools/test_board_commands.py --sanitize`，后者先构建 Motion 获取 ArduinoJson。不通过关闭 sanitizer、删除用例或放宽编译警告绕过失败。
 
 ## 接线
 
