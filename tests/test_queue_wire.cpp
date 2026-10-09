@@ -94,6 +94,30 @@ static void syncWire(unsigned productGroup = 0) {
     if (productGroup) assert(!queue.syncSettings().valid());
     puts("PASS real sync wire: budgeted fresh reads, target change corroboration, both cache ACKs, batched 02/9F, 6 CD packets, single FF, independent completion");
 }
+static void referenceClassification() {
+    tx.clear(); rx.clear(); failPacket = 0;
+    Rotation rotation; motion::MotorControl motor; motor.begin(2, 3, 500000); motion::CommandQueue queue(motor);
+    struct Case { const char* program; bool changes; };
+    const Case cases[] = {
+        {"wait 20", false}, {"enable 1", false}, {"hex 01 36 6B", false},
+        {"can ext 100 36 6B", false}, {"hex 01 45 66 00 03 20 6B", false},
+        {"hex 01 22 6B", false}, {"can ext 100 22 6B", false},
+        {"hex 01 22 00 6B", true}, {"can ext 100 22 00", true},
+        {"hex 01 11 18 36 00 64 6B", false},
+        {"hex 01 4C AE 00 02 00 00 1E 00 00 27 10 01 2C 03 E8 00 3C 00 6B", false},
+        {"hex 01 0A 6D 6B", true}, {"can ext 100 93 88 00 6B", true},
+        {"hex 01 46 69 00 01 6B", true}, {"can std 123 DE AD", true},
+        {"hex 01 FF 66 6B", true}, {"move 1 10 deg", true}, {"home 1 2", true},
+        {"torque 1 200", true}, {"velocity 1 10", true},
+    };
+    for (const auto& c : cases) {
+        const auto before = tx.size();
+        assert(queue.start(c.program, strlen(c.program), 1, rotation, now).code == 202);
+        assert(queue.changesReference() == c.changes && tx.size() == before);
+        queue.cancel("fixture_cleanup");
+    }
+    puts("PASS accepted-plan reference classification: read/enable/parameters isolated, motion/origin/mode/unknown raw retained");
+}
 static void allStopDuringSync() {
     tx.clear();rx.clear();failPacket=0;now=100;
     Rotation rotation;motion::MotorControl motor;motion::CommandQueue queue(motor);
@@ -186,5 +210,6 @@ int main() {
     puts("PASS real queue wire: two IDs, mm conversion, direction, all CD packets, passive ACK/reject/late/missing, partial TX");
     syncWire();
     syncWire(1); syncWire(2);
+    referenceClassification();
     allStopDuringSync();
 }

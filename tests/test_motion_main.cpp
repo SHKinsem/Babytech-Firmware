@@ -450,7 +450,15 @@ int main(int argc, char** argv) {
         if (which == "paired-boot") check(fake_brain::io.disk.at("productpair").at("record").bytes == originalPair &&
             fake_brain::io.disk.at("productstate").at("record").bytes == originalState, "boot modified pairing/business NVS");
         }
-        fake_motion_nvs::verifyNoEraseOrInit();
+        if (which.rfind("sdk-motor-test-reference-", 0) == 0 && !fake_motion_nvs::deletions.empty()) {
+            check(fake_motion_nvs::deletions.size() == 2 &&
+                  fake_brain::count(fake_brain::Op::Erase) == 2 && fake_brain::count(fake_brain::Op::Init) == 0,
+                  "reference fixture performed unexpected NVS deletion/initialization");
+            for (const auto& deletion : fake_motion_nvs::deletions)
+                check(deletion.allowed && deletion.kind == fake_motion_nvs::DeletionKind::Remove &&
+                      deletion.name == "motor-distance" && deletion.key == "d1",
+                      "reference fixture deleted unrelated data");
+        } else fake_motion_nvs::verifyNoEraseOrInit();
         check(fake_brain::io.handles.empty(), "NVS handle leak");
         std::cout << "PASS Motion main " << which << " checks=" << checks << " CAN=" << motion_io::canTx.size() << '\n';
         return 0;

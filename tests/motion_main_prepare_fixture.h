@@ -31,6 +31,7 @@ void run(const std::string& scenario) {
     motion_io::flowFeedback = motion_io::automaticFeedback = true;
     motion_io::lowWaterLevel = LOW;
     setup();
+    fake_motion_nvs::verifyNoEraseOrInit();
     check(demo.config().configured && !demoConfigJson.isEmpty() && motion_io::canTx.empty(),
           "embedded product JSON did not load without matching NVS or moved at boot");
     check(rotationMmValid[1] == differentDistance &&
@@ -169,6 +170,147 @@ void run(const std::string& scenario) {
               peer.link.peerStatus().lowWater, "real-sensor low-water input did not block Prepare");
         motion_io::lowWaterLevel = LOW; peer.step(80);
         check(product.canStart(), "normal water did not restore readiness");
+    }
+    if (scenario.rfind("sdk-prepare-reference-", 0) == 0) {
+        if (scenario == "sdk-prepare-reference-fault-wait" || scenario == "sdk-prepare-reference-fault-enable") {
+            // RX is consumed in motor.poll before HTTP; the Flow has not ticked yet.
+            motion_io::reply(1, {0x3a, 0x88, 0x6b});
+            const auto response = scenario == "sdk-prepare-reference-fault-wait"
+                ? http(HTTP_POST, "/api/queue/start", {{"program", "wait 400"}, {"repeat", "1"}})
+                : http(HTTP_POST, "/api/enable", {{"id", "1"}, {"enabled", "1"}});
+            check(response.status == 202 && !product.referenceValid() && !product.canStart(),
+                  "same-loop non-motion action erased fault without invalidating reference");
+            peer.step(100);
+            check(!product.referenceValid() && !product.canStart(), "later feedback revived a faulted reference");
+            return;
+        }
+        const auto productDisk = fake_brain::io.disk.at("productstate").at("record");
+        const auto generation = motor.movementGeneration();
+        const auto noEffect = [&](const char* path, WebServer::Arguments args, int expected) {
+            const auto before = motion_io::canTx.size();
+            const auto response = http(HTTP_POST, path, args);
+            if (response.status != expected)
+                throw std::runtime_error(std::string(path) + ": " + response.body);
+            check(product.referenceValid() &&
+                  motor.movementGeneration() == generation &&
+                  fake_brain::io.disk.at("productstate").at("record") == productDisk,
+                  "no-effect request invalidated reference, moved or changed product evidence");
+            for (size_t i = before; i < motion_io::canTx.size(); ++i)
+                check(readOnlyQuery(motion_io::canTx[i]), "no-effect request transmitted a mutation");
+        };
+        noEffect("/api/move", {{"id", "1"}, {"angle", "invalid"}}, 400);
+        noEffect("/api/command", {{"hex", "01CD6B"}}, 400);
+        noEffect("/api/queue/start", {{"program", "move 1 invalid deg 6 60 300 800"}, {"repeat", "1"}}, 400);
+        noEffect("/api/motor-distance", {{"id", "1"}, {"rotationDistance", "-1"}}, 400);
+        noEffect("/api/motor-distance", {{"id", "1"}, {"rotationDistance", "nan"}}, 400);
+        noEffect("/api/motor-distance", {{"id", "1"}, {"rotationDistance", "8"}}, 200);
+        check(rotationMmValid[1] && rotationMmValue[1] == 8 && demo.config().axes[0].rotationMm == 2,
+              "manual conversion changed product JSON conversion");
+        for (const auto op : {fake_brain::Op::OpenRW, fake_brain::Op::Set, fake_brain::Op::Commit}) {
+            fake_brain::fail(op, fake_brain::count(op) + 1);
+            noEffect("/api/motor-distance", {{"id", "1"}, {"rotationDistance", "9"}}, 500);
+            check(rotationMmValue[1] == 8, "failed save published candidate RAM distance");
+            fake_brain::verifyFaults();
+        }
+        {
+            fake_motion_nvs::AllowPreferencesDeletion deletion;
+            fake_brain::fail(fake_brain::Op::Erase, fake_brain::count(fake_brain::Op::Erase) + 1);
+            noEffect("/api/motor-distance", {{"id", "1"}, {"rotationDistance", "0"}}, 500);
+            check(rotationMmValid[1] && rotationMmValue[1] == 8, "failed clear changed RAM distance");
+            fake_brain::verifyFaults();
+            noEffect("/api/motor-distance", {{"id", "1"}, {"rotationDistance", "0"}}, 200);
+        }
+        check(!rotationMmValid[1] && demo.config().axes[0].rotationMm == 2,
+              "manual clear erased product conversion");
+        noEffect("/api/limits", {{"maxSpeedRpm", "invalid"}}, 400);
+        const WebServer::Arguments limits{{"maxSpeedRpm", "600"}, {"maxAngleDeg", "720"},
+            {"maxAccelRpmS", "600"}, {"maxCurrentMa", "1200"}, {"maxMoveSeconds", "120"},
+            {"experimentSeconds", "10"}};
+        fake_brain::fail(fake_brain::Op::Set, fake_brain::count(fake_brain::Op::Set) + 1);
+        noEffect("/api/limits", limits, 500); fake_brain::verifyFaults();
+        noEffect("/api/limits", limits, 200);
+        noEffect("/api/move", {{"id", "1"}, {"angle", "10"}, {"speed", "6"},
+            {"accel", "60"}, {"decel", "300"}, {"current", "800"}}, 409);
+        check(http(HTTP_POST, "/api/command", {{"hex", "01366B"}}).status == 202 &&
+              product.referenceValid(), "read command invalidated product reference");
+        check(http(HTTP_POST, "/api/queue/start", {{"program", "wait 400"}, {"repeat", "1"}}).status == 202 &&
+              product.referenceValid(), "wait-only queue invalidated product reference");
+        const auto waitIdentity = workbenchId();
+        noEffect("/api/enable", {{"id", "1"}, {"enabled", "1"}}, 409);
+        noEffect("/api/motor-distance", {{"id", "1"}, {"rotationDistance", "9"}}, 409);
+        check(workbenchId() == waitIdentity, "rejected request replaced wait queue identity");
+        peer.step(100);
+        check(product.canStart() && product.referenceValid() && !queue.active(),
+              "wait-only queue required reinitialization");
+        auto previousIdentity = waitIdentity;
+        for (const auto* program : {"hex 01 36 6B\nwait 1000", "can ext 100 36 6B\nwait 1000",
+             "hex 01 22 6B\nwait 1000", "can ext 100 22 6B\nwait 1000"}) {
+            check(http(HTTP_POST, "/api/queue/start", {{"program", program}, {"repeat", "1"}}).status == 202 &&
+                  product.referenceValid(), "read-only raw queue invalidated reference");
+            const auto currentIdentity = workbenchId();
+            check(currentIdentity != previousIdentity, "accepted read queue did not acquire a new workbench identity");
+            check(peer.link.requestStop(stopTarget(previousIdentity), motion_io::now), "stale Stop fixture rejected locally");
+            peer.step(20);
+            check(peer.link.stopSendState() == StopSendState::Rejected && workbenchId() == currentIdentity &&
+                  queue.active() && product.referenceValid(), "stale Stop cancelled the later read/wait owner");
+            peer.step(100);
+            check(product.canStart() && product.referenceValid(), "read-only raw queue required Initialize");
+            previousIdentity = currentIdentity;
+        }
+        for (const auto* hex : {"0145660003206B", "0111183600646B"}) {
+            check(http(HTTP_POST, "/api/command", {{"hex", hex}}).status == 202 &&
+                  product.referenceValid(), "non-coordinate configuration invalidated reference");
+            peer.step(100);
+            check(product.canStart() && product.referenceValid(), "parameter feedback did not recover without Initialize");
+        }
+        if (scenario == "sdk-prepare-reference-config-failure") {
+            motion_io::rejectedOpcode = 0x45;
+            check(http(HTTP_POST, "/api/command", {{"hex", "0145660003206B"}}).status == 503 &&
+                  !product.referenceValid() && !product.canStart(), "configuration TX fault retained reference");
+            return;
+        }
+        if (scenario == "sdk-prepare-reference-move" || scenario == "sdk-prepare-reference-partial" ||
+            scenario == "sdk-prepare-reference-enable") {
+            check(http(HTTP_POST, "/api/enable", {{"id", "1"}, {"enabled", "1"}}).status == 202 &&
+                  product.referenceValid(), "enable without motion invalidated reference");
+            peer.step(70);
+            if (scenario == "sdk-prepare-reference-enable") {
+                check(product.referenceValid(), "enable-only feedback required reinitialization");
+                return;
+            }
+        }
+        if (scenario == "sdk-prepare-reference-move" || scenario == "sdk-prepare-reference-partial") {
+            const bool partial = scenario == "sdk-prepare-reference-partial";
+            if (partial) { motion_io::rejectedOpcode = 0xcd; motion_io::rejectedPacket = 1; }
+            const auto response = http(HTTP_POST, "/api/move", {{"id", "1"}, {"angle", "10"},
+                {"speed", "6"}, {"accel", "60"}, {"decel", "300"}, {"current", "800"}});
+            check(response.status == (partial ? 503 : 202) && !product.referenceValid() &&
+                  motor.movementGeneration() != generation && !product.canStart(),
+                  "accepted/partial motion retained product reference");
+            return;
+        }
+        if (scenario == "sdk-prepare-reference-zero") {
+            check(http(HTTP_POST, "/api/command", {{"hex", "010A6D6B"}}).status == 202 &&
+                  !product.referenceValid() && !product.canStart(), "origin reset retained reference");
+            return;
+        }
+        if (scenario == "sdk-prepare-reference-queue") {
+            check(http(HTTP_POST, "/api/queue/start", {{"program", "move 1 10 deg 6 60 300 800"},
+                {"repeat", "1"}}).status == 202 && !product.referenceValid() && !product.canStart(),
+                  "accepted motion queue retained reference");
+            return;
+        }
+        if (scenario == "sdk-prepare-reference-can-origin" || scenario == "sdk-prepare-reference-hex-zero" ||
+            scenario == "sdk-prepare-reference-unknown") {
+            const char* program = scenario == "sdk-prepare-reference-can-origin" ? "can ext 100 93 88 00 6B" :
+                scenario == "sdk-prepare-reference-hex-zero" ? "hex 01 0A 6D 6B" : "can std 123 DE AD";
+            check(http(HTTP_POST, "/api/queue/start", {{"program", program}, {"repeat", "1"}}).status == 202 &&
+                  !product.referenceValid() && !product.canStart(), "reference-changing raw queue retained reference");
+            return;
+        }
+        check(motor.movementGeneration() == generation &&
+              fake_brain::io.disk.at("productstate").at("record") == productDisk,
+              "configuration/read/enable changed motion generation or product evidence");
     }
     const auto runBefore = queue.runId();
     CommandMessage prepare;

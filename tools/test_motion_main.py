@@ -26,7 +26,13 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
 PREPARE_CASES = ("sdk-prepare-flow", "sdk-prepare-home-missing", "sdk-prepare-marker-missing")
 MOTOR_TEST_CASES = ("sdk-motor-test-flow", "sdk-motor-test-stop",
                     "sdk-motor-test-home-missing", "sdk-motor-test-marker-missing",
-                    "sdk-motor-test-distance-mismatch", "sdk-motor-test-default-budget")
+                    "sdk-motor-test-distance-mismatch", "sdk-motor-test-default-budget",
+                    "sdk-motor-test-reference-preserved", "sdk-motor-test-reference-move",
+                    "sdk-motor-test-reference-partial", "sdk-motor-test-reference-zero",
+                    "sdk-motor-test-reference-queue", "sdk-motor-test-reference-enable",
+                    "sdk-motor-test-reference-fault-wait", "sdk-motor-test-reference-fault-enable",
+                    "sdk-motor-test-reference-config-failure", "sdk-motor-test-reference-can-origin",
+                    "sdk-motor-test-reference-hex-zero", "sdk-motor-test-reference-unknown")
 
 
 def main():

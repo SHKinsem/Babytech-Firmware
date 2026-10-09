@@ -1,4 +1,6 @@
 #include "CommandQueue.h"
+#include "ProtocolGate.h"
+#include "x42s_can_id.h"
 
 #include <algorithm>
 #include <string.h>
@@ -756,6 +758,40 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     motionComplete_=false;
     unconfirmedMotion_=false;
     return Result{202, "queue_started"};
+}
+
+bool CommandQueue::changesReference() const {
+    DebugLimits protocolLimits;
+    protocolLimits.maxSpeedTenths = 30000;
+    protocolLimits.maxAccelRpmS = 65535;
+    protocolLimits.maxCurrentMa = 5000;
+    for (uint8_t i = 0; i < program_.count; ++i) {
+        const auto& step = program_.steps[i];
+        switch (step.action) {
+            case QueueAction::Move: case QueueAction::Home:
+            case QueueAction::Torque: case QueueAction::Velocity: return true;
+            case QueueAction::Hex: case QueueAction::Can: {
+                uint8_t bytes[kQueueMaxRawBytes];
+                uint8_t length = step.rawLength;
+                if (step.action == QueueAction::Hex) {
+                    memcpy(bytes, step.raw, length);
+                } else {
+                    if (!x42sCanIsSinglePacketDataFrame(step.canId, step.extended, false)) return true;
+                    bytes[0] = x42sCanAddress(step.canId);
+                    length = step.canLength + 1;
+                    memcpy(bytes + 1, step.canData, step.canLength);
+                }
+                // Broadcast diagnostics/config have the same logical layout.
+                bytes[0] = 1;
+                // Queue-only homing-parameter read; keep the HTTP whitelist unchanged.
+                if (length == 3 && bytes[1] == 0x22 && bytes[2] == 0x6B) break;
+                if (commandChangesReference(validateCommand(bytes, length, protocolLimits), bytes)) return true;
+                break;
+            }
+            default: break;
+        }
+    }
+    return false;
 }
 
 Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {

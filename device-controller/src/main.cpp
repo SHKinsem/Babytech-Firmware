@@ -815,9 +815,9 @@ void serviceBrainLink() {
 
 bool demoManualMutation() {
     if (demoBusy()) { sendError(409, F("demo_busy")); return false; }
-    // Admission is not an execution handoff: a rejected or configuration-only
-    // request must leave the retained product's Stop/D1 owner intact.
-    demo.invalidate();
+    // Preserve observed faults before a manual action can clear their evidence.
+    // Admission alone is not movement or an execution handoff.
+    if (demo.referenceValid() && !demoExecutor.healthy()) demo.invalidate();
     return true;
 }
 
@@ -1167,6 +1167,7 @@ void handleMove() {
     const auto movementBefore = motor.movementGeneration();
     const motion::Result result = motor.move(request);
     if (result.code < 300 || motor.movementGeneration() != movementBefore) {
+        demo.invalidate();
         productRuntime.workbenchAccepted();
     }
     sendResult("move", id, result);
@@ -1324,6 +1325,8 @@ void handleCommand() {
     if (kind == motion::CommandKind::Enable && bytes[3] == 0) cancelUartForLocalDisable();
     const auto movementBefore = motor.movementGeneration();
     const motion::Result result = motor.command(bytes, hex.length()/2);
+    if ((result.code < 300 || motor.movementGeneration() != movementBefore) &&
+        motion::commandChangesReference(kind, bytes)) demo.invalidate();
     if ((result.code < 300 || motor.movementGeneration() != movementBefore) &&
         (kind == motion::CommandKind::Move || kind == motion::CommandKind::DirectMove ||
          kind == motion::CommandKind::Experiment || kind == motion::CommandKind::Home)) {
@@ -1494,6 +1497,7 @@ void handleQueueStart() {
     const motion::Result started =
         queue.start(program.c_str(), program.length(), repeat, boardRotation, millis());
     if (started.code < 300) {
+        if (queue.changesReference()) demo.invalidate();
         productRuntime.workbenchAccepted();
         // Only a started program takes the bus over: finish any pending UART
         // record so the two owners cannot interleave. An invalid program has no
