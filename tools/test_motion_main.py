@@ -15,7 +15,7 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         "http-partial-tx", "uart-context-command", "sdk-crypto", "http-product-guards",
         "http-history-debug", "http-product-stop-failure",
         "http-maintenance-usb", "http-maintenance-uart-release", "http-maintenance-uart-expiry",
-        "http-maintenance-busy",
+        "http-maintenance-busy", "install-blank", "install-motion-settled",
         "http-ota-auth", "http-ota-controls", "http-ota-write-failure", "http-ota-image-invalid",
         "http-ota-hash-mismatch", "http-ota-disconnect-abort", "http-ota-start-unsafe",
         "http-ota-challenge-expiry", "http-ota-session-wrap", "sdk-water-sampling",
@@ -92,7 +92,7 @@ def main():
                 "tests/fakes/motion_main/FakeMotionNvs.cpp", "tests/fakes/motion_main/FakeMotionIo.cpp",
                 "tests/test_motion_main.cpp"]
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function",
-             "-ffunction-sections", "-fdata-sections", "-DARDUINO=10819", "-DMOTION_UART_PEER=4",
+             "-ffunction-sections", "-fdata-sections", "-DARDUINO=10819",
              "-DMBEDTLS_VERSION_MAJOR=2", "-DARDUINOJSON_ENABLE_ARDUINO_STRING=1",
              "-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0", "-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0",
              "-DARDUINOJSON_ENABLE_PROGMEM=1"]

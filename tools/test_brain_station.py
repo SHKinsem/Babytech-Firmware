@@ -20,8 +20,7 @@ def main():
     compiler = shutil.which(os.environ.get("CXX", "c++"))
     if not compiler:
         raise SystemExit("A C++17 compiler is required")
-    command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-               "-DBABYTECH_BOARD_LINK_V4=1"]
+    command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic"]
     if args.sanitize:
         command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     for include in ("tests/fakes/brain_network", "tests/fakes/cloud_link", "main-controller/src"):

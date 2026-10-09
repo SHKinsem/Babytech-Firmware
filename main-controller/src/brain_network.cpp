@@ -1,6 +1,5 @@
 #include "brain_network.h"
 
-#if BABYTECH_BOARD_LINK_V4
 #include "brain_status.h"
 #include <cstdio>
 #include <cstring>
@@ -269,4 +268,3 @@ void BrainNetwork::poll(const boardlink::Status* lastMotion, bool motionConnecte
 }
 
 } }
-#endif

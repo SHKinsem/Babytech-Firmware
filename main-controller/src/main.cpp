@@ -4,7 +4,6 @@
 #include "babytech_st7796_panel.h"
 #include "controller_link.h"
 #include "brain_network.h"
-#if BABYTECH_BOARD_LINK_V4
 #include <MaintenanceUsbConsole.h>
 #include "brain_network_console.h"
 #include "brain_pairing_console.h"
@@ -20,14 +19,12 @@
 #include "brain_simulation_mode_guard.h"
 #include "brain_result_delivery.h"
 #include <esp_system.h>
-#endif
 
 namespace {
 
 babytech::display::BabytechSt7796Panel panel;
 babytech::display::BabytechDisplayView view;
 babytech::display::ControllerLink controllerLink;
-#if BABYTECH_BOARD_LINK_V4
 babytech::brain::BrainNetwork network;
 babytech::brain::BrainResultDelivery<babytech::display::ControllerLink,
   babytech::brain::BrainNetwork> resultDelivery(controllerLink, network);
@@ -172,29 +169,23 @@ void pollCommissioningConsole() {
         line, commissioningSession.active(), network, output, capacity);
     });
 }
-#endif
 bool displayReady = false;
 
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
-#if BABYTECH_BOARD_LINK_V4
   // Arduino 3.3 HWCDC decrements an unsigned retry counter: zero can wrap.
   Serial.setTxTimeoutMs(1);
-#endif
   Serial.setTimeout(20);
   displayReady = panel.begin() && view.begin(true);
-#if BABYTECH_BOARD_LINK_V4
   if (displayReady) createLocalStopButton();
-#endif
   if (displayReady) {
     Serial.println("[Display] LVGL UI ready");
   } else {
     Serial.println("[Display] Panel initialization failed");
   }
   controllerLink.begin();
-#if BABYTECH_BOARD_LINK_V4
   uint64_t maintenanceBoot = 0;
   while (!maintenanceBoot) maintenanceBoot = (uint64_t(esp_random()) << 32) | esp_random();
   commissioningSession.begin(babytech::v4::Role::Brain, maintenanceBoot);
@@ -221,13 +212,11 @@ void setup() {
   localDispatcher.setPrepareReadyHandler(contextReady);
   localDispatcher.setAcceptanceHandler(observeRealAcceptance);
   pendingRecovery.setAcceptanceHandler(observeRealAcceptance);
-#endif
 }
 
 void loop() {
   uint32_t nowMs = millis();
   controllerLink.poll(nowMs);
-#if BABYTECH_BOARD_LINK_V4
   // Service touchscreen Stop before simulation completion and any Store I/O.
   touchStop.beginPass();
   if (displayReady) view.poll(uint32_t(millis()));
@@ -255,21 +244,16 @@ void loop() {
   contextSync.poll(uint32_t(millis()), commissioningSession.active(),
     cloudDispatcher.busy() || localDispatcher.busy(), !simulating());
   if (!commissioningSession.active()) controllerLink.releaseMaintenance(uint32_t(millis()));
-#endif
   if (!displayReady) {
     delay(10);
     return;
   }
 
   const uint32_t displayNowMs = millis();
-#if !BABYTECH_BOARD_LINK_V4
-  view.poll(displayNowMs);
-#endif
   babytech::display::DisplaySnapshot snapshot;
   bool controllerConnected = controllerLink.connected(displayNowMs);
   bool intentPending = controllerLink.intentPending();
   if (controllerLink.hasSnapshot()) snapshot = controllerLink.snapshot();
-#if BABYTECH_BOARD_LINK_V4
   snapshot.cloudConnected = network.connected();
   snapshot.startEnabled = localDispatcher.canStart(displayNowMs,
     commissioningSession.active() || cloudDispatcher.ordinaryBusy());
@@ -277,8 +261,6 @@ void loop() {
     !productState.ready() || productState.state().pending ||
     productState.state().localSequence >= babytech::v4::kMaxSequence;
   if (commissioningSession.active()) snapshot.startEnabled = false;
-#endif
-#if BABYTECH_BOARD_LINK_V4
   if (simulating()) {
     const auto& state = simulation->status();
     snapshot = {};
@@ -300,7 +282,6 @@ void loop() {
     controllerConnected = true;
     intentPending = state.running;
   } else
-#endif
   if (controllerLink.protocolIncompatible(displayNowMs)) {
     snapshot.primaryCondition =
         babytech::display::DisplayCondition::ProtocolIncompatible;
@@ -313,7 +294,6 @@ void loop() {
 
   babytech::display::DisplayIntent intent;
   const bool hasIntent = view.takeIntent(intent);
-#if BABYTECH_BOARD_LINK_V4
   if (hasIntent && (touchStop.requested() || commissioningSession.active() || simulating())) {
     delay(5);
     return;
@@ -326,10 +306,5 @@ void loop() {
       Serial.printf("[Brain] Local intent unavailable: %s\n", localDispatcher.reason());
     }
   }
-#else
-  if (hasIntent && !controllerLink.sendIntent(intent, displayNowMs)) {
-    Serial.println("[Display] Intent ignored while controller is unavailable");
-  }
-#endif
   delay(5);
 }

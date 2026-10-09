@@ -1,6 +1,5 @@
 #include "brain_mode.h"
 
-#if BABYTECH_BOARD_LINK_V4
 #include "brain_station.h"
 #include <WiFi.h>
 #include <nvs.h>
@@ -146,4 +145,3 @@ void BrainStation::poll() {
 }
 
 } }
-#endif

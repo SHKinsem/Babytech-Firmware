@@ -171,6 +171,8 @@ void recovery(v4::Pairing pair, bool defaultBudget) {
     check(budget.gapMs == (defaultBudget ? 100 : 20) && budget.timeoutMs == (defaultBudget ? 500 : 100) &&
           budget.cooldownMs == (defaultBudget ? 500 : 100) && budget.maxInflight == 2, "boot budget fields differ from fixture");
     check(productRecovery.motionPending() && productRecovery.executionPending(), "Intent boot didn't request supervised Stop");
+    check(!safeForInstallation() && !migrationMaintenance.safeToAcquire(),
+          "pending recovery admitted installation without motor feedback");
     const auto commandsBefore = motion_io::canTx.size();
     check(commandsBefore > 0, "Intent boot did not transmit Stop");
     for (const auto& f : motion_io::canTx) check(f.data[0] == 0xfe || f.data[0] == 0x9c, "Intent boot resumed/ enabled motion");
@@ -327,6 +329,50 @@ void waterInputValidation() {
     }
 }
 
+void blankInstallation(bool configured) {
+    if (configured) motion_main_http::savedDebugProfile();
+    setup(); tick(100);
+    check(!motion_io::automaticFeedback && !productBoardLink.verifiedPairing() &&
+          !productState.ready() && !motor.movementGeneration(), "blank installation fixture is not blank");
+    check(!demo.stationary() && !safeForCommissioning() && !productHardware.stationary(),
+          "missing motor feedback became physical stop proof");
+    check(safeForInstallation() && safeForRemoteInstall() && migrationMaintenance.safeToAcquire(),
+          "motor-free idle board cannot install");
+    check(!product.canStart() && !product.executionAuthorized(), "installation authorized real feeding");
+    const auto durable = fake_brain::io.disk;
+    const auto before = motion_io::canTx.size();
+    check(http(HTTP_POST, "/api/queue/start", {{"program", "wait 10000"}, {"repeat", "1"}}).status == 202,
+          "wait queue fixture refused");
+    check(!safeForInstallation() && !safeForRemoteInstall() && !migrationMaintenance.safeToAcquire(),
+          "active queue admitted installation");
+    check(http(HTTP_POST, "/api/queue/cancel").status == 200 && !queue.active(), "queue cancellation failed");
+    check(!motor.movementGeneration() && safeForInstallation(), "cancelled wait queue locked installation");
+    check(fake_brain::io.disk == durable, "installation admission changed NVS");
+    for (size_t i = before; i < motion_io::canTx.size(); ++i)
+        check(readOnlyQuery(motion_io::canTx[i]) || motion_io::canTx[i].data[0] == 0xfe ||
+              motion_io::canTx[i].data[0] == 0x9c, "installation admission sent a movement command");
+
+    check(http(HTTP_POST, "/api/queue/start", {{"program", "move 1 10 deg 6 60 300 800\nwait 10000"},
+          {"repeat", "1"}}).status == 202, "movement fixture refused");
+    tick(20);
+    check(motor.movementGeneration() != 0, "movement fixture never submitted motion");
+    check(http(HTTP_POST, "/api/control/reset").status == 200, "movement reset failed");
+    check(!queue.active() && !motor.operationBusy() && !controlBusy(), "reset did not clear software activity");
+    check(!safeForInstallation() && !migrationMaintenance.safeToAcquire(),
+          "software reset erased original physical stop requirement");
+    if (configured) {
+        motion_io::automaticFeedback = true;
+        tick(400);
+        motion_main_http::stationaryReplies();
+        check(motor.movementGeneration() != 0 && safeForCommissioning(),
+              "fresh stationary feedback did not restore original commissioning guard");
+        check(safeForInstallation() && safeForRemoteInstall() && migrationMaintenance.safeToAcquire(),
+              "settled motion permanently blocked installation");
+        check(!product.executionAuthorized() && !product.canStart(),
+              "restored installation guard authorized real preparation");
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc >= 2 && std::string(argv[1]) == "dual-bridge")
@@ -354,6 +400,8 @@ int main(int argc, char** argv) {
         else if (which == "http-maintenance-uart-release") motion_main_http::maintenance(seedPair(), 1);
         else if (which == "http-maintenance-uart-expiry") motion_main_http::maintenance(seedPair(), 2);
         else if (which == "http-maintenance-busy") motion_main_http::maintenanceBusy(seedPair());
+        else if (which == "install-blank" || which == "install-motion-settled")
+            blankInstallation(which == "install-motion-settled");
         else if (which == "http-ota-auth") { seedPair(); motion_main_ota::auth(); }
         else if (which == "http-ota-controls" || which == "http-ota-session-wrap")
             motion_main_ota::controls(seedPair(), which == "http-ota-session-wrap");

@@ -1,5 +1,7 @@
 # 电机协议工作台交付说明
 
+描述对象：Motion 内嵌 CAN 工作台与调试网络；当前 Milestone：V1 UART v4 软件闭环，实机验收待完成。旧 Brain/Motion v3/v2 固件入口已经退役，但本文工作台能力全部保留，默认 `motion` 构建即可使用，不增加配对或 Cloud 在线门禁。下文按旧版记录的命令覆盖与测试数字不是本次验证结果，当前队列能力另见 [队列说明](motor-queue.md)。
+
 本版把 Claude Code 开发的桌面工作台接入 Motion 固件，整合原有 Wi-Fi 配网与电机控制。`device-controller/data/index.html` 是构建生成的单文件页面，CSS、JavaScript 均已内联，烧录后不依赖电脑网页服务、CDN 或单独文件系统分区。
 
 目标硬件：ESP32-S3 N16R8，16 MB Flash、8 MB OPI PSRAM。CAN TX GPIO4、RX GPIO5，500 kbit/s；需要外接 CAN 收发器。UART brain 链路维持 GPIO43/44、115200。

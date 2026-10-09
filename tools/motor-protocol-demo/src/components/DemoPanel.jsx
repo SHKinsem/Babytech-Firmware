@@ -93,7 +93,7 @@ export function DemoPanel() {
     <section className="panel demo-status">
       <h2 className="panel__title">屏幕流程演示</h2>
       <p>仅供演示，产物不得用于喂养。水量与温度为配置值。</p>
-      <p role="status">{!online ? '状态未连接' : !status?.available ? '当前为 BRAIN 固件，请编译 DISPLAY 分支。' : status.initializing ? '正在初始化找零' : stageNames[status.stage] || status.stage}</p>
+      <p role="status">{!online ? '状态未连接' : !status?.available ? '流程调试状态不可用，请确认 Motion 固件版本。' : status.initializing ? '正在初始化找零' : stageNames[status.stage] || status.stage}</p>
       <dl><dt>软件参考</dt><dd>{online && status?.referenceValid ? '有效' : '无有效确认'}</dd><dt>流程配置</dt><dd>{status?.configured ? '已配置' : '需要填写脚本和轴配置'}</dd><dt>板端原因</dt><dd>{status?.reason || '—'}</dd><dt>Error</dt><dd>{status?.error || '—'}</dd></dl>
       <button className="button button--outline" disabled={locked || dirty || !status?.configured} onClick={()=>post('/api/demo/action',{action:'initialize'})}>复位 / 初始化</button>
       <button className="button button--primary" disabled={locked || dirty || !status?.startEnabled} onClick={()=>post('/api/demo/action',{action:'start'})}>完整流程运行</button>

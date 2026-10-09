@@ -103,7 +103,7 @@ def main():
     if not compiler:
         raise SystemExit("A C++17 compiler is required")
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-               "-DARDUINO=10819", "-DBABYTECH_BOARD_LINK_V4=1", "-DMBEDTLS_VERSION_MAJOR=3",
+               "-DARDUINO=10819", "-DMBEDTLS_VERSION_MAJOR=3",
                '-DFIRMWARE_VERSION="host-test"']
     if sys.platform == "darwin":
         command.append("-Wno-deprecated-declarations")

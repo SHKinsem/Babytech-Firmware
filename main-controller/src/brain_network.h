@@ -1,7 +1,6 @@
 #pragma once
 
 #include "brain_mode.h"
-#if BABYTECH_BOARD_LINK_V4
 #include "CloudLink.h"
 #include "ProductBoardMessages.h"
 #include "ProductContext.h"
@@ -98,4 +97,3 @@ private:
 };
 
 } }
-#endif

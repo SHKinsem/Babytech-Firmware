@@ -16,6 +16,8 @@ Windows 目录仍是源码主目录；WSL 只维护自动同步的编译副本�
 
 默认发行版 `Ubuntu`，默认 8 个编译任务。可传 `-Distro Ubuntu -Jobs 4`。
 
+2026-10-09 起 Brain/Motion 仅支持成对 UART v4，无需额外宏；旧 Brain 宏 0、Motion peer 1/2 编译失败，WSL 脚本不另设协议版本。编译不自动开启 `SIM ON`、安装配对或启用真实非食用流程。本次未执行 WSL 实际构建，历史验证范围见文末。
+
 脚本会：
 
 1. 按 Windows 工程路径创建独立的 WSL 编译目录，并取得构建锁。

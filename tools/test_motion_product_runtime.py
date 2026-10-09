@@ -30,13 +30,7 @@ def manual_admission_source(root):
         if depth:
             raise SystemExit("Unbalanced main.cpp manual admission definition")
         definitions.append(source[start:end])
-    return ("#define MOTION_HAS_PRODUCT 1\n"
-            "#define MOTION_UART_PEER 2\n"
-            "#define MOTION_UART_PEER_PRODUCT_BRAIN 2\n" +
-            "\n".join(definitions) + "\n"
-            "#undef MOTION_HAS_PRODUCT\n"
-            "#undef MOTION_UART_PEER\n"
-            "#undef MOTION_UART_PEER_PRODUCT_BRAIN\n")
+    return '\n'.join(definitions) + '\n'
 
 
 def recovery_stationary_source(root):

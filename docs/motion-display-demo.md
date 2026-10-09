@@ -1,30 +1,35 @@
-# Motion / Display 演示操作说明
+# Motion 网页流程调试说明
 
-描述对象：工具 Motion 的 DISPLAY 编译分支、原产品 DisplayController v3 和网页“屏幕流程”。Milestone：V1 软件接入完成，机械脚本与双板实机验收待完成。本说明不代表机构或真实出料已验收。
+描述对象：当前 Motion UART v4 固件中的网页“屏幕流程”、JSON 与 HTTP 调试接口。Milestone：V1 软件闭环，机械脚本与双板实机验收待完成。本文不描述 Brain 产品命令、旧 UART v3 操作或真实出料验收。
 
 ## 构建与接线
 
-默认 `pio run -d device-controller` 构建 DISPLAY/v3；`device-controller/platformio.ini` 的 `build_flags` 已包含 `-DMOTION_UART_PEER=2`。需要恢复 BRAIN/v2 时，显式改用 `-DMOTION_UART_PEER=1` 并重新编译烧录同一个 `motion` environment。
+仅支持现有 Brain/Motion UART v4 配套构建，不新增 environment。旧 Brain 宏 0、Motion peer 1/2 编译入口已经退役并明确报错；历史实现从 Git 获取，不再提供旧演示烧录步骤。网页 CAN 控制、队列、流程调试、Wi-Fi、称重与 OTA 保持可用，不依赖 Brain 配对或 Cloud 在线。
 
-启动日志 `peer=display-v3` 表示显示分支；`peer=brain-v2` 表示原协议。非法宏值不能编译。DISPLAY 分支不消费 Brain 协议或向屏幕发送 Brain 帧。
+在子仓库根目录只编译（不烧录）：
 
-屏幕继续使用产品仓库 `Embeded_System/DisplayController` 的 `display` 固件；无需迁入 LCD、触摸或 LVGL。共享协议来源见 [SOURCE.md](../shared/BabytechDisplayCore/SOURCE.md)。两端都必须是 protocol/schema 3。
+```sh
+pio run -d main-controller -e brain
+pio run -d device-controller -e motion
+```
+
+Brain 产品命令经 UART v4 的持久运行入口处理；网页流程是 Motion 工作台 owner，不等同于屏幕产品 Start/Initialize，不生成假宝宝/配方。非食用产品开关仍为 0，NVS、SQLite schema 和 v4 线字段不变。软件编译不代表服务器切换或实机验收。
 
 Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，共地。115200 / 8N1 / 3.3 V；分别 USB 供电时不互接 5 V。依实际 GPIO 接线，不凭排针 TX/RX 丝印判断方向。
 
 ## 配置与操作
 
-1. 连接 Motion 热点，进入网页“屏幕流程”。BRAIN 构建会明确显示功能不可用。
+1. 使用上述默认 v4 构建，连接 Motion 热点，进入网页“屏幕流程”。无需选择旧宏；网页工作台和 Brain 产品入口保持各自的所有权与准入语义。
 2. 内置 `device-controller/data/demo_flow.json` 保存台架配置；上电只校验并载入，不自动运动。网页 Load 与编辑只改变本机草稿。配置可解析不代表机构已验收或已经 Ready。
 3. Apply 校验后整份替换 RAM 配置，不运动；失败保留旧配置。配置替换撤销旧软件参考。Export 导出编辑器中的配置，可保存到上述工程路径后重新编译烧录。没有文件系统上传、永久保存按钮或自动恢复中断流程。
-4. 在 Apply 可接受配置后，由现场确认机构安全，点击网页“复位 / 初始化”，或配套新版显示板圆环右侧的 `Initialize`。两者共用 Motion 初始化入口；屏幕找零中仍显示 NotReady，不增加 initializing 状态。入口只要求配置有效、执行器空闲且 CAN 可用，不以五轴位置/速度轮询完整为前提；队列的 `await`、已知故障及脚本超时仍可使本次初始化失败。
+4. 在 Apply 可接受配置后，由现场确认机构安全，点击网页“复位 / 初始化”。Brain 屏幕 Initialize 走产品运行入口，不按旧演示协议提交意图。入口只要求配置有效、执行器空闲且 CAN 可用，不以五轴位置/速度轮询完整为前提；队列的 `await`、已知故障及脚本超时仍可使本次初始化失败。
 5. 先逐个调试业务阶段。单阶段结束停在 NotReady，不自动执行其他阶段；需回零时运行包含回程动作的混合阶段，再点复位重新检查。软件参考仍有效时复位不会重新碰撞找零。
-6. Ready 时用屏幕 Start 或网页“完整流程运行”：开盖 → 加水 → 加粉 → 关盖 → 混合（脚本内按相对位移回程）→ Complete 保持 3 秒 → Ready。流程层不再额外核验五轴实时位置/速度或混合后的零位；队列 `await` 与阶段超时仍生效。没有额外回起始位置阶段；展示计时不发送运动指令。下次 Start 前操作者自行换瓶。
+6. Ready 时用网页“完整流程运行”：开盖 → 加水 → 加粉 → 关盖 → 混合（脚本内按相对位移回程）→ Complete 保持 3 秒 → Ready。流程层不再额外核验五轴实时位置/速度或混合后的零位；队列 `await` 与阶段超时仍生效。没有额外回起始位置阶段；展示计时不发送运动指令。下次 Start 前操作者自行换瓶。
 7. 任何阶段可用顶部“全部停止”。取消剩余脚本并发送广播回零中断/停止；新鲜静止反馈才证明停止，超过 3 秒仍未确认则 Error。Error 由显式复位解除，参考失效时重新初始化，不续跑旧动作。
 
 当前内置配置在关盖阶段使用 `sync begin trigger` 同步组；轴 1 的 68.2 mm 回程仅为位移账面平衡，两者均尚未完成这套演示流程的实机验收。
 
-屏幕只保留原 Start 和状态显示。Motion `startEnabled` 由 Ready 派生，Cloud offline 提示允许保留。宝宝、品牌、水量、温度为演示数据，`thermalSimulated=true`，两个条件字段均为 None；产物不用于喂养。
+网页流程的 Ready 来自已应用的台架配置与软件参考，不证明真实出料。Brain 产品 Start/Initialize 使用既有 v4 运行路径及真实缓存，不使用旧演示数据；产物不用于喂养。
 
 ## JSON 与脚本契约
 
@@ -67,7 +72,7 @@ zero ID RPM ACCEL DECEL CURRENT
 
 ## HTTP API
 
-屏幕 UART 的 v3 Intent 新增单字节 `Initialize=2`，原 `StartFeeding=1` 和 State 格式不变。Initialize 仅在 NotReady / Error 转交初始化入口，Ready / 运行态拒绝。ACK 表示接受请求，不表示完成；相同序号重复请求不重复执行，同序号换意图拒绝。找零期间再次点击的新序号由 busy 检查拒绝。屏幕离线或待 ACK 时禁用按钮，不自动恢复初始化请求；旧 Motion 不识别新指令，会导致屏幕 ACK 超时，须配套更新显示板和 Motion。旧屏幕配新 Motion 仍可使用网页初始化。
+旧 UART v3 Intent/State 运行入口已经移除；共享 codec 单测仅保留内部回归。下表网页 HTTP 接口在当前 Motion v4 中保持，不以 Cloud 或 Brain 在线作为额外准入；原有机械安全、工作所有权、维护与 OTA 冲突检查不变。
 
 POST 沿用 `application/x-www-form-urlencoded`。请求被接受不表示机械完成；客户端不自动重发 POST。
 
@@ -77,7 +82,7 @@ POST 沿用 `application/x-www-form-urlencoded`。请求被接受不表示机械
 | `GET /api/demo/config` | 当前已应用 JSON，读取不运动 |
 | `POST /api/demo/config` | `json`：整份校验并应用到 RAM |
 | `POST /api/demo/action` | `action=initialize`：复位检查或首次找零 |
-| 同上 | `action=start`：与屏幕相同 Ready 入口 |
+| 同上 | `action=start`：网页流程 Ready 入口 |
 | 同上 | `action=stage&stage=mix` 等：单阶段调试 |
 | 既有 `POST /api/stop-all` | 优先中止演示和余下队列，并请求停止 |
 
@@ -94,6 +99,6 @@ npm run build:device
 
 主机测试覆盖协议 v3、golden intent、重试去重、Ready/Start、初始化、阶段超时、Stop、Complete 计时、millis 回绕、JSON 校验、真实队列适配和软件零点报文。网页通过模拟 HTTP API 验证 Load 不 POST、Apply 不执行、Ready 启动、运行中锁定及已有 Stop；桌面尺寸为 1513×1039 / 1280×800。
 
-本次软件交付验证：上述三组主机测试、网页 82 项测试、设备网页构建及 Motion 的 BRAIN / DISPLAY 双模式编译均通过。代码自审覆盖执行器独占、配置替换、停止确认、多轴反馈和掉电参考失效；未进行独立 Agent Review。浏览器模拟回归无控制台错误，不替代双板 UART 与真实电机验证。
+原演示阶段软件交付验证：上述三组主机测试、网页 82 项测试、设备网页构建及 Motion 的 BRAIN / DISPLAY 双模式编译均通过。代码自审覆盖执行器独占、配置替换、停止确认、多轴反馈和掉电参考失效；未进行独立 Agent Review。浏览器模拟回归无控制台错误，不替代双板 UART 与真实电机验证；这些证据不代表本次默认 v4 构建或实机验收。
 
-未烧录或驱动硬件。现场必须先确认电源/急停和机械区域，再逐轴低速验收碰撞找零、`50/3A` 掉电检测、软件 zero、单阶段、完整流程、停止未确认、屏幕断线/重启及连续循环。水粉等待演示不等于称重/流量闭环。App、Cloud、SQLite 无需升级或迁移；显示板需确认已烧录协议 v3。
+未烧录或驱动硬件。现场必须先确认电源/急停和机械区域，再逐轴低速验收碰撞找零、`50/3A` 掉电检测、软件 zero、单阶段、完整流程、停止未确认、屏幕断线/重启及连续循环。水粉等待演示不等于称重/流量闭环。App、Cloud、SQLite 无需升级或迁移；两板仅使用配套 UART v4，旧屏幕演示不得混烧。

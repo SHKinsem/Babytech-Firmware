@@ -38,6 +38,7 @@ jobs:
 
       - name: Run protocol, motion, raw CAN, and demo tests
         run: |
+          python -m unittest discover -s tests -p 'test_firmware_defaults.py'
           python tools/test_protocol.py
           python tools/test_pairing_record.py --sanitize
           python tools/test_pairing_store.py --sanitize
@@ -77,7 +78,7 @@ jobs:
       - name: Install host SHA-256 test dependency
         run: sudo apt-get update && sudo apt-get install --yes libssl-dev
 
-      - name: Build BRAIN and MOTION migration variants
+      - name: Build paired UART v4 BRAIN and MOTION
         shell: bash
         run: |
           set -euo pipefail
@@ -102,8 +103,6 @@ jobs:
 
           pio run --project-dir "$brain_dir"
           python tools/test_display_view.py
-          PLATFORMIO_BUILD_SRC_FLAGS=-DBABYTECH_BOARD_LINK_V4=1 pio run --project-dir "$brain_dir"
-          pio run --project-dir "$brain_dir"
           pio run --project-dir "$motion_dir"
           python tools/test_cloud_link.py --sanitize
           python tools/test_cloud_contract.py
@@ -152,6 +151,3 @@ jobs:
           python -m unittest discover -s tests -p test_configure_brain_network.py
           python -m unittest discover -s tests -p test_install_brain.py
           python -m unittest discover -s tests -p test_package_ota.py
-          PLATFORMIO_BUILD_SRC_FLAGS=-DMOTION_UART_PEER=4 pio run --project-dir "$motion_dir"
-          PLATFORMIO_BUILD_SRC_FLAGS=-DMOTION_UART_PEER=1 pio run --project-dir "$motion_dir"
-          pio run --project-dir "$motion_dir"

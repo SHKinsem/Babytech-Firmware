@@ -82,6 +82,52 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertIn("commissioningActive()", gate)
         self.assertIn('sendError(409, F("commissioning_active"))', gate)
 
+    def test_v4_retirement_keeps_all_workbench_routes_without_pairing_or_cloud_gates(self):
+        routes = set(re.findall(r'server\.on\("([^"]+)", HTTP_(GET|POST)', self.motion))
+        expected_get = {"/", "/api/status", "/api/limits", "/api/can-debug",
+                        "/api/config-result", "/api/trace", "/api/logs", "/api/scale",
+                        "/api/queue", "/api/query-budget", "/api/sync-settings",
+                        "/api/motor-distance", "/api/demo", "/api/demo/config"}
+        expected_post = {"/api/limits", "/api/polling", "/api/scale/config", "/api/scale/tare",
+                         "/api/scale/calibrate", "/api/command", "/api/enable", "/api/enable-all",
+                         "/api/move", "/api/stop", "/api/stop-all", "/api/control/reset",
+                         "/api/query-budget", "/api/sync-settings", "/api/queue/start",
+                         "/api/queue/cancel", "/api/motor-distance", "/api/demo/config",
+                         "/api/demo/action"}
+        self.assertEqual(routes, {(path, "GET") for path in expected_get} |
+                         {(path, "POST") for path in expected_post})
+        for signature in ("bool demoBusy()", "bool controlBusy()", "bool motionBusy()",
+                          "bool demoManualMutation()", "bool networkChangeBusy()",
+                          "bool rejectDuringMaintenance()", "bool rejectDuringOta()"):
+            body = function_body(self.motion, signature)
+            for forbidden in ("verifiedPairing", "productState", "cloud.", "connected("):
+                self.assertNotIn(forbidden, body)
+        setup = function_body(self.motion, "void setup()")
+        self.assertIn("wifiSetup.begin();", setup)
+        self.assertIn("ota.begin();", setup)
+        self.assertIn("server.begin();", setup)
+        loop = function_body(self.motion, "void loop()")
+        for call in ("server.handleClient();", "wifiSetup.poll();", "ota.poll();"):
+            self.assertIn(call, loop)
+
+    def test_v4_retirement_keeps_shared_network_and_legacy_import_protection(self):
+        network = (ROOT / "main-controller/src/brain_network.cpp").read_text()
+        self.assertIn("cloud_.beginV4(pairedDeviceId, BrainStation::service, &station_)", network)
+        transport = (ROOT / "shared/BabytechCloudLink/src/CloudLink.cpp").read_text()
+        self.assertIn("bool CloudLink::beginV4(", transport)
+        setup = function_body(self.motion, "void setup()")
+        self.assertIn("ProductEventOutbox::inspectLegacyState()", setup)
+        self.assertIn("product.recoverAfterRestart(millis())", setup)
+        self.assertNotIn("eventOutbox.begin(", setup)
+        commissioning = (ROOT / "shared/ProductBoardLink/src/BoardCommissioning.cpp").read_text()
+        export = (ROOT / "shared/ProductBoardLink/src/MaintenanceExport.cpp").read_text()
+        for source in (commissioning, export):
+            self.assertIn("loadLegacyProductContext(", source)
+        legacy = (ROOT / "shared/ProductBoardLink/src/LegacyContextStore.cpp").read_text()
+        self.assertIn('"productctx"', legacy)
+        self.assertIn('"payload"', legacy)
+        self.assertNotIn("nvs_erase", legacy)
+
     def test_mixed_routes_gate_after_validation_before_mutation(self):
         for handler, predicate, validated, mutation in (
             ("handleEnable", "enabling", 'const bool enabling = enabledRaw == "1";', "stopDemoOwnership()"),
@@ -123,11 +169,11 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertIn("commissioningSession.poll(Serial, millis(), localSafe", console)
         self.assertIn("!productBoardLink.maintenanceActive() && safeForCommissioning()", console)
 
-    def test_remote_lease_shares_guard_without_new_release_or_daily_gates(self):
+    def test_remote_lease_uses_install_guard_without_new_release_or_daily_gates(self):
         active = function_body(self.motion, "bool commissioningActive() {")
         self.assertIn("commissioningSession.active() || productBoardLink.maintenanceActive()", active)
         target = function_body(self.motion, "bool safeToAcquire() const override")
-        self.assertIn("!commissioningSession.active() && safeForCommissioning()", target)
+        self.assertIn("!commissioningSession.active() && safeForInstallation()", target)
         release = function_body(self.motion, "bool safeToRelease() const override")
         self.assertEqual(release.strip(), "return true;")
         self.assertIn("productBoardLink.setMaintenanceTarget(&migrationMaintenance)", self.motion)
@@ -140,8 +186,7 @@ class MaintenanceWiringTest(unittest.TestCase):
             self.assertNotIn("requestMaintenance(", function_body(source, "void setup()"))
 
     def test_v4_sole_usb_reader_preserves_ota_command(self):
-        self.assertIn("#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\n"
-                      "    ota.useExternalSerialReader();\n#endif", self.motion)
+        self.assertIn("ota.useExternalSerialReader();", function_body(self.motion, "void setup()"))
         body = function_body(self.ota, "void WifiOta::poll()")
         self.assertIn("if (!externalSerialReader_) pollSerialRecovery();", body)
         console = function_body(self.motion, "void pollCommissioningConsole()")
@@ -222,7 +267,14 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertNotIn(".install().request(", setup)
         self.assertNotIn("importMotion(", setup)
         guard = function_body(self.motion, "bool safeForRemoteInstall() {")
-        self.assertIn("!commissioningSession.active() && safeForCommissioning()", guard)
+        self.assertIn("!commissioningSession.active() && safeForInstallation()", guard)
+
+    def test_installation_without_submitted_motion_does_not_require_motor_feedback(self):
+        body = function_body(self.motion, "bool safeForInstallation() {")
+        for condition in ("controlBusy()", "motor.operationBusy()", "wifiSetup.busy()",
+                          "ota.maintenanceActive()", "powderScale.tareInProgress()"):
+            self.assertIn(condition, body)
+        self.assertIn("motor.movementGeneration() == 0 || safeForCommissioning()", body)
 
     def test_brain_boot_loads_existing_store_without_network_or_replay_gate(self):
         setup = function_body(self.brain, "void setup()")
@@ -350,8 +402,7 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(polling.index("productRecovery.poll()"), polling.index("productRuntime.poll("))
 
         telemetry = function_body(self.motion, "void serviceBrainLink()")
-        v4 = telemetry.split("#elif MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN", 1)[1]
-        v4 = v4.split("#else", 1)[0]
+        v4 = telemetry
         self.assertIn("productRuntime.project(status, productBoardLink.link().connected(", v4)
         self.assertLess(v4.index("productRecovery.project("), v4.index("productRuntime.project("))
         self.assertLess(v4.index("productRuntime.project("), v4.index("productBoardLink.poll("))
@@ -360,12 +411,9 @@ class MaintenanceWiringTest(unittest.TestCase):
                          r"babytech::v4::LinkFailure::None\s*\|\|\s*"
                          r"!productBoardLink\.link\(\)\.healthy\(\)\)\s*"
                          r"productRuntime\.linkLost\(millis\(\)\);")
-        cloud = function_body(self.motion, "void serviceCloud()")
-        v4_cloud = cloud.split("#else", 1)[0]
-        v4_cloud = re.sub(r"//[^\n]*", "", v4_cloud)
-        self.assertRegex(v4_cloud, r"^\s*#if MOTION_UART_PEER == "
-                         r"MOTION_UART_PEER_PRODUCT_BRAIN\s+return;\s*$")
-        self.assertIn("productSession->networkState(wifiConnected, millis())", cloud.split("#else", 1)[1])
+        for retired in ("void serviceCloud()", "cloud.begin(", "cloud.take(",
+                        "productSession->networkState(wifiConnected, millis())"):
+            self.assertNotIn(retired, self.motion)
         self.assertRegex(self.motion, r"#ifndef BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW\s+"
                          r"#define BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW 0\s+#endif")
         self.assertIn("product.setExecutionAuthorized(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1)", setup)
@@ -390,8 +438,7 @@ class MaintenanceWiringTest(unittest.TestCase):
         setup = function_body(self.motion, "void setup()")
         self.assertIn("productBoardLink.setContextHandler(contextProduct)", setup)
         self.assertLess(setup.index("productRecovery.begin("), setup.index("setContextHandler("))
-        self.assertIn("#if MOTION_UART_PEER != MOTION_UART_PEER_PRODUCT_BRAIN\n"
-                      "    loadProductContext();\n#endif", setup)
+        self.assertNotIn("loadProductContext", self.motion)
         handler = function_body(self.motion, "bool contextProduct(")
         self.assertEqual(handler.strip(), "return productRuntime.context(context, nowMs, result);")
         for forbidden in ("saveContext(", "requestContext(", "clearContext(", "applyContext("):
@@ -429,8 +476,7 @@ class MaintenanceWiringTest(unittest.TestCase):
     def test_static_http_stop_prioritizes_runtime_interruption(self):
         # The Interrupted mapping is inspected, not a dynamic HTTP/Flash proof.
         owner = function_body(self.motion, "StopOwnershipResult stopDemoOwnership()")
-        v4 = owner.split("#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN", 1)[1]
-        v4 = v4.split("#endif", 1)[0]
+        v4 = owner
         self.assertRegex(v4, r"if\s*\(productRuntime\.ownsMotion\(\)\)\s*"
                          r"return productRuntime\.stopOwned\(millis\(\)\)\s*\?\s*"
                          r"StopOwnershipResult::Requested\s*:\s*StopOwnershipResult::Unconfirmed;")
@@ -502,8 +548,7 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(queue.rindex("sendError("), queue.index("queue.start("))
         self.assertLess(queue.index("queue.start("), queue.index("if (started.code < 300)"))
         accepted = function_body(queue, "if (started.code < 300)")
-        self.assertRegex(accepted, r"^\s*#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN\s*"
-                         r"productRuntime\.workbenchAccepted\(\);\s*#endif")
+        self.assertRegex(accepted, r"^\s*productRuntime\.workbenchAccepted\(\);")
         self.assertLess(accepted.index(release), accepted.index("endpoint.cancelPending("))
         self.assertLess(queue.index(release), queue.index("sendQueueResult(started, true)"))
         for body in (move, raw, queue):
@@ -534,12 +579,9 @@ class MaintenanceWiringTest(unittest.TestCase):
     def test_static_control_reset_preserves_runtime_interruption_before_clear(self):
         # Source branch/order checks, not dynamic Stop-window or Flash confirmation.
         body = function_body(self.motion, "void handleControlReset()")
-        paired = body.split("#if MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN", 1)[1]
-        v4, legacy = paired.split("#else", 1)
-        self.assertRegex(v4, r"^\s*const bool pairedProduct\s*=\s*productRuntime\.ownsMotion\(\);\s*"
-                         r"if\s*\(pairedProduct\)\s*productRuntime\.stopOwned\(millis\(\)\);\s*$")
-        self.assertRegex(legacy.split("#endif", 1)[0],
-                         r"^\s*const bool pairedProduct\s*=\s*false;\s*$")
+        self.assertRegex(body, r"const bool pairedProduct\s*=\s*productRuntime\.ownsMotion\(\);\s*"
+                         r"if\s*\(pairedProduct\)\s*productRuntime\.stopOwned\(millis\(\)\);")
+        self.assertNotIn("const bool pairedProduct = false", body)
         product_stop = function_body(body, "if (!pairedProduct && product.ownsMotion())")
         self.assertIn("product.stop(millis(), wasActive);", product_stop)
         self.assertRegex(body, r"if\s*\(!pairedProduct\s*&&\s*demo\.busy\(\)\)\s*demo\.stop\(millis\(\)\);")
@@ -558,8 +600,7 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(body.index("configureStopAxes("), body.index("demoRotationMatches("))
         self.assertIn("if (boot) demoExecutor.configureStopAxes(candidate)", body)
         setup = function_body(self.motion, "void setup()")
-        self.assertIn("demoJsonStart), configError,\n"
-                      "                       MOTION_UART_PEER == MOTION_UART_PEER_PRODUCT_BRAIN)", setup)
+        self.assertIn("demoJsonStart), configError, true)", setup)
 
 
 if __name__ == "__main__":

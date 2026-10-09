@@ -1,5 +1,15 @@
 # Babytech Firmware
 
+描述对象：自包含的 Brain/Motion 固件与 Motion CAN 调试工作台。当前 Milestone：V1 UART v4 软件闭环，实机与服务器切换未验收；本文不授予烧录、运动或生产部署权限。
+
+## 当前编译入口与退役边界（2026-10-09）
+
+仅支持现有 `brain` / `motion` 两个环境的成对 UART v4；主程序已移除旧版本运行分支，Brain 宏非 `1`、Motion peer 非 `4` 明确编译失败。旧 Brain v3、Motion DISPLAY/v3 与 BRAIN/v2 不再提供兼容镜像或操作步骤；历史源码从 Git 获取。以下按日期记录的旧默认/测试结果只是当时证据，不是当前入口。
+
+Motion 的全部 CAN 调试网页、队列、原始指令、称重/标定、Wi-Fi 和 OTA 能力保持；不新增 Cloud 在线、配对或产品配置门禁。共享 `display_model`、协议数据类型和 host codec 测试保留，不代表旧固件仍可发布。Brain 的 `CloudLink::beginV4` 与网络 worker 保留。
+
+首次安装继续只读导入旧 `productctx/payload` 档案/墓碑，并保留 `formulaevt/payload` 未结事件检查及恢复 Stop；普通启动不擦除或重放旧记录。旧未结事件仍需受控处理，不因退役旧固件而自动迁移或丢弃。NVS/schema、UART v4、App/Cloud 契约及现有空白双板安装许可不变；不需要新数据迁移。
+
 ## First-install offline restart validation (2026-10-08)
 
 From the parent repository run `python3 Test/dual_main_install_check.py --sanitize`.
@@ -126,7 +136,7 @@ OTA场景通过实际USB `OTA CODE` 和已注册HTTP接口取得nonce、验证�
 
 两块板固件统一在本仓库管理：`main-controller` 已迁入父项目 DisplayController 的屏幕/触摸/UART v3 基线、显示库与 N16R8 板型，`device-controller` 继续作为 Motion。Brain 已通过本地及不含父项目的临时副本构建、LVGL host UI 测试，尚未烧录或验证真实触摸。原 DisplayController 的源码/构建入口已退役，仅保留迁移说明；旧 Brain 网页及其专属配置/页面测试也已移除，历史实现从 Git 获取。
 
-默认 Brain 仍是 UART v3 屏幕角色；成对选择 v4 后已接 Wi-Fi/MQTT、状态投影、Cloud命令单次UART派发、优先Stop和屏幕本地持久请求。屏幕 Initialize 无需Cloud/宝宝缓存，Start使用已保存且与Motion匹配的有效缓存；两者由Motion最终机械准入。Motion v4 产品命令接收/持久执行和监督Stop已接验证路径，默认非食用产品开关仍为0。Brain自动配置缓存/同步及双板记录与Cloud回执运行桥接已接；组合恢复、最终安装激活和实机验收未完成。Motion默认路径仍直连Cloud，v4不启动产品MQTT，独立调试网页保留。完整迁移按父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md` B1–B4推进，不把构建成功写成产品迁移完成。
+2026-10-09 起，默认 Brain/Motion 构建成对使用 UART v4，无需额外宏参数：Brain 接 Wi-Fi/MQTT、状态投影、Cloud 命令单次 UART 派发、优先 Stop 和屏幕本地持久请求。屏幕 Initialize 无需 Cloud/宝宝缓存，Start 使用已保存且与 Motion 匹配的有效缓存，两者由 Motion 最终机械准入。Motion 不启动产品 MQTT，独立调试网页保留；产品命令接收、监督 Stop、配置同步与终态/Cloud 回执桥接已实现。非食用产品开关仍默认为 0，配对、网络配置和 Cloud 登记仍按原流程；改变编译默认不代表完成实机激活、生产切换或验收。旧 v3/v2 编译入口已退役，历史阶段证据中的“默认 v3”只描述当时构建。
 
 2026-10-08 真实模式就绪上报：公开 `can_start` 不再固定 false，而按新鲜且空闲停稳的 Motion Start 权限、双方精确同步的宝宝/配方，以及现有冲突请求/维护状态计算。每次周期/probe 编码在 UI loop 重新求值，避免前面的配置/命令回调使旧布尔值过时。屏幕离线启动不依赖 Cloud，Cloud 发行不依赖本地触控序号容量；信息性 Stop 查询、历史待上传结果本身不阻止下一瓶，Motion 队列满与机械检查仍生效。Unknown 动作不重放，已入发送器/恢复的本地持久 pending 不因此清除；同次dispatch确定未入发送器的清理另于当日获批并接入，见本地触控owner节。未开启非食用能力的 Motion 仍不能启动，不代表食用或实机验收。下面按日期排列的开发证据中固定 false 是当时边界，以本段为当前行为。
 
@@ -154,23 +164,20 @@ Brain v4 已接本地USB Wi-Fi/MQTT配置，见下方“Brain USB网络配置”
 
 `ReadOnlyLink` 为单 owner、非重入对象，约 8 KiB，不能放在 MCU loop 局部栈中；共享完整消息 scratch，短回执用紧凑帧。旧35字段版本的 GCC8.4/14.2 静态接收调用链（receive/handle/decodeStatus）约4 KiB；这是历史预算参考，不是36字段版本的栈测量。尚未包含外层适配器和 JSON 库调用余量；接入设备后仍须检查实际任务栈高水位，不能让网络回调并发操作链路。
 
-当前默认固件仍使用原 UART v3。v4 已接入两端 MCU UART1：Brain使用 `BABYTECH_BOARD_LINK_V4=1`，Motion使用 `MOTION_UART_PEER=4`。Brain已接Cloud/触控owner，Motion已注册产品接收/Stop回调。两端必须同时选择；这是迁移验证路径，不是已完成的产品固件。它读取 `productpair/record` 并检查本机角色/MAC；缺失或损坏不能进入正常握手、联网或产品操作，但可选v4入口允许仅打开UART诊断发现。不自动认领陌生对端。受控配对写入和旧配置导入及单USB工具已接单Brain持久安装，首次激活采用下文已批准的整机手动重新上电一次；动作/配置/结果桥接已接，完整组合恢复和实机验收未完成，不能靠烧录这两个镜像直接完成迁移。
+当前两板默认使用 UART v4：`brain_mode.h` 默认 `BABYTECH_BOARD_LINK_V4=1`，`UartPeer.h` 默认 `MOTION_UART_PEER=4`，不在 `platformio.ini` 重复写死宏，任何其他宏值编译失败。Brain 已接 Cloud/触控 owner，Motion 已注册产品接收/Stop 回调。两端须配套，不能混用 v3/v4。读取 `productpair/record` 并检查角色/MAC；没有有效配对时仍可进行首次安装诊断，不自动认领陌生对端。单 Brain 持久安装和首次整机手动重新上电流程不变；默认 v4 仍需实机验收，不能靠烧录直接宣称迁移完成。
 
-v4不启动Motion产品MQTT；屏幕Initialize/Start使用下方本地owner，Motion独立Wi-Fi、HTTP调试网页及本地OTA保留。旧`formulaevt/payload`仅只读检查，有记录或读取异常时保留数据、标记待处理并监督停机，不调用旧Outbox初始化。新记录开机恢复、Motion动作接收及Brain Cloud/触控派发、两板结果补传已接源码；遥测本身不授予运动权限。默认v3行为不变。
+v4不启动Motion产品MQTT；屏幕Initialize/Start使用下方本地owner，Motion独立Wi-Fi、HTTP调试网页及本地OTA保留。旧`formulaevt/payload`仅只读检查，有记录或读取异常时保留数据、标记待处理并监督停机，不调用旧Outbox初始化。新记录开机恢复、Motion动作接收及Brain Cloud/触控派发、两板结果补传已接源码；遥测本身不授予运动权限。旧v3运行入口已退役。
 
 2026-10-07工作台Stop补充：v4 STATUS现在要求36字段，新增`execution_owner=none|product|workbench`，Brain/Motion配套升级，不能混用旧35字段v4。工作台queue/Demo用一个RAM执行ID，App与屏幕Stop共用原目标绑定，旧目标不能停止新批次；网页本地Stop仍独立可用。OTA运动证据与软件owner分开，详见[OTA说明](docs/wifi-ota-implementation.md)。
 
 在本子仓库根目录编译验证（不含烧录）：
 
 ```bash
-PLATFORMIO_BUILD_SRC_FLAGS=-DBABYTECH_BOARD_LINK_V4=1 pio run -d main-controller -e brain
-PLATFORMIO_BUILD_SRC_FLAGS=-DMOTION_UART_PEER=4 pio run -d device-controller -e motion
-# Restore ordinary build outputs before packaging or later flashing.
 pio run -d main-controller -e brain
 pio run -d device-controller -e motion
 ```
 
-共享协议运行 `python3 tools/test_protocol.py --sanitize`，配对记录运行 `python3 tools/test_pairing_record.py --sanitize`，只读发现运行`python3 tools/test_board_discovery.py --sanitize`。先构建 Motion 获取 ArduinoJson 后运行 `python3 tools/test_board_messages.py --sanitize`、`python3 tools/test_board_link.py --sanitize`、`python3 tools/test_board_arduino.py --sanitize`。最后一个链接生产 MCU 适配器，仅用替身替换 NVS/UART/MAC；它不代表真实 Flash、UART 线速或 Stop 时限验证。CI 编译两套默认与迁移入口；WSL 默认目标仍只导出默认镜像。
+共享协议运行 `python3 tools/test_protocol.py --sanitize`，配对记录运行 `python3 tools/test_pairing_record.py --sanitize`，只读发现运行`python3 tools/test_board_discovery.py --sanitize`。先构建 Motion 获取 ArduinoJson 后运行 `python3 tools/test_board_messages.py --sanitize`、`python3 tools/test_board_link.py --sanitize`、`python3 tools/test_board_arduino.py --sanitize`。最后一个链接生产 MCU 适配器，仅用替身替换 NVS/UART/MAC；它不代表真实 Flash、UART 线速或 Stop 时限验证。CI 仅构建默认 v4 Brain/Motion；主机测试使用生产默认，`tests/test_firmware_defaults.py` 验证拒绝旧宏；WSL 仅导出 v4 镜像。
 
 ## B1.2 共享网络基础（2026-10-06）
 
@@ -243,13 +250,13 @@ Brain v4支持可选只读`PAIR STATUS`与维护内`PAIR DISCOVER <device_id>`�
 
 ### Brain UART安装前维护预约
 
-Discovery成功后，可选支持命令`PAIR HOLD <device_id>`在Brain本地维护内明确请求Motion预约；`PAIR HOLD`只读查看，`PAIR RELEASE`或Brain `MAINT END`经同一UART结束，不需要Motion USB。kind19绑定双方boot、Brain MAC、设备、nonce和递增ID。Motion复用当前静止/无工作条件，并与USB维护/OTA互斥；网页冲突写入/运动、网络改配和OTA启动暂拒绝，HTTP Stop/Stop all/queue cancel、合法原始Stop/Interrupt/disable和读取继续可用，CAN监督照常。Motion产品接收/Stop已接入，但Brain派发和完整产品入口仍未开放。
+Discovery成功后，可选支持命令`PAIR HOLD <device_id>`在Brain本地维护内明确请求Motion预约；`PAIR HOLD`只读查看，`PAIR RELEASE`或Brain `MAINT END`经同一UART结束，不需要Motion USB。kind19绑定双方boot、Brain MAC、设备、nonce和递增ID。Motion复用下节的安装空闲条件，并与USB维护/OTA互斥；网页冲突写入/运动、网络改配和OTA启动暂拒绝，HTTP Stop/Stop all/queue cancel、合法原始Stop/Interrupt/disable和读取继续可用，CAN监督照常。Motion产品接收/Stop已接入，但Brain派发和完整产品入口仍未开放。
 
 Brain仅为显式预约每500ms续期，响应截止1秒，Motion预约3秒到期自动释放；普通启动、配网、读取和冲奶不自动预约。release无需Ready/传感器/Cloud恢复，迟到或同nonce请求不重新打开已结束会话，失败不自动acquire。到期只释放RAM预约，不回滚Flash。核心`tools/test_board_maintenance.py --sanitize`和实际adapter/controller主机测试不替代UART/HTTP/Flash实机验收；自动安装已内部调用此路径。这些命令只是支持入口，不是额外安装步骤。
 
 ### Motion UART持久安装入口
 
-可选v4的kind20安装通道已接同一UART收发owner及Motion实际导入目标，不新增USB诊断写命令。完整配对记录、旧档案/墓碑经有界分片传入；目标复用现有`productState`，每个持久阶段重新核对预约设备/nonce/双方身份与当前静止条件，调用原导入协调器，业务记录先写并读回、配对最后写。旧事件未结清、已使用水位/结果、内容冲突或存储错误不被覆盖，缺失上下文按全零编码。不确定写入错误只锁存导入组件，不借此永久禁用独立调试；超时保留部分写入证据，不自动重试或擦除。
+默认v4的kind20安装通道已接同一UART收发owner及Motion实际导入目标，不新增USB诊断写命令。完整配对记录、旧档案/墓碑经有界分片传入；目标复用现有`productState`，每个持久阶段重新核对预约设备/nonce/双方身份与安装空闲条件，调用原导入协调器，业务记录先写并读回、配对最后写。2026-10-09用户确认：没有活动/恢复任务且本次启动未提交运动命令时，不要求配置轴的电机反馈，空白双板可不接电机安装；本次启动提交过运动后仍要求原停稳证明。此许可只用于预约和身份/配置保存，不是物理静止、Ready或运动授权；Motion本地USB维护、真实产品动作、Stop及OTA条件不变。旧事件未结清、已使用水位/结果、内容冲突或存储错误不被覆盖，缺失上下文按全零编码。不确定写入错误只锁存导入组件，不借此永久禁用独立调试；超时保留部分写入证据，不自动重试或擦除。
 
 本板Installed不在当前boot激活运行UART身份、网络或运动；Brain自动持久协调入口见下节。首次成功后采用整机手动重新上电一次，复用已有握手、不新增完成协调协议；重启联调仍待验。一次性交接位是受控入口的操作声明，固件不能据此证明broker账号已经撤销。测试`tools/test_board_install.py --sanitize`、`tools/test_motion_install.py --sanitize`及实际adapter测试使用生产codec/导入器，边界I/O为替身，不是实板Flash或迁移验收。
 
@@ -365,7 +372,9 @@ SIM ON
 SIM OFF
 ```
 
-不需要额外仿真编译环境或修改Motion固件；默认v3入口不支持这些命令。模式默认off且不持久化。ON/OFF仅切Brain请求路由，实际模拟任务或未决真实任务存在时返回busy，不取消或抹掉原证据。成功切换轮换MQTT会话，等待Cloud重新完成现有probe即可，不需人工配对；迟到的旧模式命令不能转为真实UART动作。有效保存的身份/缓存即可让Motion断电或UART未接时测试，不要求Motion在线，但不为未安装的空白Brain伪造配对。
+不需要额外仿真编译环境或修改Motion固件；当前v4支持这些命令，旧v3固件已退役。模式默认off且不持久化。ON/OFF仅切Brain请求路由，实际模拟任务或未决真实任务存在时返回busy，不取消或抹掉原证据。成功切换轮换MQTT会话，等待Cloud重新完成现有probe即可，不需人工配对；迟到的旧模式命令不能转为真实UART动作。有效保存的身份/缓存即可让Motion断电或UART未接时测试，不要求Motion在线，但不为未安装的空白Brain伪造配对。
+
+两块全新空白板先烧录成对v4固件、接UART，在电机/执行器断开供电的台架完成原单Brain安装。成功后两板及USB全部断电，仿真阶段只给Brain供电，Motion先保持断电且UART拔开；Brain保留真实安装的NVS，再配置网络、取得Cloud当前宝宝缓存并开启`SIM ON`。空白安装不会生成宝宝/配方，不增加仿真构建、Motion模拟或假配对。若无电机的Motion一直在线，真实STATUS缺停稳反馈可能使SIM切换返回busy；不要伪造STATUS或擦NVS，采用上述Brain-only接线即可。
 
 开启后只支持App经Cloud发送Prepare/Stop：默认整体15秒计时，不逐项模拟电机；Stop生成失败记录。屏幕只观察仿真状态，本地Initialize/Start不进入UART或模拟本地序号。Cloud下发的配置仍保存Brain缓存，但不转发Motion；退出后恢复原真实同步。真实UART心跳/只读恢复仍属于原链路，不是仿真UART消息。Motion独立网页不改。
 
@@ -377,7 +386,7 @@ SIM OFF
 
 ### Brain USB网络配置
 
-仅适用于开发中的Brain v4，不是默认v3或Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。
+适用于当前Brain v4，不是Motion网页。先核对USB端口并关闭其他串口监视器，使用可信电脑/USB线；Python需要`pyserial`，可使用已安装PlatformIO的Python。工具只写网络设置，不烧录、重启、安装配对或修改Mosquitto ACL。
 
 ```bash
 python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN wifi
@@ -395,6 +404,8 @@ python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN mqtt
 单独维护/导出不写配对或业务记录，也不调用BoardCommissioning；持久安装和网络配置各走上文明确入口。Brain网络仍发布只读状态/probe；`active`不能当作网络已停止或导入获准。测试`python3 tools/test_maintenance_console.py --sanitize`运行解析器/锁；`python3 tools/test_maintenance_export.py --sanitize`运行生产导出/USB调度但使用MAC/NVS/字节端口替身；`python3 -m unittest discover -s tests -p test_maintenance_wiring.py`只是入口连线静态回归，不代替串口/网页/机械实测。
 
 ## V1 Motion 集成状态（2026-10-01）
+
+以下为已退役的 v3 历史基线，不作为当前操作或构建说明。
 
 `device-controller` 的 DISPLAY 构建正在接入现有 Babytech Cloud/App：Motion 自行连接 MQTT，使用设备专属 topic、产品状态、命令 ACK 和终态事件；屏幕经 UART v3 提交本地操作。旧 Brain/v2 协议库保留兼容回归，已不是 `main-controller` 的运行入口。
 
@@ -429,23 +440,23 @@ git switch -c codex/your-task
 两块 ESP32-S3 N16R8 的最小固件仓库。每块板是独立、标准的 PlatformIO Arduino 工程。
 
 ```text
-App ── Cloud ── MQTT ── device-controller（Motion、传感器与电机）
-                              │ UART v3
-                              └── main-controller（Brain 屏幕基线）
+App ── Cloud ── MQTT ── main-controller（Brain、屏幕与业务）
+                              │ UART v4
+                              └── device-controller（Motion、传感器与电机）
 
-后续目标：App ── Cloud ── MQTT ── Brain ── UART ── Motion
+Motion 独立调试网页保留；旧 v3 直连路径已移除。
 ```
 
 ## 当前可运行的内容
 
-当前可构建屏幕 Brain 和独立 Motion。旧 Brain UART v2 库/测试仍保留兼容证据，但旧状态网页不再编入 Brain；Cloud 产品链路仍处于 Motion 直连基线的集成验证阶段。
+当前默认可构建成对 Brain/Motion v4，产品 MQTT 在 Brain；共享协议类型和旧 codec 测试保留，旧 Brain 状态网页不编入固件。软件闭环已有验证，真实两板与服务器切换尚未验收。
 
-- `main-controller/`：480×320 ST7796 屏幕、GT1151 触摸、LVGL 页面及 UART v3 状态/意图；沿用原 Initialize/Start、离线与忙碌门禁。暂不提供旧 `Babytech-Debug` 热点、网页或 Brain OTA。
+- `main-controller/`：480×320 ST7796 屏幕、GT1151 触摸、LVGL 页面，默认 UART v4 网络/命令/配置/结果桥接与本地操作。暂不提供旧 `Babytech-Debug` 热点、网页或 Brain OTA。
 - `device-controller/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。下板默认从 GPIO1/2 采样 HX711，网页可修改并持久化 DOUT/SCK，同时提供称重状态、去皮和标定 API。
-- `shared/BoardProtocol/`：板间 UART v2 四指令协议、客户端与执行入口。完成状态来自真实电机反馈；机构尚未接入，称重数据暂未加入板间载荷。
+- `shared/BoardProtocol/`：板间 UART v4 帧、会话和调度，并保留旧协议兼容回归。v4 状态包含资源与机械信息，不等于真实传感器和机构已验收。
 - `tools/test_protocol.py`、`tools/test_motion.py`：主机协议、参数与反馈解析检查。
 
-调试热点保留在 Motion 板，便于独立台架调试；产品链路暂由 Motion 直连 Cloud，显示由迁入 `main-controller` 的屏幕基线负责。HX711 已接入调试和产品状态，完整 MQTT、显示板与机械流程仍待联调验收。上电不自动执行运动。
+调试热点保留在 Motion 板，便于独立台架调试；默认产品链路由 Brain 连接 Cloud，Motion 通过 UART 执行。HX711 已接入调试和产品状态，真实 MQTT、屏幕与机械流程仍待联调验收。上电不自动执行运动。
 
 详细操作和接口见 [下板网页调试](docs/motion-debug.md)。
 
@@ -453,7 +464,7 @@ App ── Cloud ── MQTT ── device-controller（Motion、传感器与电
 
 新版桌面协议工作台已接入真实电机接口与 Wi-Fi，网页随固件内嵌。最新能力范围、重建、烧录地址和验证边界见 [工作台交付说明](docs/motion-workbench-release.md)。
 
-默认 DISPLAY 构建已接入产品显示板 UART v3、非阻塞流程、阶段调试和内置 JSON 配置；上电不自动运动。见 [演示操作说明](docs/motion-display-demo.md) 与 [开发验收计划](docs/motion-display-demo-plan.md)。Brain/Motion v2 需显式以 `-DMOTION_UART_PEER=1` 编译；机械与双板实机验收尚未完成。
+旧 DISPLAY/v3 与 BRAIN/v2 发布入口已退役；现有 Motion 网页流程见[调试流程说明](docs/motion-display-demo.md)。仅支持成对 v4，不增加 environment。机械与双板实机验收尚未完成。
 
 ## 目录
 
@@ -515,7 +526,7 @@ cd ../..
 pio run -d device-controller
 ```
 
-GitHub Actions 在 Ubuntu 执行前端与主机回归，并编译 Brain 默认/v4 和 Motion 默认/v4/peer=1 配置，最后恢复默认产物，见 [CI 配置](.github/workflows/firmware-checks.yml)。浏览器 mock 测试与编译通过不代表实机验收完成。
+GitHub Actions 在 Ubuntu 执行前端与主机回归，并仅构建默认 v4 Brain/Motion 产物，见 [CI 配置](.github/workflows/firmware-checks.yml)。浏览器 mock 测试与编译通过不代表实机验收完成。
 
 Linux CI 与 macOS 本机测试都需要通过：生产源文件应显式包含所用标准函数的头文件，不能依赖 Arduino 或标准库间接包含；测试中条件选择的 `initializer_list` 必须拥有覆盖整个循环的存储生命周期。相关回归为 `python3 tools/test_motor_control_evidence.py --sanitize` 和 `python3 tools/test_board_commands.py --sanitize`，后者先构建 Motion 获取 ArduinoJson。不通过关闭 sanitizer、删除用例或放宽编译警告绕过失败。
 
@@ -543,20 +554,20 @@ pio run -d main-controller -t upload --upload-port COM_BRAIN
 
 `COM_MOTION` / `COM_BRAIN` 是占位符，替换为实际端口。
 
-默认配套为屏幕 Brain + Motion UART v3。屏幕查看机械状态；断开 UART 后不得仍显示可启动，恢复后应以 Motion 最新状态为准。迁移v4是上文单独列出的验证路径，已接Cloud派发但完整产品链路未完成，不与默认镜像混用。
+默认配套为 Brain + Motion UART v4，可直接使用上述命令构建/烧录；首次安装、网络配置和 Cloud 登记仍按上文执行。断开 UART 后真实模式不得仍显示可启动，恢复后以 Motion 最新状态为准。旧 v3/v2 编译入口已退役，不与 v4 混烧；退役清理不代表实机迁移或部署完成。
 
 电机调试连接 Motion 的 `Babytech-Motion` 热点（开发密码 `babytech-demo`），访问 `http://192.168.4.1/`。先读取反馈，再在受控无负载条件下显式使能和试动；HTTP 202 只表示提交，不表示已执行或已停稳。旧 Brain 的 `Babytech-Debug` 网页入口已经退役，不再作为当前操作步骤。实际操作前仍须确认接线、安全条件和固件版本。
 
 ## 后续迁移
 
-唯一开发顺序和验收出口在父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md`。当前继续 Brain 网络/身份、双板动作与持久记录桥接；本仓库不再维护另一份相互冲突的优先级清单。Motion 独立调试网页保留，网络回调不直接操作电机。
+唯一开发顺序和验收出口在父项目 `Docs/refactoring/BRAIN_MOTION_CLOUD_APP_INTEGRATION_PLAN.md`。核心网络、动作、配置和结果桥接已实现，当前重点是版本收尾与实机验收；本仓库不另维护优先级清单。Motion 独立调试网页保留，网络回调不直接操作电机。
 
 ## 来源与迁移边界
 
 - 原项目：`hellowenshenghui/Babytech_Formula_Device`，参考本地 `V1-device` 的 `2ffcde2`。
 - 网页交互参考：`SHKinsem/Project-Tenny`。
 - CAN 传输库和 HX711 称重核心分别从旧工程 BabytechActuatorHal、BabytechSensorHal 按需迁入 `device-controller/lib/`；新工程不依赖旧仓库路径，旧仓库未修改。
-- 当前默认显示协议为v3，迁移验证协议为v4（Cloud派发已接，触屏动作及结果桥接未完成）；两板按对应版本配套，不能混装。UART v2四指令协议只保留兼容回归，不是当前屏幕入口。
+- 当前唯一运行协议为 v4，旧 v3 与 Motion peer=1 编译入口已退役；两板不能混装。产品联网在 Brain，Motion 保留调试网络；实机验收与生产切换未完成。
 
 Wi-Fi OTA 的设计与操作见 [实施计划](docs/wifi-ota-plan.md) 和 [使用说明](docs/wifi-ota-implementation.md)。
 

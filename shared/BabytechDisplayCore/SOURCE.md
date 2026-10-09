@@ -1,5 +1,11 @@
 # Display protocol source
 
+Current scope (2026-10-09): Brain/Motion firmware runs UART v4 only. The shared
+display model/enums still drive the LVGL UI and Motion status projection;
+legacy v3 codecs/tests are internal regression references, not a selectable
+firmware transport. All sources required to build are vendored in this child
+repository; the original parent DisplayController/libraries are retired.
+
 Vendored from Babytech_Formula_Device, branch V1-device, repository commit
 40cfcde (DisplayCore last changed in 2337b2fad83060cf74c7c5650001eb3f1b97872c).
 Protocol version 3, snapshot schema 3. Model/protocol sources and their host

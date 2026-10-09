@@ -72,7 +72,7 @@ def main():
                 "tests/fakes/cloud_link/FakeCloudIo.cpp", "tests/fakes/brain_main/FakeMainIo.cpp",
                 "tests/test_brain_main.cpp"]
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-               "-DARDUINO=10819", "-DBABYTECH_BOARD_LINK_V4=1", "-DMBEDTLS_VERSION_MAJOR=3",
+               "-DARDUINO=10819", "-DMBEDTLS_VERSION_MAJOR=3",
                '-DFIRMWARE_VERSION="main-host-test"']
     for feature in ("ARDUINO_STRING", "ARDUINO_STREAM", "ARDUINO_PRINT", "PROGMEM"):
         command += ["-DARDUINOJSON_ENABLE_" + feature + "=0"]

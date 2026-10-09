@@ -29,7 +29,7 @@ def main():
         raise SystemExit("A C++17 compiler is required")
     stubs = root / "shared/ProductBoardLink/test/arduino_stubs"
     command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-               "-DARDUINO=10819", "-DBABYTECH_BOARD_LINK_V4=1"]
+               "-DARDUINO=10819"]
     for feature in ("ARDUINO_STRING", "ARDUINO_STREAM", "ARDUINO_PRINT", "PROGMEM"):
         command.append(f"-DARDUINOJSON_ENABLE_{feature}=0")
     if args.sanitize:
