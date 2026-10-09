@@ -32,7 +32,7 @@ void writeProductStatus(JsonObject target, const ProductStatusSnapshot& snapshot
     target["bottle_presence_sensor_enabled"] = false;
     target["bottle_state_valid"] = false;
     target["bottle_present_at_load_position"] = nullptr;
-    target["bottle_clamp_status"] = snapshot.progress == "complete" ? "full" : "empty";
+    target["bottle_clamp_status"] = "unknown";
     target["cap_hall_detected"] = nullptr;
     target["dispensed_water_ml"] = nullptr;
     target["water_delivery_basis"] = "estimated_turns";

@@ -1731,8 +1731,10 @@ struct ManualAdmission {
     motion::MotionProductRuntime& productRuntime;
     motion::DemoFlowController& demo;
     motion::ProductSession& product;
+    Executor& demoExecutor;
     unsigned error = 0;
-    explicit ManualAdmission(Fixture& f) : productRuntime(f.runtime), demo(f.flow), product(f.product) {}
+    explicit ManualAdmission(Fixture& f)
+        : productRuntime(f.runtime), demo(f.flow), product(f.product), demoExecutor(f.executor) {}
     bool recoveryMotionPending() const { return false; }
     static const char* F(const char* text) { return text; }
     void sendError(unsigned code, const char* reason) {
@@ -1781,7 +1783,7 @@ void manualOwnership() {
                 for (unsigned i = 0; i < 3; ++i) {
                     CHECK(manual.demoManualMutation());
                     CHECK(f.runtime.ownsMotion() && f.runtime.active());
-                    CHECK(!f.flow.referenceValid() && !f.executor.stops && f.executor.starts == 5);
+                    CHECK(f.flow.referenceValid() && !f.executor.stops && f.executor.starts == 5);
                     CHECK(encode(f.store.state()) == before && io.disk == disk && io.calls.size() == calls);
                 }
                 const auto now = terminalAt + 3010;

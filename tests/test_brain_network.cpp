@@ -2110,7 +2110,7 @@ void statusSafety() {
     session.generation = 7;
     session.uptimeMs = 1234;
     Status motion = readyMotion();
-    for (unsigned scenario = 0; scenario < 7; ++scenario) {
+    for (unsigned scenario = 0; scenario < 8; ++scenario) {
         StaticJsonDocument<4096> doc;
         const Status* value = scenario == 0 ? nullptr : &motion;
         const bool fresh = scenario < 3 || scenario >= 5;
@@ -2121,8 +2121,12 @@ void statusSafety() {
             motion.isPreparing = true;
         }
         if (scenario == 6) motion.lowWaterValid = motion.powderValid = false;
+        if (scenario == 7) std::strcpy(motion.productProgress, "complete");
         babytech::brain::writeStatus(doc.to<JsonObject>(), kId, "host-test", value, fresh, session);
         check(!doc.overflowed(), "status document overflow");
+        check(doc["bottle_presence_sensor_enabled"] == false && doc["bottle_state_valid"] == false &&
+              doc["bottle_clamp_status"] == "unknown" && doc["bottle_present_at_load_position"].isNull(),
+              "unmeasured bottle advertised as empty/full");
         check(doc["can_start"] == false && doc["commands_enabled"] == false && doc["progress"] != "ready",
               "null/stale/read-only telemetry advertised start conditions");
         const bool usable = value && fresh;
@@ -2169,6 +2173,8 @@ void statusFlags() {
                                     fresh, session, kChallenge, enabled, start);
         check(!doc.overflowed() && doc["commands_enabled"] == expectedEnabled && doc["can_start"] == expectedStart,
               "explicit status flags were inferred from busy/storage/telemetry or bypassed stale gate");
+        check(doc["bottle_clamp_status"] == "unknown" && doc["bottle_state_valid"] == false,
+              "ready permission fabricated a bottle state");
         check(doc["progress"] == (expectedStart ? "ready" : "noready"), "legacy progress bypassed explicit start gate");
         check(doc["thermal_simulated"] == (!present || motion.snapshot.thermalSimulated),
               "status invented/suppressed original thermal flag");

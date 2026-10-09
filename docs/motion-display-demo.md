@@ -15,7 +15,9 @@ pio run -d device-controller -e motion
 
 Brain 产品命令经 UART v4 的持久运行入口处理；网页流程是 Motion 工作台 owner，不等同于屏幕产品 Start/Initialize，不生成假宝宝/配方。真实流程总开关 `BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW` 已删除；Motion `board_config.h` 的 `BABYTECH_V1_MOTOR_TEST` 默认 1，仅选择产品测试资源，不改变网页工作台所有权。NVS、SQLite schema 和 v4 线字段不变，Brain/App/Cloud 无需改动。软件编译不代表服务器切换或实机验收。
 
-产品默认低液位有效且 false、剩余粉量固定 300 g（集中常量可调），启动/运行与 UART 上报同源。Cloud/App 沿既有字段显示 normal/300，无新增 UI 测试标识；这些是测试占位数据，不可实喂。宏 0 使用当前真实低液位/HX711 入口，需要 GPIO/极性配置及去皮/标定。温度不伪造，目标默认 45°C 或沿现有配方，water_temp/measured_water_temp 仍 null，温控未实现。两种选择保留真实 CAN、电机反馈/初始化、Stop、冲突、持久记录与身份保护；产品完成后 Initialize 再测试，不开机自动运动。Brain SIM 默认关闭，其 15 秒虚拟流程不运行真实 CAN，与 Motion 电机测试不同。
+产品默认低液位有效且 false、剩余粉量固定 300 g（集中常量可调），启动/运行与 UART 上报同源。Cloud/App 沿既有字段显示 normal/300，无新增 UI 测试标识；这些是测试占位数据，不可实喂。宏 0 使用当前真实低液位/HX711 入口，需要 GPIO/极性配置及去皮/标定。温度不伪造，目标默认 45°C 或沿现有配方，water_temp/measured_water_temp 仍 null，温控未实现。两种选择保留真实 CAN、电机反馈/初始化、Stop、冲突、持久记录与身份保护；产品正常完成后可再次手动 Start，无须逐瓶 Initialize（自行换瓶），不开机自动运动。Brain SIM 默认关闭，其 15 秒虚拟流程不运行真实 CAN，与 Motion 电机测试不同。
+
+产品完成展示沿用原 3 秒 Complete，结果保存到持久队列且准入满足后恢复 Ready；下一次必须手动 Start，不要求新增换瓶确认，也不等历史 Cloud 回执。结果容量满、存储失败、故障/冲突及必要初始化仍按原规则处理。无奶瓶传感器时 Motion/Brain JSON 上报 unknown/检测关闭/无有效证据，App 显示 Unknown；不是真实空满检测，操作者自行换瓶，仅供非饮用演示。取消软件锁及统一未知状态需配套更新 Motion/Brain，Unknown 文案需更新 App，Cloud/NVS/SQLite 不改。
 
 Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，共地。115200 / 8N1 / 3.3 V；分别 USB 供电时不互接 5 V。依实际 GPIO 接线，不凭排针 TX/RX 丝印判断方向。
 

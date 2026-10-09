@@ -559,17 +559,31 @@ int main() {
         assert(terminal.completed && terminal.run.commandId == "cmd-1");
         assert(terminal.run.babyId == "baby-1" && terminal.run.targetPowderG == 45.0f);
         product.setEventPending(false);
+        flow.tick(3063);
+        product.tick(3063);
+        assert(std::string(product.progress()) == "complete" && !product.canStart());
+        assert(product.displaySnapshot().stage == DisplayStage::Complete);
+        assert(!product.startCloud(run("cmd-3"), 3063, reason));
+        assert(std::string(reason) == "not_ready");
+        flow.tick(3064);
+        product.tick(3064);
+        assert(product.canStart() && std::string(product.progress()) == "ready");
+        const int beforeNext = executor.starts;
         flow.tick(3100);
-        assert(!product.startCloud(run("cmd-3"), 3101, reason));
-        assert(std::string(reason) == "bottle_full");
+        product.tick(3100);
+        assert(!product.takeTerminal(terminal));
         assertReadOnly(product, flow, executor, guard,
-                       [&] { return product.prepareRejection(run()); }, "bottle_full");
+                       [&] { return product.prepareRejection(run()); }, nullptr);
         assertReadOnly(product, flow, executor, guard,
                        [&] { return product.initializeRejection(); }, nullptr);
         assertReadOnly(product, flow, executor, guard,
                        [&] { return product.cleanRejection(); }, nullptr);
-        assert(product.initialize(3102));
-        assert(product.canStart() && std::string(product.progress()) == "ready");
+        assert(executor.starts == beforeNext && executor.resets == 0);
+        assert(product.startCloud(run("cmd-3"), 3101, reason));
+        assert(product.active() && std::string(product.progress()) == "unscrewing_cap");
+        assert(!product.startCloud(run("cmd-3"), 3102, reason));
+        assert(std::string(reason) == "busy");
+        assert(terminal.completed && terminal.run.commandId == "cmd-1");
     }
     {
         FakeExecutor executor;
@@ -755,5 +769,5 @@ int main() {
         assert(!terminal.completed && terminal.reason == "stop_unconfirmed");
         assert(terminal.errorCode == "E_CAN_FAULT");
     }
-    std::cout << "PASS product session gates, terminal result and context\n";
+    std::cout << "PASS product session gates, terminal result, repeat feeding without Initialize and context\n";
 }

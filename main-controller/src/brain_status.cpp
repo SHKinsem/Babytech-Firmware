@@ -92,7 +92,7 @@ void writeStatus(JsonObject out, const char* deviceId, const char* firmwareVersi
     out["bottle_presence_sensor_enabled"] = false;
     out["bottle_state_valid"] = false;
     out["bottle_present_at_load_position"] = nullptr;
-    out["bottle_clamp_status"] = connected && !std::strcmp(progress, "complete") ? "full" : "empty";
+    out["bottle_clamp_status"] = "unknown";
     out["cap_hall_detected"] = nullptr;
     out["dispensed_water_ml"] = nullptr;
     out["water_delivery_basis"] = "estimated_turns";

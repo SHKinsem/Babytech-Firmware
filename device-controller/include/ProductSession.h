@@ -119,7 +119,6 @@ private:
     std::string stopErrorCode_;
     bool terminalAvailable_ = false;
     bool eventPending_ = false;
-    bool completedLatch_ = false;
     bool cleanPending_ = false;
     bool cleaning_ = false;
 };

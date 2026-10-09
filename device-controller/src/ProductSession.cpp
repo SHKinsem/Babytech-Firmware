@@ -70,7 +70,7 @@ bool ProductSession::clearContext(uint32_t profileVersion) {
 bool ProductSession::canStart() const {
     return executionAuthorized_ && contextStorageReady_ && (!startGuard_ || startGuard_->ready()) &&
         !active_ && !cleanPending_ && !cleaning_ &&
-        !completedLatch_ && !eventPending_ &&
+        !eventPending_ &&
         waterValid_ && !lowWater_ && powderValid_ && powderGrams_ > 50.0f &&
         flow_.startEnabled() && !flow_.busy();
 }
@@ -79,7 +79,6 @@ const char* ProductSession::prepareRejection(const ProductRun& run) const {
     if (!executionAuthorized_) return "non_consumable_demo_disabled";
     if (!contextStorageReady_) return "context_storage_fault";
     if (active_ || cleanPending_ || cleaning_ || eventPending_) return "busy";
-    if (completedLatch_) return "bottle_full";
     if (!waterValid_) return "water_sensor_invalid";
     if (lowWater_) return "low_water";
     if (!powderValid_) return "powder_sensor_invalid";
@@ -171,7 +170,6 @@ void ProductSession::finish(bool completed, const char* reason, const char* erro
     eventPending_ = true;
     active_ = false;
     stopPending_ = false;
-    completedLatch_ = completed;
 }
 
 bool ProductSession::stop(uint32_t now, bool& wasActive) {
@@ -233,9 +231,7 @@ const char* ProductSession::initializeRejection() const {
 
 bool ProductSession::initialize(uint32_t now) {
     if (initializeRejection()) return false;
-    if (!flow_.initialize(now)) return false;
-    completedLatch_ = false;
-    return true;
+    return flow_.initialize(now);
 }
 
 void ProductSession::tick(uint32_t now) {
@@ -282,7 +278,7 @@ const char* ProductSession::progress() const {
             default: return "noready";
         }
     }
-    if (completedLatch_) return "complete";
+    if (flow_.stage() == DisplayStage::Complete) return "complete";
     return canStart() ? "ready" : "noready";
 }
 
@@ -310,7 +306,6 @@ babytech::display::DisplaySnapshot ProductSession::displaySnapshot() const {
     snapshot.formulaBrand.fill(0);
     copyUtf8Prefix(snapshot.babyName.data(), snapshot.babyName.size(), babyName);
     copyUtf8Prefix(snapshot.formulaBrand.data(), snapshot.formulaBrand.size(), brand);
-    if (completedLatch_ && flow_.stage() != DisplayStage::Error) snapshot.stage = DisplayStage::Complete;
     if ((cleanPending_ || cleaning_) && flow_.stage() != DisplayStage::Error)
         snapshot.stage = DisplayStage::NotReady;
     if (!canStart() && snapshot.stage == DisplayStage::Ready) snapshot.stage = DisplayStage::NotReady;

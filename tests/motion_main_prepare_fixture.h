@@ -370,24 +370,49 @@ void run(const std::string& scenario) {
           "new Prepare durable state differs on reopen");
     check(!motion_io::restarts && !fake_motion_ota::update.beginCalls, "fixture wrote firmware/restarted");
     const auto firstRequest = request;
+    const auto firstResult = result;
 
     // No Cloud receipt is supplied: one waiting result must not prevent another bottle.
     for (unsigned i = 0; i < 600 && demo.busy(); ++i) peer.step();
-    check(!demo.busy(), "existing Complete display hold did not finish");
-    initialize.request.sequence = 2;
-    check(makeLocalCommandId(brainPair, 2, initialize.request.commandId), "second Initialize identity invalid");
-    check(peer.link.requestCommand(initialize, motion_io::now), "second Initialize not queued");
-    for (unsigned i = 0; i < 300 &&
-        (peer.link.commandSendState() != CommandSendState::Complete ||
-         productState.state().slot.kind != MotionSlotKind::Empty); ++i) peer.step();
-    check(peer.link.commandResponse().accepted && product.canStart() &&
-          productState.state().pendingResultCount == 1,
-          "waiting terminal blocked initialization/next feeding");
+    peer.step(100);
+    check(!demo.busy() && product.canStart() && product.referenceValid() &&
+          !productRuntime.active() && queue.runId() == runs &&
+          peer.link.peerStatus().snapshot.startEnabled &&
+          !std::strcmp(peer.link.peerStatus().productProgress, "ready") &&
+          productState.state().pendingResultCount == 1 && fake_brain::io.disk == disk,
+          "completed feed required Initialize, auto-started or lost the waiting result");
     prepare.request.sequence = 2;
     std::strcpy(prepare.request.commandId, "host-next-prepare");
     prepare.request.waterMl = 180; prepare.request.temperatureC = 43;
+    if (scenario == "sdk-prepare-next-local") {
+        prepare.request.source = v4::Source::LocalTouch;
+        prepare.request.waterMl = context.waterMl;
+        prepare.request.temperatureC = context.temperatureC;
+        check(makeLocalCommandId(brainPair, 2, prepare.request.commandId), "second local Prepare identity invalid");
+    }
     const auto secondRun = queue.runId();
     check(peer.link.requestCommand(prepare, motion_io::now), "second Prepare not queued");
+    for (unsigned i = 0; i < 100 && peer.link.commandSendState() != CommandSendState::Complete; ++i) peer.step();
+    check(peer.link.commandSendState() == CommandSendState::Complete && peer.link.commandResponse().accepted &&
+          product.active() && sameProductRequest(productState.state().slot.request, prepare.request),
+          "second feed did not begin with its own request");
+    const std::string secondExecution = productState.state().slot.executionId;
+    auto oldStop = stopTarget(firstResult.executionId);
+    oldStop.scope = v4::StopScope::Product;
+    check(peer.link.requestStop(oldStop, motion_io::now), "old product Stop not queued");
+    for (unsigned i = 0; i < 100 && peer.link.stopSendState() == StopSendState::Pending; ++i) peer.step();
+    check(peer.link.stopSendState() == StopSendState::Rejected && product.active() &&
+          secondExecution == productState.state().slot.executionId,
+          "first feed Stop interrupted the second feed");
+    auto duplicate = prepare;
+    duplicate.request = firstRequest;
+    const auto secondDisk = fake_brain::io.disk;
+    check(peer.link.requestCommand(duplicate, motion_io::now), "first feed replay not queued");
+    for (unsigned i = 0; i < 100 && peer.link.commandSendState() != CommandSendState::Complete; ++i) peer.step();
+    check(peer.link.commandSendState() == CommandSendState::Complete && peer.link.commandResponse().accepted &&
+          product.active() && secondExecution == productState.state().slot.executionId &&
+          fake_brain::io.disk == secondDisk,
+          "first feed replay replaced the second feed or changed durable evidence");
     for (unsigned i = 0; i < 800 && productState.state().pendingResultCount != 2; ++i) peer.step();
     check(peer.link.commandSendState() == CommandSendState::Complete && peer.link.commandResponse().accepted &&
           productState.state().pendingResultCount == 2 && queue.runId() == secondRun + 5,
@@ -397,6 +422,15 @@ void run(const std::string& scenario) {
           sameProductRequest(productState.state().pendingResults[0].request, firstRequest) &&
           std::strcmp(second.eventId, productState.state().pendingResults[0].eventId) != 0,
           "second feed overwrote first result or attribution");
+    check(productState.state().pendingResults[0].completed &&
+          productState.state().pendingResults[0].targetPowderG == 37.5f &&
+          productState.state().pendingResults[0].uptimeMs == firstResult.uptimeMs &&
+          !std::strcmp(productState.state().pendingResults[0].eventId, firstResult.eventId) &&
+          !std::strcmp(productState.state().pendingResults[0].executionId, firstResult.executionId) &&
+          !std::memcmp(productState.state().pendingResults[0].digest, firstResult.digest, sizeof(firstResult.digest)) &&
+          productState.state().pendingResults[0].reason[0] == 0 &&
+          productState.state().pendingResults[0].errorCode[0] == 0,
+          "second feed rewrote the first outcome");
     MotionStateStore secondReadback;
     check(secondReadback.load(pair) == MotionLoad::Ready &&
           sameMotionState(secondReadback.state(), productState.state()), "two-result durable reopen mismatch");

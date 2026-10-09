@@ -24,7 +24,7 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         *tuple("http-recovery-stop-" + str(i) for i in range(9)),
         *tuple("http-product-stop-" + str(i) for i in range(9)))
 PREPARE_CASES = ("sdk-prepare-flow", "sdk-prepare-home-missing", "sdk-prepare-marker-missing")
-MOTOR_TEST_CASES = ("sdk-motor-test-flow", "sdk-motor-test-stop",
+MOTOR_TEST_CASES = ("sdk-motor-test-flow", "sdk-motor-test-next-local", "sdk-motor-test-stop",
                     "sdk-motor-test-home-missing", "sdk-motor-test-marker-missing",
                     "sdk-motor-test-distance-mismatch", "sdk-motor-test-default-budget",
                     "sdk-motor-test-reference-preserved", "sdk-motor-test-reference-move",

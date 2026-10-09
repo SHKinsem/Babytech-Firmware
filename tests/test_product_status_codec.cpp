@@ -29,6 +29,8 @@ void verify(const motion::ProductStatusSnapshot& snapshot, bool ready) {
     assert(std::strcmp(parsed["actuator_issue"], ready ? "none" : "non_consumable_demo_disabled") == 0);
     assert(parsed["bottle_presence_sensor_enabled"] == false);
     assert(parsed["bottle_state_valid"] == false);
+    assert(std::strcmp(parsed["bottle_clamp_status"], "unknown") == 0);
+    assert(parsed["bottle_present_at_load_position"].isNull());
 }
 
 int main() {
@@ -60,5 +62,14 @@ int main() {
     verify(snapshot, true);
     snapshot.powderValid = false;
     verify(snapshot, true);
+    for (const char* progress : {"complete", "mixing", "error"}) {
+        snapshot.progress = progress;
+        DynamicJsonDocument document(3072);
+        motion::writeProductStatus(document.to<JsonObject>(), snapshot);
+        assert(document["bottle_presence_sensor_enabled"] == false);
+        assert(document["bottle_state_valid"] == false);
+        assert(std::strcmp(document["bottle_clamp_status"], "unknown") == 0);
+        assert(document["bottle_present_at_load_position"].isNull());
+    }
     std::puts("PASS product status JSON codec and MQTT payload bound");
 }

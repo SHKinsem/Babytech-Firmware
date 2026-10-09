@@ -17,7 +17,9 @@ Motion 的全部 CAN 调试网页、队列、原始指令、称重/标定、Wi-F
 - `=1`：低液位有效且 false，剩余粉量固定 300 g（同文件 `kV1TestPowderGrams` 集中可调）；启动/运行检查和 UART 上报使用同源数据。Cloud/App 沿既有字段显示 normal/300，不新增 UI 测试标识；这些是测试占位数据，不是传感器实测、消耗估算或实喂依据，产物不可用于喂养。
 - `=0`：使用当前真实低液位/HX711 入口。低液位 GPIO 默认 -1，需配置 GPIO/极性；HX711 默认 DOUT1/SCK2，需去皮/砝码标定并核对 `scale-cfg`。无效、陈旧或未标定资源仍阻止受影响启动，不回退到测试值。
 
-两种选择均保留真实 CAN、电机反馈/初始化、Stop、冲突、持久记录和身份保护；上电不自动开始运动，完成后 Initialize 再测试。温度不伪造，目标默认 45°C 或沿现有配方，water_temp/measured_water_temp 仍 null，温控未实现。该资源选择只改 Motion 固件，不改 Brain/App/Cloud、UART 字段、NVS 或 SQLite。
+两种选择均保留真实 CAN、电机反馈/初始化、Stop、冲突、持久记录和身份保护；上电不自动开始运动，正常完成后可再次手动 Start，无须逐瓶 Initialize（自行换瓶）。温度不伪造，目标默认 45°C 或沿现有配方，water_temp/measured_water_temp 仍 null，温控未实现。该资源选择只改 Motion 固件，不改 Brain/App/Cloud、UART 字段、NVS 或 SQLite。
+
+2026-10-10：产品完成后不再使用 `completedLatch/bottle_full` 软件锁。保留原 3 秒 Complete 展示及结果持久保护，正常恢复 Ready 后下一瓶需新的手动 Start，不自动连续运动。Initialize 只用于必要初始化/参考失效恢复。Motion 与 Brain JSON 奶瓶状态统一 unknown，沿用检测 false、有效 false、在位 null；App 显示 Unknown，不证明空瓶/满瓶。此项需更新配套 Motion/Brain、保留 NVS，Unknown 文案需更新 App，不改 Cloud、UART 或 SQLite。没有奶瓶传感器时由操作者负责换瓶，仅供非饮用演示。
 
 Brain USB SIM 默认关闭，SIM ON 是 15 秒整段虚拟动作和四 RAM 结果，不运行真实 CAN；它不同于上述 Motion 真实电机测试。下方按日期保留的旧默认 0、显式测试夹具与测试结果仍只记录当时版本，不作为本项验证证据。
 
@@ -129,7 +131,7 @@ python3 tools/test_motion_main.py --sanitize --prepare-fixture \
 
 仅这个host构建使用既有非食用宏1和GPIO21，不新增PIO环境、设备仿真或串口切换。SDK在DOUT1/SCK2提供有转换间隔的24位有符号HX711位流及第25个增益时钟；真实HTTP去皮/100g标定、滤波/超时及正常NVS保存得到300g。实际UART同步宝宝配置并Initialize，CAN SDK仅按精确home/F3/marker帧回复；失联粉量不能就绪，恢复可自动继续，缺home完成或marker不能误报Ready。
 
-正向使用明确上传的单轴测试配置和五个`wait 400`阶段，真实Queue/Flow/Runtime依次执行，150ml/42C/25g每100ml生成37.5g目标的持久终态；原请求重放不新增阶段或改变NVS。旧结果未收到Cloud回执，正常Complete显示hold结束后仍可Initialize并做第二瓶180ml/43C、目标45g，两条身份/结果分开保存且正常Store重开一致。粉比保持已同步配置，不能借改请求粉比绕过context契约。
+正向使用明确上传的单轴测试配置和五个`wait 400`阶段，真实Queue/Flow/Runtime依次执行，150ml/42C/25g每100ml生成37.5g目标的持久终态；原请求重放不新增阶段或改变NVS。旧结果未收到Cloud回执，正常Complete显示hold结束后无需再次Initialize即可手动做第二瓶180ml/43C、目标45g；覆盖Cloud及LocalTouch下一瓶。第二轮运行时第一轮请求重放不改当前执行/存储，旧执行Stop拒绝，两条身份/结果分开保存且正常Store重开一致。粉比保持已同步配置，不能借改请求粉比绕过context契约。
 
 三个独立进程通过ASan/UBSan，共108项检查；默认34进程亦通过。此处Brain是脚本ReadOnlyLink peer，不运行真实Brain main/Cloud/broker；五段等待不是完整机械脚本或电机运动/传感器闭环证明。完整新Prepare双main链路、真实Flash/CAN/UART/RTOS和B4仍待验证，默认设备非食用宏0及v3不变。
 
