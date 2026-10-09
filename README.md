@@ -21,6 +21,12 @@ Motion 的全部 CAN 调试网页、队列、原始指令、称重/标定、Wi-F
 
 Brain USB SIM 默认关闭，SIM ON 是 15 秒整段虚拟动作和四 RAM 结果，不运行真实 CAN；它不同于上述 Motion 真实电机测试。下方按日期保留的旧默认 0、显式测试夹具与测试结果仍只记录当时版本，不作为本项验证证据。
 
+### 当前产品反馈时间预算（2026-10-09）
+
+产品就绪和产品队列 `move/home await` 按轴数及共享查询预算自动使用 600–5000 ms 有效期，默认五轴、10 次/秒为 5000 ms，避免正常反馈因原 600/1000 ms 时限反复过期。每类反馈在接收时冻结有效期，扩大预算不复活旧样本；不是固定等待或虚构反馈。目标/回零完成证明、两组不同停稳样本、故障和移动判断保留。手动反馈仍 600 ms，手动队列 await 仍 1000 ms；Stop 后三类新反馈及原 3 秒确认期限保持。Brain UART 1.5 秒和业务准入不变，只更新 Motion 并保留 NVS，无新人工配置或协议迁移。下方旧日期中“启动/回零保持600ms”是当时行为，当前以本节为准。
+
+复查 `python3 tools/test_demo.py`、`python3 tools/test_motor_control_evidence.py --sanitize`、`python3 tools/test_motion_main.py --sanitize`；新增 `sdk-motor-test-default-budget` 覆盖五轴默认查询下的 Initialize/UART就绪、缺样和移动恢复及两次 Prepare。SDK/CAN/时钟为替身，五段 wait 不证明实际整机脚本或物理 Stop 时限；仍需安全台架验收。
+
 ## First-install offline restart validation (2026-10-08)
 
 From the parent repository run `python3 Test/dual_main_install_check.py --sanitize`.

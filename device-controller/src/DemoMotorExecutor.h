@@ -58,7 +58,7 @@ public:
             (!externalAvailable_ || externalAvailable_());
     }
     DemoEvidence evidence(uint8_t id) const override {
-        return observation(id, 600);
+        return observation(id, postStop_ ? stopWindowMs_ : motor_.demoEvidenceWindow());
     }
     DemoEvidence stopEvidence(uint8_t id) const override {
         return observation(id, stopWindowMs_);
@@ -68,10 +68,7 @@ private:
         const auto s = motor_.snapshot(id);
         DemoEvidence e;
         if (postStop_) e.fresh = motor_.stopEvidence(id, stopAt_, windowMs);
-        else {
-            uint8_t flags; uint32_t age;
-            e.fresh = s.positionValid && s.velocityValid && motor_.demoFlags(id, flags, age);
-        }
+        else e.fresh = motor_.demoFeedbackFresh(id, windowMs);
         e.stationary = s.velocity >= -5 && s.velocity <= 5;
         e.position = s.position; e.fault = motor_.demoDriverFault(id);
         return e;

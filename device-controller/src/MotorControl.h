@@ -176,7 +176,10 @@ public:
     void demoWatch(uint8_t id, bool enabled) { demoWatched_[id] = enabled; }
     bool demoDriverFault(uint8_t id) const;
     bool demoFlags(uint8_t id, uint8_t& flags, uint32_t& age) const;
-    // Freeze this bounded budget at Stop; normal motion evidence stays 600 ms.
+    // Product readiness shares the multi-axis budget; manual motion stays 600 ms.
+    uint16_t demoEvidenceWindow() const { return physicalEvidenceWindow(false); }
+    bool demoFeedbackFresh(uint8_t id, uint16_t windowMs) const;
+    // Freeze this same bounded budget at Stop and require post-Stop samples.
     uint16_t stopEvidenceWindow() const { return physicalEvidenceWindow(false); }
     bool stopEvidence(uint8_t id, uint32_t stopAt, uint16_t windowMs) const;
     bool operationBusy() const;
@@ -272,14 +275,17 @@ private:
         bool positionValid = false;
         int32_t positionTenths = 0;
         uint32_t positionMs = 0;
+        uint16_t demoPositionFreshMs = 600;
 
         bool velocityValid = false;
         int32_t velocityTenths = 0;
         uint32_t velocityMs = 0;
+        uint16_t demoVelocityFreshMs = 600;
 
         bool flagsValid = false;
         uint8_t flags = 0;
         uint32_t flagsMs = 0;
+        uint16_t demoFlagsFreshMs = 600;
 
         // 0x3B homing status byte (bit0 encoder ready, bit1 calibration ready,
         // bit2 homing running, bit3 homing failed, bit4 over-temp, bit5

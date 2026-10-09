@@ -325,6 +325,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.positionValid = true;
             node.positionTenths = sample.value;
             node.positionMs = now;
+            node.demoPositionFreshMs = demoEvidenceWindow();
             break;
         case FeedbackField::Target:
             node.targetValid = true;
@@ -335,6 +336,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.velocityValid = true;
             node.velocityTenths = sample.value;
             node.velocityMs = now;
+            node.demoVelocityFreshMs = demoEvidenceWindow();
             break;
         case FeedbackField::Current:
             node.currentValid = true;
@@ -345,6 +347,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.flagsValid = true;
             node.flags = static_cast<uint8_t>(sample.value);
             node.flagsMs = now;
+            node.demoFlagsFreshMs = demoEvidenceWindow();
             // A real disabled flag invalidates an old software confirmation.
             if (!(node.flags & 1)) node.enableConfirmed = false;
             if (node.enablePending && node.enableAck &&
@@ -1939,6 +1942,18 @@ MotorControl::Snapshot MotorControl::snapshot(uint8_t id) const {
     s.enabled=n.enableConfirmed; s.enablePending=n.enablePending;
     s.enableAck=n.enableAck; s.enableTimedOut=n.enableTimedOut;
     s.stopPending=n.stopRequested; s.fault=faultAppliesTo(id); return s;
+}
+bool MotorControl::demoFeedbackFresh(uint8_t id, uint16_t windowMs) const {
+    if (!id || windowMs < kFeedbackFreshMs || windowMs > 5000) return false;
+    const auto& n = nodes_[id];
+    const uint32_t now = millis();
+    return n.positionValid && n.velocityValid && n.flagsValid &&
+        ageWithin(now, n.positionMs, windowMs) && ageWithin(now, n.velocityMs, windowMs) &&
+        ageWithin(now, n.flagsMs, windowMs) &&
+        // Changing the query budget cannot revive already expired samples.
+        ageWithin(now, n.positionMs, n.demoPositionFreshMs) &&
+        ageWithin(now, n.velocityMs, n.demoVelocityFreshMs) &&
+        ageWithin(now, n.flagsMs, n.demoFlagsFreshMs);
 }
 bool MotorControl::stopEvidence(uint8_t id, uint32_t stopAt, uint16_t windowMs) const {
     if (!id || windowMs < kFeedbackFreshMs || windowMs > 5000) return false;

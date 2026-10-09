@@ -147,11 +147,134 @@ static void test_default_five_axis_flow_stop() {
     }
     assert(!flow.busy() && std::strcmp(flow.reason(), "stopped") == 0);
     assert(executor.stopConfirmed() && !motor.snapshot(1).positionValid);
-    assert(!executor.evidence(1).fresh && executor.stopEvidence(1).fresh);
-    assert(!flow.stationary()); // Ordinary/start/reference checks still use 600 ms.
+    assert(executor.evidence(1).fresh && executor.stopEvidence(1).fresh);
+    assert(flow.stationary()); // Product readiness shares the frozen post-Stop budget.
     assert(motor.queries().config().queriesPerSecond == 10);
     setMillis(6000); assert(!executor.stopConfirmed());
-    std::cout << "PASS actual five-axis Flow Stop uses bounded window, ordinary feedback stays 600 ms\n";
+    std::cout << "PASS actual five-axis Flow Stop and readiness use bounded proof, manual feedback stays 600 ms\n";
+}
+
+static void test_default_five_axis_readiness() {
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
+    assert(motor.begin(4, 5, 500000)); motor.setAutoQueriesEnabled(false);
+    DemoMotorExecutor executor(motor, queue); DemoFlowController flow(executor);
+    DemoConfig config; config.configured = true;
+    config.initialization.commands = {"wait 1"};
+    for (uint8_t id = 1; id <= 5; ++id) config.axes.push_back({id, 10, 0, false});
+    assert(flow.apply(config)); executor.configure(config);
+    assert(flow.initialize(0));
+    size_t seen = 0;
+    unsigned missingId = 0, movingId = 0;
+    const auto runUntil = [&](uint32_t end) {
+        while (millis() < end) {
+            const auto now = millis() + 1;
+            setMillis(now); motor.poll(false); executor.poll(now); flow.tick(now);
+            queue.poll(now); motor.dispatchQueries();
+            while (seen < capturedTX.size()) {
+                const auto frame = capturedTX[seen++];
+                const auto id = uint8_t(frame.identifier >> 8);
+                if (id == missingId) continue;
+                const auto op = frame.data[0];
+                if (op == 0x36) injectRx(makePosition(id, 0));
+                else if (op == 0x35) injectRx(makeVelocity(id, id == movingId ? 30 : 0));
+                else if (op == 0x3A || op == 0x3B) {
+                    const uint8_t bytes[] = {op, 1, 0x6B}; injectRx(makeFrame(id, bytes, 3));
+                }
+            }
+        }
+    };
+    runUntil(4000);
+    assert(flow.referenceValid() && flow.startEnabled() && flow.stationary());
+    bool ordinaryExpired = false;
+    for (uint8_t id = 1; id <= 5; ++id) {
+        assert(executor.evidence(id).fresh);
+        ordinaryExpired = ordinaryExpired || !motor.snapshot(id).positionValid;
+    }
+    assert(ordinaryExpired && motor.queries().config().queriesPerSecond == 10);
+    for (const auto& frame : capturedTX) assert(frame.length == 2); // No fabricated movement.
+    missingId = 5; runUntil(11000); assert(!flow.stationary());
+    missingId = 0; runUntil(15000); assert(flow.stationary());
+    movingId = 3; runUntil(19000); assert(!flow.stationary());
+    movingId = 0; runUntil(23000); assert(flow.stationary());
+    const uint8_t fault[] = {0x3A, 9, 0x6B};
+    injectRx(makeFrame(4, fault, 3)); motor.poll(false); assert(!flow.stationary());
+    runUntil(24000);
+    flow.stop(millis()); assert(flow.busy() && !executor.stopConfirmed());
+    runUntil(26900);
+    assert(!flow.busy() && std::strcmp(flow.reason(), "stopped") == 0 && executor.stopConfirmed());
+    setMillis(32000); assert(!executor.evidence(1).fresh);
+    std::cout << "PASS five-axis readiness at default query budget: missing, moving, faulty and expired feedback refused\n";
+}
+
+static void test_readiness_budget_does_not_revive_samples() {
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
+    assert(motor.begin(4, 5, 500000)); motor.setAutoQueriesEnabled(false);
+    auto budget = motor.queries().config();
+    budget.queriesPerSecond = 100; budget.gapMs = 2; budget.timeoutMs = 20;
+    assert(motor.queries().configure(budget));
+    DemoConfig config; config.axes.push_back({1, 10, 0, false});
+    DemoMotorExecutor executor(motor, queue); executor.configure(config);
+    assert(motor.demoEvidenceWindow() == 600);
+    feedback(motor, 10, 0); assert(executor.evidence(1).fresh);
+    setMillis(611); assert(!executor.evidence(1).fresh);
+    budget.queriesPerSecond = 1; budget.gapMs = 1000; budget.cooldownMs = 1000;
+    assert(motor.queries().configure(budget));
+    assert(motor.demoEvidenceWindow() == 5000 && !executor.evidence(1).fresh);
+    feedback(motor, 612, 0); assert(executor.evidence(1).fresh);
+    setMillis(1220); assert(!motor.snapshot(1).positionValid && executor.evidence(1).fresh);
+    setMillis(6000); assert(!executor.evidence(1).fresh);
+    std::cout << "PASS readiness budget changes require new samples; manual snapshot remains 600 ms\n";
+}
+
+static void test_product_await_keeps_completion_proof() {
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
+    assert(motor.begin(4, 5, 500000)); motor.setAutoQueriesEnabled(false);
+    DemoConfig config;
+    for (uint8_t id = 1; id <= 5; ++id) config.axes.push_back({id, 10, 0, false});
+    DemoMotorExecutor executor(motor, queue); executor.configure(config);
+    const char* text = "move 1 10 deg 10 20 20 100 await";
+    Rotation rotation; QueueProgram program; QueueError error;
+    assert(parseQueueProgram(text, std::strlen(text), rotation, program, error));
+    feedback(motor, 10, 0);
+    assert(queue.startDemo(program, 20).code == 202);
+    setMillis(20); queue.poll(20);
+    setMillis(30); injectRx(makeAck(1, 0xCD, 2)); motor.poll(false); queue.poll(30);
+    assert(queue.active()); // Pre-acceptance samples cannot complete the move.
+    setMillis(40); injectRx(makeTarget(1, 999)); motor.poll(false);
+    feedback(motor, 40, 999); queue.poll(40); assert(queue.active());
+    feedback(motor, 50, 999); queue.poll(50); assert(queue.active()); // Wrong driver target.
+    setMillis(60); injectRx(makeTarget(1, 100)); injectRx(makePosition(1, 100));
+    injectRx(makeVelocity(1, 30)); motor.poll(false); queue.poll(60); assert(queue.active());
+    feedback(motor, 70, 100); queue.poll(70);
+    for (uint32_t now : {71u, 1200u, 1700u}) {
+        setMillis(now); queue.poll(now); assert(queue.active()); // One pair is not two.
+    }
+    feedback(motor, 1800, 100); queue.poll(1800); queue.poll(1810);
+    assert(queue.state() == QueueState::Done);
+
+    // A later manual run must not inherit the product's larger validity window.
+    assert(queue.start(text, std::strlen(text), 1, rotation, 1820).code == 202);
+    setMillis(1820); queue.poll(1820);
+    setMillis(1830); injectRx(makeAck(1, 0xCD, 2)); motor.poll(false); queue.poll(1830);
+    setMillis(1840); injectRx(makeTarget(1, 200)); motor.poll(false);
+    feedback(motor, 1850, 200); queue.poll(1850);
+    setMillis(2851); queue.poll(2851); assert(queue.active()); // Manual 1 s expiry resets count.
+    feedback(motor, 3550, 200); queue.poll(3550); assert(queue.active());
+    feedback(motor, 3560, 200); queue.poll(3560); queue.poll(3570);
+    assert(queue.state() == QueueState::Done);
+
+    // Product feedback expiry still resets the consecutive stationary proof.
+    feedback(motor, 4000, 200);
+    assert(queue.startDemo(program, 4010).code == 202);
+    setMillis(4010); queue.poll(4010);
+    setMillis(4020); injectRx(makeAck(1, 0xCD, 2)); motor.poll(false); queue.poll(4020);
+    setMillis(4030); injectRx(makeTarget(1, 300)); motor.poll(false);
+    feedback(motor, 4040, 300); queue.poll(4040);
+    setMillis(9041); queue.poll(9041); assert(queue.active());
+    feedback(motor, 9050, 300); queue.poll(9050); assert(queue.active());
+    feedback(motor, 9060, 300); queue.poll(9060); queue.poll(9070);
+    assert(queue.state() == QueueState::Done);
+    std::cout << "PASS product await preserves target, post-proof, speed, two new pairs and expiry; manual stays 1 s\n";
 }
 
 static void test_product_mm_uses_script_configuration() {
@@ -193,6 +316,9 @@ static void test_product_mm_uses_script_configuration() {
 }
 
 int main() {
+    test_default_five_axis_readiness();
+    test_readiness_budget_does_not_revive_samples();
+    test_product_await_keeps_completion_proof();
     test_product_mm_uses_script_configuration();
     test_demo_polling_does_not_starve_queue_await();
     test_stop_proof_is_not_product_readiness();

@@ -1,5 +1,6 @@
 #include "CommandQueue.h"
 
+#include <algorithm>
 #include <string.h>
 
 namespace motion {
@@ -1249,9 +1250,14 @@ void CommandQueue::observeMotion(uint32_t now) {
     // Anchor to the completion transition, NOT each subsequent idle response.
     // Otherwise the 3B/36/35 query cycle resets the stationary pair count forever.
     const uint32_t proofAt = home && homeComplete_ ? homeProofAt_ : phaseAt_;
+    // Product scripts poll every configured axis through the shared budget.
+    // Keep manual await at 1 s; enlarging a budget cannot renew old samples.
+    const uint32_t window = strictHome_ ? motor_.demoEvidenceWindow() : 1000;
+    const uint32_t positionWindow = strictHome_ ? std::min<uint32_t>(window, n.demoPositionFreshMs) : window;
+    const uint32_t velocityWindow = strictHome_ ? std::min<uint32_t>(window, n.demoVelocityFreshMs) : window;
     const bool fresh = n.positionValid && n.velocityValid &&
         newer(n.positionMs, proofAt) && newer(n.velocityMs, proofAt) &&
-        now-n.positionMs < 1000 && now-n.velocityMs < 1000;
+        now-n.positionMs < positionWindow && now-n.velocityMs < velocityWindow;
     // An accepted CD can still leave the driver's old target unchanged. If the
     // pre-send position was fresh, require the target readback to represent this
     // move before allowing two stationary samples to complete the await.

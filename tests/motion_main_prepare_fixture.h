@@ -70,7 +70,20 @@ void run(const std::string& scenario) {
         motion_io::hxReady = true; tick(80);
         check(lowWaterValid && !lowWater && !product.canStart(), "resources bypassed initialization/context");
     }
-    const auto response = http(HTTP_POST, "/api/demo/config", {{"json", config}});
+    const bool fiveAxes = scenario == "sdk-prepare-default-budget";
+    std::string script = config;
+    if (fiveAxes) {
+        auto document = parseJson(script);
+        auto axes = document["axes"].as<JsonArray>();
+        for (unsigned id = 2; id <= 5; ++id) {
+            auto axis = axes.createNestedObject();
+            axis["motor_id"] = id; axis["rotation_distance_mm"] = 0;
+        }
+        script.clear(); serializeJson(document, script);
+        check(motor.queries().config().queriesPerSecond == 10 &&
+              motor.queries().config().gapMs == 100, "five-axis fixture changed query defaults");
+    }
+    const auto response = http(HTTP_POST, "/api/demo/config", {{"json", script}});
     if (response.status != 200) throw std::runtime_error("fixture config: " + response.body);
     check(demo.config().axes[0].rotationMm == 2 && rotationMmValid[1] == differentDistance &&
           (!differentDistance || rotationMmValue[1] == 8),
@@ -94,8 +107,15 @@ void run(const std::string& scenario) {
     motion_io::homeCompletionReply = scenario != "sdk-prepare-home-missing";
     motion_io::markerReply = scenario != "sdk-prepare-marker-missing";
     check(peer.link.requestCommand(initialize, motion_io::now), "Initialize not queued");
+    std::string initProgress, lastQueueMessage;
     for (unsigned i = 0; i < 2000 && !product.canStart() &&
-         demo.stage() != babytech::display::DisplayStage::Error; ++i) peer.step();
+         demo.stage() != babytech::display::DisplayStage::Error; ++i) {
+        peer.step();
+        if (lastQueueMessage != queue.message()) {
+            lastQueueMessage = queue.message();
+            initProgress += " " + std::to_string(motion_io::now) + ":" + lastQueueMessage;
+        }
+    }
     if (scenario == "sdk-prepare-home-missing" || scenario == "sdk-prepare-marker-missing") {
         check(!product.canStart() && !product.referenceValid() &&
               demo.stage() == babytech::display::DisplayStage::Error &&
@@ -104,7 +124,7 @@ void run(const std::string& scenario) {
         return;
     }
     if (!product.canStart()) throw std::runtime_error(std::string("Initialize incomplete: ") +
-        demo.reason() + " queue=" + queue.message() + " product=" + product.progress());
+        demo.reason() + " queue=" + queue.message() + " product=" + product.progress() + initProgress);
     for (unsigned i = 0; i < 800 && productState.state().slot.kind != MotionSlotKind::Empty; ++i) peer.step();
     if (peer.link.commandSendState() != CommandSendState::Complete || !peer.link.commandResponse().accepted ||
         !product.referenceValid() || productState.state().slot.kind != MotionSlotKind::Empty)
@@ -126,6 +146,18 @@ void run(const std::string& scenario) {
               !status.lowWater && status.powderValid && status.powderGrams == 300 &&
               status.snapshot.startEnabled && status.snapshot.temperatureC == 45,
               "sensor-free admission and actual UART telemetry disagree");
+        if (fiveAxes) {
+            check(status.stationary && !status.motionBusy && !status.activeExecutionId[0] &&
+                  demo.config().axes.size() == 5, "five-axis UART status did not become ready");
+            motion_io::missingId = 5; peer.step(600);
+            check(!peer.link.peerStatus().stationary, "missing fifth axis became stationary");
+            motion_io::missingId = 0; peer.step(400);
+            check(peer.link.peerStatus().stationary, "restored fifth axis did not recover");
+            motion_io::movingId = 5; peer.step(400);
+            check(!peer.link.peerStatus().stationary, "moving fifth axis became stationary");
+            motion_io::movingId = 0; peer.step(400);
+            check(peer.link.peerStatus().stationary, "stopped fifth axis did not recover");
+        }
     } else {
         motion_io::hxReady = false; peer.step(160);
         check(!product.canStart() && powderScale.snapshot().status == motion::LoadCellStatus::Stale,
