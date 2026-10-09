@@ -5,7 +5,7 @@ namespace motion_main_prepare {
 const char* config = R"({
   "schema_version":1,"name":"host-prepare-path-not-physical-motion",
   "display":{"baby_name":"Fixture","formula_brand":"Test","water_ml":180,"temperature_c":45},
-  "axes":[{"motor_id":1,"rotation_distance_mm":0}],
+  "axes":[{"motor_id":1,"rotation_distance_mm":2}],
   "initialization":{"timeout_ms":10000,"zero_axes":[{"motor_id":1,"zero_tolerance_deg":1}],
                     "commands":["enable 1","home 1 2 await","disable 1"]},
   "stages":[
@@ -21,11 +21,21 @@ void run(const std::string& scenario) {
     const bool motorTest = BABYTECH_V1_MOTOR_TEST == 1;
     check(motorTest || BABYTECH_LOW_WATER_PIN == 21,
           "Real-sensor Prepare requires explicit host-only water fixture");
+    const bool differentDistance = scenario == "sdk-prepare-distance-mismatch";
+    if (differentDistance) {
+        check(saveRotationMm(1, 8) && saveRotationMm(2, 5) && saveRotationMm(3, 10),
+              "different manual distances not saved");
+    }
     const auto pair = seedPair();
     motion_io::hxReady = true; motion_io::hxRaw = -12040;
     motion_io::flowFeedback = motion_io::automaticFeedback = true;
     motion_io::lowWaterLevel = LOW;
     setup();
+    check(demo.config().configured && !demoConfigJson.isEmpty() && motion_io::canTx.empty(),
+          "embedded product JSON did not load without matching NVS or moved at boot");
+    check(rotationMmValid[1] == differentDistance &&
+          (!differentDistance || rotationMmValue[1] == 8),
+          "product boot rewrote manual NVS distances");
     check(product.executionAuthorized() && !product.canStart(), "boot incorrectly ready");
     if (motorTest) {
         motion_io::hxReady = false;
@@ -62,6 +72,9 @@ void run(const std::string& scenario) {
     }
     const auto response = http(HTTP_POST, "/api/demo/config", {{"json", config}});
     if (response.status != 200) throw std::runtime_error("fixture config: " + response.body);
+    check(demo.config().axes[0].rotationMm == 2 && rotationMmValid[1] == differentDistance &&
+          (!differentDistance || rotationMmValue[1] == 8),
+          "product Apply used or rewrote the manual conversion table");
     BrainPeer peer(pair); peer.connect();
     const auto context = fixtureContext();
     check(peer.link.requestContext(context, motion_io::now), "context not queued");

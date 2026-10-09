@@ -135,7 +135,9 @@ python3 tools/test_motion_main.py --sanitize --prepare-fixture \
 
 2026-10-08批准并修复v4目标投影：空闲显示当前设备目标；冲奶显示本次Prepare锁定的温度。原宝宝配方不变，下一Prepare仍使用自身请求/缓存配方。修复仅在`MotionProductRuntime::project`，共享`ProductSession::displaySnapshot`及默认v3保持原样；不添加目标NVS持久化、加热或门禁。`python3 tools/test_motion_product_runtime.py --sanitize --case temperature`检查这一区分及新配置/运行快照隔离；机械/Flash为替身，不证明完整main的新Prepare成功或实际温控。
 
-`http-history-debug` 用Store正常接口预存已停稳历史结果，读取和距离/限制配置写入、队列运行/取消仍可用，RAM/NVS/HTTP读回一致，历史业务记录字节不变。OTA安全前置可达，空manifest返回400而非因历史结果被阻挡；不证明认证成功、OTA预约或Flash安装。新增HTTP夹具显式保存与嵌入草案匹配的轴1=2mm、轴3=40mm/rev，未改变默认标定或证明回零/机械就绪；无匹配标定时boot配置可能未应用，不能拿此夹具当默认就绪证明。完整恢复/认证OTA矩阵及物理联调仍待验证。
+`http-history-debug` 用Store正常接口预存已停稳历史结果，读取和距离/限制配置写入、队列运行/取消仍可用，RAM/NVS/HTTP读回一致，历史业务记录字节不变。OTA安全前置可达，空manifest返回400而非因历史结果被阻挡；不证明认证成功、OTA预约或Flash安装。当时HTTP夹具显式保存与嵌入草案匹配的轴1=2、轴3=40mm/rev：旧版本无匹配NVS时可能拒绝boot配置，因此旧夹具不证明空白参数启动或回零。完整恢复/认证OTA矩阵及物理联调仍待验证。
+
+2026-10-09已取消产品/屏幕流程的NVS同值前置检查，换算只以当前JSON为准；手动队列仍使用NVS。新增空白/不同NVS启动与SDK Initialize/Prepare、实际CAN换算及无效参数反例，分别验证当前语义；不把这些新结果追记为旧测试证据。新板能加载配置不等于已Ready，仍需现场Initialize和机械验收。
 
 `http-maintenance-usb` 通过实际USB `MAINT BEGIN/END`，`http-maintenance-uart-release/expiry` 通过实际Discovery及维护帧进入预约；明确SDK五轴静止反馈是前置，不用手动设置busy。维护中15读取入口和独立raw `01 1F 6B`可用，16写入/reset入口拒绝，8停止/disable入口逐请求核对完整非查询CAN帧的地址、DLC、payload、顺序及数量。USB无三秒TTL，缺反馈END拒绝，补新反馈后退出；UART持续实际续租超过三秒再释放，或以最后完整帧SDK读取时刻检查2999ms仍有效/3000ms释放。仅两个边界loop冻结host时钟，避免原XMotor/loop延时移动观察，不改变生产预算或其他用例时钟。进入、续租、退出/到期全过程保持完整SDK disk；进入/退出不发取消或运动，退出后无害polling配置恢复。`http-maintenance-busy` 核对实际Clean占用时USB/UART拒绝，不夺取产品任务。不是Brain安装协调器或写入中断、真实USB/UART/CAN/Flash/RTOS验证，也不证明成功认证OTA。
 

@@ -3,6 +3,7 @@
 #include <cassert>
 #include <iostream>
 #include <cstring>
+#include <limits>
 using namespace motion;
 using namespace fakecan;
 struct Rotation : QueueRotationSource {
@@ -22,7 +23,7 @@ static void test_demo_polling_does_not_starve_queue_await() {
     assert(motor.queries().configure(budget));
     DemoConfig config;
     for (uint8_t id=1;id<=5;++id) config.axes.push_back({id,10,10,false});
-    DemoMotorExecutor executor(motor,queue,rotation); executor.configure(config);
+    DemoMotorExecutor executor(motor,queue); executor.configure(config);
     const char* program="enable 1\nmove 1 -5 mm 300 300 300 200 await\nhome 1 2\n";
     assert(queue.start(program,std::strlen(program),1,rotation,0).code==202);
     bool moved=false, targetRead=false, homeSent=false;
@@ -62,13 +63,13 @@ static void test_demo_polling_does_not_starve_queue_await() {
 }
 
 static void test_stop_proof_is_not_product_readiness() {
-    fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
     assert(motor.begin(4, 5, 500000));
     auto budget = motor.queries().config();
     budget.queriesPerSecond = 100; budget.gapMs = 2; budget.timeoutMs = 20;
     assert(motor.queries().configure(budget)); // Single-axis 600 ms lower bound.
     DemoConfig config; config.axes.push_back({1, 10, 0, true});
-    DemoMotorExecutor executor(motor, queue, rotation); executor.configure(config);
+    DemoMotorExecutor executor(motor, queue); executor.configure(config);
     assert(!executor.stopConfirmed());
     setMillis(1); assert(motor.enable(1, true).code == 202);
     injectRx(makeAck(1, 0xF3, 2)); motor.poll();
@@ -80,7 +81,7 @@ static void test_stop_proof_is_not_product_readiness() {
     assert(motor.hasActiveMotion() && !motor.operationBusy());
     assert(executor.stopConfirmed());
     config.axes[0].rotationMm = 10;
-    assert(!executor.configurationValid() && executor.stopConfirmed());
+    assert(executor.configurationValid() && executor.stopConfirmed());
     // Keep the driver fault visible, but it does not invalidate fresh low-speed
     // measurements or require a blanket debug lock once the axis stopped.
     injectRx(makeAck(1, 0xF3, 0xE2)); setMillis(22); motor.poll();
@@ -111,13 +112,12 @@ static void test_stop_proof_is_not_product_readiness() {
 }
 
 static void test_boot_stop_inventory_without_executable_config() {
-    fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
     assert(motor.begin(4, 5, 500000)); motor.setAutoQueriesEnabled(false);
-    DemoMotorExecutor executor(motor, queue, rotation);
+    DemoMotorExecutor executor(motor, queue);
     {
         DemoConfig rejected; rejected.axes.push_back({1, 10, 10, true});
-        assert(!demoRotationMatches(rejected, rotation));
-        executor.configureStopAxes(rejected); // Parsed boot inventory, not an accepted script.
+        executor.configureStopAxes(rejected); // Axis inventory alone is not an accepted script.
     } // No pointer to the rejected temporary may remain.
     setMillis(20); assert(executor.stop());
     setMillis(120); executor.poll(120); motor.dispatchQueries();
@@ -127,13 +127,13 @@ static void test_boot_stop_inventory_without_executable_config() {
     assert(executor.stopConfirmed());
     DemoScript script; std::array<int32_t, 256> zeros{};
     assert(!executor.start(script, true, zeros, 122)); // Monitoring does not authorize motion.
-    std::cout << "PASS boot stop inventory survives rejected parameters without enabling scripts\n";
+    std::cout << "PASS boot stop inventory survives unapplied configuration without enabling scripts\n";
 }
 
 static void test_default_five_axis_flow_stop() {
-    fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
     assert(motor.begin(4, 5, 500000)); motor.setAutoQueriesEnabled(false);
-    DemoMotorExecutor executor(motor, queue, rotation); DemoFlowController flow(executor);
+    DemoMotorExecutor executor(motor, queue); DemoFlowController flow(executor);
     DemoConfig config;
     for (uint8_t id = 1; id <= 5; ++id) config.axes.push_back({id, 10, 0, false});
     assert(flow.apply(config)); executor.configure(config);
@@ -154,12 +154,51 @@ static void test_default_five_axis_flow_stop() {
     std::cout << "PASS actual five-axis Flow Stop uses bounded window, ordinary feedback stays 600 ms\n";
 }
 
+static void test_product_mm_uses_script_configuration() {
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
+    assert(motor.begin(4, 5, 500000)); motor.setAutoQueriesEnabled(false);
+    DemoConfig config; config.axes.push_back({1, 10, 2, true});
+    DemoMotorExecutor executor(motor, queue); executor.configure(config);
+    const char* command = "move 1 10 mm 10 20 20 100 await";
+    Rotation missing;
+    QueueProgram manual; QueueError error;
+    assert(!parseQueueProgram(command, std::strlen(command), missing, manual, error));
+    assert(std::strcmp(error.message, "rotation_distance_missing") == 0);
+    struct DifferentRotation : QueueRotationSource {
+        bool rotationMm(uint8_t, double& value) const override { value = 8; return true; }
+    } different;
+    assert(parseQueueProgram(command, std::strlen(command), different, manual, error));
+    assert(manual.steps[0].distanceTenths == 4500); // Manual table: 10 mm / 8 mm per turn.
+    DemoScript script; script.commands = {command};
+    std::array<int32_t, 256> zeros{};
+    feedback(motor, 10, 0);
+    assert(executor.start(script, false, zeros, 10));
+    setMillis(20); queue.poll(20);
+    std::vector<uint8_t> logical{0xCD};
+    for (const auto& frame : capturedTX) if (frame.data[0] == 0xCD)
+        for (uint8_t i = 1; i < frame.length; ++i) logical.push_back(frame.data[i]);
+    assert(logical.size() == 17 && logical[1] == 0 && logical[12] == 2);
+    const uint32_t magnitude = (uint32_t(logical[8]) << 24) | (uint32_t(logical[9]) << 16) |
+                              (uint32_t(logical[10]) << 8) | logical[11];
+    assert(magnitude == 18000); // Product JSON: 10 mm / 2 mm per turn = 1800 degrees.
+    assert(executor.stop());
+    for (double invalid : {0.0, -2.0, std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::quiet_NaN()}) {
+        config.axes[0].rotationMm = invalid;
+        const auto before = capturedTX.size();
+        assert(!executor.start(script, false, zeros, 30));
+        assert(capturedTX.size() == before && !queue.active());
+    }
+    std::cout << "PASS product mm conversion uses JSON, manual table remains independent, invalid mm emits no motion\n";
+}
+
 int main() {
+    test_product_mm_uses_script_configuration();
     test_demo_polling_does_not_starve_queue_await();
     test_stop_proof_is_not_product_readiness();
     test_default_five_axis_flow_stop();
     test_boot_stop_inventory_without_executable_config();
-    fakeReset(); MotorControl motor; CommandQueue queue(motor); Rotation rotation;
+    fakeReset(); MotorControl motor; CommandQueue queue(motor);
     assert(motor.begin(4,5,500000));
     QueueProgram unconfiguredSync;
     unconfiguredSync.count = 4;
@@ -174,11 +213,11 @@ int main() {
     const auto syncResult = queue.startDemo(unconfiguredSync, 0);
     assert(syncResult.code == 400 && !queue.active() && capturedTX.size() == sentBeforeSync);
     DemoConfig c; c.axes.push_back({1,10,0,true});
-    DemoMotorExecutor executor(motor,queue,rotation); executor.configure(c);
+    DemoMotorExecutor executor(motor,queue); executor.configure(c);
     c.axes[0].rotationMm = 10;
-    assert(!executor.configurationValid() && executor.available());
+    assert(executor.configurationValid() && executor.available());
     DemoFlowController flow(executor);
-    assert(flow.apply(c)); // stale rotation must not prevent replacing the configuration
+    assert(flow.apply(c)); // Product configuration does not depend on the manual rotation table.
     c.axes[0].rotationMm = 0;
     assert(executor.configurationValid());
     std::array<int32_t,256> zeros{}; zeros[1]=-123;

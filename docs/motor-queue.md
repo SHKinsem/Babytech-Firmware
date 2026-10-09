@@ -20,6 +20,8 @@ torque 3 800 1500
 
 在「旋转距离」中按 ID 设置 **rotation distance = 电机转一圈的实际行程（mm/rev）**。例如电机 1 为 8 mm/rev，20 mm 对应 900°；电机 2 为 40 mm/rev，20 mm 对应 180°。没有配置不能执行该电机的毫米动作，但仍可用 `deg` 或 `rev`。换算以板端已保存的值为准，不以未保存表单为准。
 
+此设置只用于本页手动编排队列，不是 App/Brain 产品冲奶的前置步骤。产品/“屏幕流程”使用当前 JSON 中的 `axes[].rotation_distance_mm`，不要求 NVS 同值；操作前分别核对各自配置，详见[流程调试说明](motion-display-demo.md)。
+
 ## 瓶盖完整流程
 
 [瓶盖流程编排](../tools/motor-protocol-demo/src/examples/bottle-cap-cycle.queue)按现场提供的 ID 1/2/3/5 步骤收录；网页编排页的「载入瓶盖流程」只把它放进编辑区，仍须手动提交。程序共 35 个动作，含两组 `sync begin trigger`。执行前须在板端保存 ID 1 = 2 mm/rev、ID 3 = 40 mm/rev，并核对各轴方向与机构行程。末尾的 `4C`、`45` 字节串是注释记录，不会被编排发送。完整程序已通过板端解析和同步规划测试；尚未作为整段流程实机验收。

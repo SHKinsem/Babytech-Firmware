@@ -25,7 +25,8 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         *tuple("http-product-stop-" + str(i) for i in range(9)))
 PREPARE_CASES = ("sdk-prepare-flow", "sdk-prepare-home-missing", "sdk-prepare-marker-missing")
 MOTOR_TEST_CASES = ("sdk-motor-test-flow", "sdk-motor-test-stop",
-                    "sdk-motor-test-home-missing", "sdk-motor-test-marker-missing")
+                    "sdk-motor-test-home-missing", "sdk-motor-test-marker-missing",
+                    "sdk-motor-test-distance-mismatch")
 
 
 def main():

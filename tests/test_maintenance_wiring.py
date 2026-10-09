@@ -601,7 +601,9 @@ class MaintenanceWiringTest(unittest.TestCase):
     def test_boot_inventory_precedes_executable_parameter_validation(self):
         body = function_body(self.motion, "bool applyDemoJson(")
         self.assertLess(body.index("parseDemoConfig("), body.index("configureStopAxes("))
-        self.assertLess(body.index("configureStopAxes("), body.index("demoRotationMatches("))
+        self.assertLess(body.index("configureStopAxes("), body.index("demo.apply("))
+        self.assertNotIn("boardRotation", body)
+        self.assertNotIn("demoRotationMatches", self.motion)
         self.assertIn("if (boot) demoExecutor.configureStopAxes(candidate)", body)
         setup = function_body(self.motion, "void setup()")
         self.assertIn("demoJsonStart), configError, true)", setup)

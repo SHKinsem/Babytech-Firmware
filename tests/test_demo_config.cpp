@@ -44,6 +44,21 @@ int main(int argc, char** argv) {
     assert(!parseDemoConfig("{\"schema_version\":1,\"schema_version\":2}",39,c,error));
     const char* configured = R"({"schema_version":1,"name":"fixture","axes":[{"motor_id":1,"rotation_distance_mm":0}],"display":{"baby_name":"demo","formula_brand":"test","water_ml":180,"temperature_c":45},"initialization":{"timeout_ms":5000,"zero_axes":[{"motor_id":1,"zero_tolerance_deg":1}],"commands":["enable 1","home 1 2 await"]},"stages":[{"id":"open_cap","timeout_ms":5000,"commands":["move 1 1 deg 10 20 20 100 await"]},{"id":"water","timeout_ms":5000,"commands":["wait 100"]},{"id":"powder","timeout_ms":5000,"commands":["wait 100"]},{"id":"close_cap","timeout_ms":5000,"commands":["wait 100"]},{"id":"mix","timeout_ms":5000,"commands":["zero 1 10 20 20 100","wait 100"]}]})";
     assert(parseDemoConfig(configured, std::strlen(configured), c,error)); assert(c.configured);
+    const std::string distanceField = "\"rotation_distance_mm\":0";
+    std::string millimetres(configured);
+    millimetres.replace(millimetres.find("move 1 1 deg"), std::strlen("move 1 1 deg"), "move 1 1 mm");
+    for (const char* value : {"0", "-2", "null", "false", "\"2\"", "1e309", "1000001"}) {
+        std::string invalid(millimetres);
+        invalid.replace(invalid.find(distanceField), distanceField.size(),
+                        std::string("\"rotation_distance_mm\":") + value);
+        DemoConfig rejected;
+        assert(!parseDemoConfig(invalid.c_str(), invalid.size(), rejected, error));
+    }
+    millimetres.replace(millimetres.find(distanceField), distanceField.size(), "\"rotation_distance_mm\":2");
+    DemoConfig metric;
+    assert(parseDemoConfig(millimetres.c_str(), millimetres.size(), metric, error) && metric.configured);
+    assert(buildDemoProgram(metric.stages[0], metric, false, zeros, program, error));
+    assert(program.steps[0].distanceTenths == 1800);
     assert(buildDemoProgram(c.stages[4],c,false,zeros,program,error));
     assert(program.steps[0].absolute && program.steps[0].distanceTenths == -123);
     assert(program.steps[0].awaitCompletion && program.count == 2);
@@ -74,5 +89,5 @@ int main(int argc, char** argv) {
     bad.assign(20,'['); bad.append(20,']'); assert(!parseDemoConfig(bad.c_str(),bad.size(),c,error));
     bad = configured; bad.replace(bad.find("wait 100"),8,"wait 100\\nstop 1");
     assert(!parseDemoConfig(bad.c_str(),bad.size(),c,error));
-    std::cout << "PASS demo JSON bounds, sync groups, atomic validation, safe commands, axes and absolute software zero\n";
+    std::cout << "PASS demo JSON bounds, required finite mm conversion, sync groups, atomic validation, safe commands, axes and absolute software zero\n";
 }

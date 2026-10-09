@@ -6,9 +6,9 @@
 namespace motion {
 class DemoMotorExecutor final : public DemoExecutor {
 public:
-    DemoMotorExecutor(MotorControl& motor, CommandQueue& queue, const QueueRotationSource& rotation,
+    DemoMotorExecutor(MotorControl& motor, CommandQueue& queue,
                       bool (*externalAvailable)() = nullptr)
-        : motor_(motor), queue_(queue), rotation_(rotation), externalAvailable_(externalAvailable) {}
+        : motor_(motor), queue_(queue), externalAvailable_(externalAvailable) {}
     // Axis monitoring is also needed when boot rejects executable parameters.
     void configureStopAxes(const DemoConfig& config) {
         for (unsigned id = 1; id < 256; ++id) motor_.demoWatch(static_cast<uint8_t>(id), false);
@@ -57,9 +57,6 @@ public:
         return !queue_.active() && !motor_.operationBusy() &&
             (!externalAvailable_ || externalAvailable_());
     }
-    bool configurationValid() const override {
-        return !config_ || demoRotationMatches(*config_, rotation_);
-    }
     DemoEvidence evidence(uint8_t id) const override {
         return observation(id, 600);
     }
@@ -81,7 +78,7 @@ private:
     }
 public:
     // Stop confirmation is not Ready: enabled holding drivers, invalid zeros,
-    // script/rotation mismatch and latched faults do not erase fresh stop proof.
+    // missing configuration and latched faults do not erase fresh stop proof.
     bool stopConfirmed() const {
         if (!postStop_ || !motor_.ready() || !stopAxisCount_ ||
             queue_.active() || motor_.operationBusy()) return false;
@@ -92,7 +89,7 @@ public:
     }
     bool start(const DemoScript& script, bool initializing,
                const std::array<int32_t, 256>& zeros, uint32_t now) override {
-        if (!config_ || !healthy() || !demoRotationMatches(*config_, rotation_)) return false;
+        if (!config_ || !healthy()) return false;
         std::unique_ptr<QueueProgram> program(new QueueProgram);
         std::string error;
         if (!buildDemoProgram(script, *config_, initializing, zeros, *program, error)) return false;
@@ -135,7 +132,6 @@ private:
     }
     MotorControl& motor_;
     CommandQueue& queue_;
-    const QueueRotationSource& rotation_;
     bool (*externalAvailable_)() = nullptr;
     const DemoConfig* config_ = nullptr;
     std::array<uint8_t, kDemoMaxAxes> stopAxes_{};

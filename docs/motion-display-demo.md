@@ -46,7 +46,9 @@ Motion GPIO43 TX 接屏幕 GPIO44 RX；Motion GPIO44 RX 接屏幕 GPIO43 TX，�
 ]
 ```
 
-示例值不是实机参数。`rotation_distance_mm` 必须与该 ID 板端保存值一致；0 表示板端未配置此换算，只能使用 deg/rev。`initialization.zero_axes` 必须引用此清单，容差为 0.1–10 度。未声明轴的指令不能运行。
+示例值不是实机参数。产品/屏幕流程的毫米换算只使用当前 JSON `axes[].rotation_distance_mm`，不再要求与调试网页保存的 NVS 值相同。当前内置草案为轴1=2、轴3=40 mm/rev；其余轴0表示本脚本不提供毫米换算，只能使用 deg/rev。毫米指令缺少有效正数换算仍被拒绝；新板无需先在网页重复保存2/40，上电加载脚本但不自动运动，仍须现场确认参数并 Initialize。网页 Apply 只修改 RAM，永久修改内置参数仍需编辑 `device-controller/data/demo_flow.json` 后重编译烧录。`initialization.zero_axes` 必须引用此清单，容差为 0.1–10 度。未声明轴的指令不能运行。
+
+“编排队列”中的手动程序仍使用 `/api/motor-distance` 保存的板端 NVS 值；此接口及原有数据不变。两种入口各自使用自己的已确认配置：产品使用 JSON，手动队列使用 NVS。不要把网页手动换算值当作产品脚本已更新；运行中仍不能替换配置或修改换算值。
 
 每项 `commands` 是一行既有队列指令；演示额外支持软件零点指令：
 

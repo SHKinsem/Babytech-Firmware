@@ -432,6 +432,9 @@ int main(int argc, char** argv) {
         const auto originalPair = which == "paired-boot" ? fake_brain::io.disk.at("productpair").at("record").bytes : fake_brain::Bytes{};
         const auto originalState = which == "paired-boot" ? fake_brain::io.disk.at("productstate").at("record").bytes : fake_brain::Bytes{};
         setup();
+        check(demo.config().configured && demo.config().axes.size() == 5 &&
+              !rotationMmValid[1] && !rotationMmValid[3],
+              "fresh board required duplicate manual calibration to load product JSON");
         if (which == "paired-boot") {
             check(productBoardLink.pairingState() == PairingLoad::Ready && productState.ready() &&
                   productRecovery.loadResult() == MotionLoad::Ready &&

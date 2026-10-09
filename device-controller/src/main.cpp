@@ -412,7 +412,7 @@ public:
 };
 BoardRotationSource boardRotation;
 
-motion::DemoMotorExecutor demoExecutor(motor, queue, boardRotation, []() { return !wifiSetup.busy(); });
+motion::DemoMotorExecutor demoExecutor(motor, queue, []() { return !wifiSetup.busy(); });
 motion::DemoFlowController demo(demoExecutor);
 motion::ProductSession product(demo);
 class RecoveryHardware : public motion::MotionRecoveryHardware {
@@ -867,7 +867,6 @@ bool applyDemoJson(const String& json, std::string& error, bool boot = false) {
     motion::DemoConfig candidate;
     if (!motion::parseDemoConfig(json.c_str(), json.length(), candidate, error)) return false;
     if (boot) demoExecutor.configureStopAxes(candidate);
-    if (!motion::demoRotationMatches(candidate, boardRotation)) { error = "rotation_distance_mismatch"; return false; }
     if (!demo.apply(std::move(candidate))) { error = "demo_busy"; return false; }
     demoConfigJson = json;
     demoExecutor.configure(demo.config());
@@ -883,7 +882,7 @@ void handleDemoConfig() {
     sendJson(200, demoStatusJson());
 }
 void handleDemoAction() {
-    if (demoBusy() || wifiSetup.busy() || !motion::demoRotationMatches(demo.config(), boardRotation)) {
+    if (demoBusy() || wifiSetup.busy()) {
         sendError(409, F("configuration_or_wifi_busy")); return;
     }
     const String action = server.arg("action");
