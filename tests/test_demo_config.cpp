@@ -1,4 +1,5 @@
 #include "DemoFlowConfig.h"
+#include "CommandQueue.h"
 #include <cassert>
 #include <cstring>
 #include <fstream>
@@ -23,6 +24,30 @@ int main(int argc, char** argv) {
     assert(program.steps[6].action == QueueAction::SyncEnd);
     assert(program.steps[7].action == QueueAction::SyncBegin &&
            program.steps[7].groupSize == 2 && program.steps[7].syncTriggerOnly);
+    {
+        MotorControl motor; CommandQueue queue(motor);
+        assert(motor.begin(4, 5, 500000));
+        assert(!queue.syncSettings().valid());
+        assert(queue.startDemo(program, 1).code == 202); // Actual embedded close-cap script.
+        assert(!queue.syncSettings().valid()); // Product fallback does not configure manual sync.
+        queue.cancel("test");
+        struct Rotation : QueueRotationSource {
+            bool rotationMm(uint8_t, double&) const override { return false; }
+        } rotation;
+        const char* text = "sync begin trigger\nmove 1 360 deg 1 60 60 800\nmove 2 -180 deg 1 60 60 800\nsync end";
+        auto result = queue.start(text, std::strlen(text), 1, rotation, 2);
+        assert(result.code == 400 && std::strcmp(result.message, "sync_settings_unconfigured") == 0);
+        auto settings = productSyncDefaults(); settings.responseBudgetMs = 500;
+        assert(queue.setSyncSettings(settings));
+        result = queue.startDemo(program, 3);
+        assert(result.code == 400 && std::strcmp(result.message, "sync_feedback_budget_insufficient") == 0);
+        assert(queue.syncSettings().responseBudgetMs == 500); // No fallback over an existing valid setting.
+        settings.responseBudgetMs = 20; settings.stopTimeoutMs = 2000;
+        assert(queue.setSyncSettings(settings) && queue.startDemo(program, 4).code == 202);
+        assert(queue.syncSettings().responseBudgetMs == 20 && queue.syncSettings().stopTimeoutMs == 2000);
+        queue.cancel("test");
+        std::cout << "PASS embedded close-cap sync: blank product defaults, manual isolation and existing-setting preservation\n";
+    }
     DemoScript badSync;
     badSync.commands = {"sync begin trigger", "move 1 1 mm 10 20 20 100",
                         "move 2 360 deg 10 20 20 100"};

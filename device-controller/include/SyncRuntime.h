@@ -14,6 +14,18 @@ struct SyncSettings {
             prepareTimeoutMs>=1000 && prepareTimeoutMs<=60000 && stopTimeoutMs>=500 && stopTimeoutMs<=30000;
     }
 };
+// Product execution defaults; axis mechanics remain in the script.
+inline SyncSettings productSyncDefaults() {
+    SyncSettings settings;
+    settings.tolerance.progress = .02;
+    settings.tolerance.timeMs = 50;
+    settings.feedbackTimeoutMs = 5000;
+    settings.prepareTimeoutMs = 10000;
+    settings.stopTimeoutMs = 3000;
+    settings.responseBudgetMs = 100;
+    settings.completionTenths = 2;
+    return settings;
+}
 struct SyncFeedback {
     int32_t position=0,velocity=0,target=0;
     uint32_t positionAt=0,velocityAt=0,flagsAt=0,homeAt=0,targetAt=0,ackSequence=0,ackAt=0;

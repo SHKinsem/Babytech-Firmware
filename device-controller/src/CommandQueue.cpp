@@ -735,6 +735,7 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     // software supervisor without discarding observed hardware state or
     // sending anything on CAN.
     program_ = scratch;
+    runSyncSettings_ = syncSettings_;
     strictHome_ = false;
     programHash_=2166136261u;
     for(size_t i=0;i<length;++i) programHash_=(programHash_^uint8_t(text[i]))*16777619u;
@@ -761,10 +762,11 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
     if (active() || motor_.operationBusy()) return Result{409, "queue_busy"};
     if (!motor_.ready() || motor_.hasFault()) return Result{503, "can_unavailable"};
     if (!program.count || program.hasRaw) return Result{400, "invalid_demo_program"};
+    const SyncSettings settingsForRun = syncSettings_.valid() ? syncSettings_ : productSyncDefaults();
     for (uint8_t i = 0; i < program.count; ++i) {
         const auto& step = program.steps[i];
         if (step.action != QueueAction::SyncBegin) continue;
-        SyncSettings settings = syncSettings_;
+        SyncSettings settings = settingsForRun;
         if (step.syncToleranceProgress > 0)
             settings.tolerance.progress = fmin(settings.tolerance.progress, step.syncToleranceProgress);
         const char* reason = sync_.validate(program.steps + i + 1, step.groupSize,
@@ -772,6 +774,7 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
         if (reason) { errorLine_ = step.line; setMessage(reason); return Result{400, reason}; }
     }
     program_ = program;
+    runSyncSettings_ = settingsForRun;
     strictHome_ = true;
     sync_.reset();
     programHash_ = 0;  // Demo programs have no DSL source text.
@@ -872,7 +875,7 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
        step.action==QueueAction::Torque || step.action==QueueAction::Velocity)) ||
        step.action==QueueAction::Hex || step.action==QueueAction::Can) unconfirmedMotion_=true;
     if(step.action==QueueAction::SyncBegin) {
-        SyncSettings settings=syncSettings_;
+        SyncSettings settings=runSyncSettings_;
         if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
         helixTravelMm_=step.helixTravelMm;
         helixGeometryErrorMm_=step.helixGeometryErrorMm;
@@ -1143,7 +1146,7 @@ SyncFeedback CommandQueue::syncFeedback(uint8_t id) const {
     f.flagsValid=n.flagsValid;f.homeValid=n.homeFlagsValid;
     const auto match=[&](uint8_t field,uint32_t at,uint32_t& requested) {
         const auto evidence=motor_.queries_.evidence(id,field);requested=evidence.sampleRequestAt;
-        return evidence.receivedAt==at && at-requested<=syncSettings_.responseBudgetMs;
+        return evidence.receivedAt==at && at-requested<=runSyncSettings_.responseBudgetMs;
     };
     f.positionValid=f.positionValid && match(0x36,f.positionAt,f.positionRequestedAt);
     f.velocityValid=f.velocityValid && match(0x35,f.velocityAt,f.velocityRequestedAt);

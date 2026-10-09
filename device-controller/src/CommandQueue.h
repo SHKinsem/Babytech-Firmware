@@ -115,6 +115,7 @@ private:
 
     MotorControl& motor_;
     SyncSettings syncSettings_;
+    SyncSettings runSyncSettings_;
     SyncRuntime sync_;
     bool motionComplete_=false;
     bool unconfirmedMotion_=false;
