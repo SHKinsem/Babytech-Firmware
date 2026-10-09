@@ -89,8 +89,8 @@ void clean(BrainPeer& peer) {
     check(productRuntime.ownsMotion() && productRuntime.active() &&
           productState.state().slot.kind != MotionSlotKind::Empty &&
           productState.state().cloudSequence == 1, "accepted Clean did not retain product ownership");
-    check(!product.executionAuthorized() && !productHardware.stationary() && !safeForOta(),
-          "Clean fixture bypassed non-consumable default or fabricated stationary evidence");
+    check(!product.canStart() && !productHardware.stationary() && !safeForOta(),
+          "Clean fixture allowed Prepare or fabricated stationary evidence");
 }
 void guards(v4::Pairing pair) {
     fake_motion_ota::updateAvailable = true; // Metadata only, never enable Flash.

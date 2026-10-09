@@ -148,6 +148,8 @@ jobs:
           python tools/test_brain_network_console.py --sanitize
           python tools/test_brain_main.py --sanitize
           python tools/test_motion_main.py --sanitize
+          python tools/test_motion_main.py --sanitize --water-fixture --case sdk-water-sampling
+          python tools/test_motion_main.py --sanitize --prepare-fixture --case sdk-prepare-flow --case sdk-prepare-home-missing --case sdk-prepare-marker-missing
           python -m unittest discover -s tests -p test_configure_brain_network.py
           python -m unittest discover -s tests -p test_install_brain.py
           python -m unittest discover -s tests -p test_package_ota.py

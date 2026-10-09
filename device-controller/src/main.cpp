@@ -96,9 +96,6 @@ motion::ProductSession* productSession = nullptr;
 #ifndef BABYTECH_LOW_WATER_PIN
 #define BABYTECH_LOW_WATER_PIN -1
 #endif
-#ifndef BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW
-#define BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW 0
-#endif
 #ifndef BABYTECH_LOW_WATER_ACTIVE_LOW
 #define BABYTECH_LOW_WATER_ACTIVE_LOW 0
 #endif
@@ -113,6 +110,24 @@ bool lowWaterValid = false;
 bool lowWater = false;
 uint8_t lowWaterSamples = 0;
 uint32_t lastLowWaterSampleAt = 0;
+struct ProductResources {
+    bool waterValid;
+    bool lowWater;
+    bool powderValid;
+    float powderGrams;
+};
+// Admission and UART telemetry must use the same resource source.
+ProductResources productResources(uint32_t now) {
+    if (BABYTECH_V1_MOTOR_TEST == 1)
+        return {true, false, true, kV1TestPowderGrams};
+    const auto& scale = powderScale.snapshot();
+    const bool valid = powderScale.initialized() && scale.hasSample && scale.calibrated &&
+        scale.status != motion::LoadCellStatus::Stale && scale.status != motion::LoadCellStatus::Fault &&
+        std::isfinite(scale.filteredWeightG) &&
+        double(scale.filteredWeightG) <= double(std::numeric_limits<int32_t>::max()) &&
+        static_cast<uint32_t>(now - scale.sampledAtMs) <= powderScale.sampleTimeoutMs();
+    return {lowWaterValid, lowWater, valid, valid ? scale.filteredWeightG : 0.0f};
+}
 void pollProductResources() {
     const uint32_t now = millis();
     if (BABYTECH_LOW_WATER_PIN >= 0 &&
@@ -126,13 +141,9 @@ void pollProductResources() {
         lowWaterValid = lowWaterSamples >= 5;
     }
     if (!productSession) return;
-    const auto& scale = powderScale.snapshot();
-    const bool scaleValid = powderScale.initialized() && scale.hasSample && scale.calibrated &&
-        scale.status != motion::LoadCellStatus::Stale &&
-        scale.status != motion::LoadCellStatus::Fault &&
-        static_cast<uint32_t>(now - scale.sampledAtMs) <= powderScale.sampleTimeoutMs();
-    productSession->resources(lowWaterValid, lowWater, scaleValid,
-                              scaleValid ? scale.filteredWeightG : 0.0f, now);
+    const auto resources = productResources(now);
+    productSession->resources(resources.waterValid, resources.lowWater,
+                              resources.powderValid, resources.powderGrams, now);
 }
 bool canStarted = false;
 bool otaWriterBusy();
@@ -772,16 +783,12 @@ void serviceBrainLink() {
     strlcpy(status.productProgress, product.progress(), sizeof(status.productProgress));
     strlcpy(status.productError, product.errorCode(), sizeof(status.productError));
     status.isPreparing = product.active();
-    status.lowWaterValid = lowWaterValid;
-    status.lowWater = lowWater;
-    const auto& scale = powderScale.snapshot();
-    status.powderValid = powderScale.initialized() && scale.hasSample && scale.calibrated &&
-        scale.status != motion::LoadCellStatus::Stale && scale.status != motion::LoadCellStatus::Fault &&
-        std::isfinite(scale.filteredWeightG) &&
-        double(scale.filteredWeightG) <= double(std::numeric_limits<int32_t>::max()) &&
-        uint32_t(status.sampleUptimeMs - scale.sampledAtMs) <= powderScale.sampleTimeoutMs();
-    if (status.powderValid && scale.filteredWeightG > 0)
-        status.powderGrams = static_cast<int32_t>(scale.filteredWeightG);
+    const auto resources = productResources(status.sampleUptimeMs);
+    status.lowWaterValid = resources.waterValid;
+    status.lowWater = resources.lowWater;
+    status.powderValid = resources.powderValid;
+    if (resources.powderValid && resources.powderGrams > 0)
+        status.powderGrams = static_cast<int32_t>(resources.powderGrams);
     status.actuatorOperational = product.flowConfigured() && product.referenceValid() && motor.ready();
     status.actuatorConfigValid = product.flowConfigured();
     status.actuatorBusHealthy = motor.ready();
@@ -1642,7 +1649,10 @@ void setup() {
     productBoardLink.setMaintenanceTarget(&migrationMaintenance);
     productBoardLink.install().setTarget(&migrationInstall);
     productSession = &product;
-    product.setExecutionAuthorized(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1);
+    product.setExecutionAuthorized(true);
+    if (BABYTECH_V1_MOTOR_TEST == 1)
+        Serial.printf("[product] V1 motor test: water normal, powder %.0fg are test values; no measured temperature. Not for feeding.\n",
+                      double(kV1TestPowderGrams));
     if (BABYTECH_LOW_WATER_PIN >= 0)
         pinMode(BABYTECH_LOW_WATER_PIN,
                 BABYTECH_LOW_WATER_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);

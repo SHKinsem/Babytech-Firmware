@@ -414,9 +414,13 @@ class MaintenanceWiringTest(unittest.TestCase):
         for retired in ("void serviceCloud()", "cloud.begin(", "cloud.take(",
                         "productSession->networkState(wifiConnected, millis())"):
             self.assertNotIn(retired, self.motion)
-        self.assertRegex(self.motion, r"#ifndef BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW\s+"
-                         r"#define BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW 0\s+#endif")
-        self.assertIn("product.setExecutionAuthorized(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1)", setup)
+        self.assertIn("product.setExecutionAuthorized(true)", setup)
+        resources = function_body(self.motion, "void pollProductResources()")
+        self.assertIn("productResources(now)", resources)
+        self.assertIn("productResources(status.sampleUptimeMs)", telemetry)
+        config = (ROOT / "device-controller/include/board_config.h").read_text()
+        self.assertRegex(config, r"#ifndef BABYTECH_V1_MOTOR_TEST\s+"
+                         r"#define BABYTECH_V1_MOTOR_TEST 1\s+#endif")
 
         hardware = function_body(self.motion, "class ProductHardware :")
         unavailable = function_body(hardware, "const char* unavailable() const override")

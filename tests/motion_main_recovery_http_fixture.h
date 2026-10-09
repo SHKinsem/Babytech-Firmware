@@ -28,7 +28,7 @@ void recoveryFrames(size_t start, int disableIndex = -1, bool requireStop = fals
 void boot() {
     setup();
     recoveryFrames(0, -1, true);
-    check(queue.runId() == 0 && !product.executionAuthorized(), "recovery boot started/authorized a queue");
+    check(queue.runId() == 0 && !product.canStart(), "recovery boot started a queue or permitted Prepare");
 }
 
 MotionExecutionSlot intent(v4::Pairing pair) {
@@ -101,7 +101,7 @@ void settled(v4::Pairing pair, const MotionExecutionSlot& original) {
     check(readback.load(pair) == MotionLoad::Ready && readback.state().pendingResultCount == 1 &&
           sameMotionState(readback.state(), expectedState),
           "recovery failure was not persisted");
-    check(!product.executionAuthorized() && !product.canStart(), "recovery bypassed default product authorization");
+    check(!product.canStart(), "recovery bypassed mechanical readiness");
     recoveryFrames(start);
     check(motor.movementGeneration() == generation && queue.runId() == 0,
           "recovery wait/archival resumed a motion/queue");

@@ -24,6 +24,8 @@ CASES = ("empty-boot", "paired-boot", "recovery-default-budget", "recovery-inten
         *tuple("http-recovery-stop-" + str(i) for i in range(9)),
         *tuple("http-product-stop-" + str(i) for i in range(9)))
 PREPARE_CASES = ("sdk-prepare-flow", "sdk-prepare-home-missing", "sdk-prepare-marker-missing")
+MOTOR_TEST_CASES = ("sdk-motor-test-flow", "sdk-motor-test-stop",
+                    "sdk-motor-test-home-missing", "sdk-motor-test-marker-missing")
 
 
 def main():
@@ -32,8 +34,10 @@ def main():
     parser.add_argument("--water-fixture", action="store_true",
                         help="Host-only GPIO21 active-high low-water input; firmware defaults remain unchanged")
     parser.add_argument("--prepare-fixture", action="store_true",
-                        help="Explicit host-only non-consumable Prepare test; no MCU build or physical motion")
-    parser.add_argument("--case", action="append", choices=(*CASES, *PREPARE_CASES))
+                        help="Host-only real-sensor Prepare fixture; no MCU build or physical motion")
+    parser.add_argument("--real-sensors", action="store_true",
+                        help="Compile with BABYTECH_V1_MOTOR_TEST=0 to check real-sensor admission")
+    parser.add_argument("--case", action="append", choices=(*CASES, *PREPARE_CASES, *MOTOR_TEST_CASES))
     parser.add_argument("--pipe", action="store_true", help="Run actual Motion main with JSONL host SDK UART I/O")
     parser.add_argument("--seed-history", action="store_true", help="Initially archive four historical LocalTouch results")
     parser.add_argument("--state-file", type=Path, help="Persist/restore raw fake SDK NVS snapshot array")
@@ -59,6 +63,10 @@ def main():
         parser.error("history/state/context/boot options require --pipe")
     if args.boot_id is not None and not 1 <= args.boot_id <= 2**32 - 33:
         parser.error("--boot-id must be 1..uint32_max-32")
+    real_sensors = args.real_sensors or args.water_fixture or args.prepare_fixture or args.pipe
+    if real_sensors and args.case and any(case in MOTOR_TEST_CASES for case in args.case):
+        parser.error("sdk-motor-test-* cases require the default motor-test build")
+    cases = args.case or (CASES if real_sensors else (*CASES, *MOTOR_TEST_CASES))
     root = Path(__file__).resolve().parents[1]
     headers = root / "device-controller/.pio/libdeps/motion/ArduinoJson/src"
     if not (headers / "ArduinoJson.h").is_file():
@@ -102,8 +110,10 @@ def main():
         flags += ["-Wl,--gc-sections"]
     if args.water_fixture or args.prepare_fixture:
         flags += ["-DBABYTECH_LOW_WATER_PIN=21", "-DBABYTECH_LOW_WATER_ACTIVE_LOW=0"]
+    if real_sensors:
+        flags += ["-DBABYTECH_V1_MOTOR_TEST=0"]
     if args.prepare_fixture:
-        flags += ["-DBABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW=1"]
+        flags += ["-DBABYTECH_HOST_PREPARE_FIXTURE=1"]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
     for include in includes:
@@ -150,9 +160,9 @@ def main():
                     pipe_args += [name, str(value)]
             subprocess.run(pipe_args, env=env, check=True, timeout=300)
             return
-        for case in args.case or CASES:
+        for case in cases:
             subprocess.run([str(binary), case], env=env, check=True, timeout=30)
-    print("PASS production Motion main: " + str(len(args.case or CASES)) + " isolated processes")
+    print("PASS production Motion main: " + str(len(cases)) + " isolated processes")
 
 
 if __name__ == "__main__":

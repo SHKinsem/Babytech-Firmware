@@ -73,7 +73,15 @@ void waterSampling() {
                   "normal GPIO bypassed five-sample recovery debounce");
         }
     }
-    check(!product.executionAuthorized() && !product.canStart(), "water fixture authorized product execution");
+    const auto resources = productResources(motion_io::now);
+    if (BABYTECH_V1_MOTOR_TEST == 1)
+        check(resources.waterValid && !resources.lowWater && resources.powderValid &&
+              resources.powderGrams == 300.0f && !powderScale.snapshot().calibrated,
+              "motor test did not select fixed resources independently of the HX711");
+    else
+        check(resources.waterValid == lowWaterValid && resources.lowWater == lowWater &&
+              !resources.powderValid, "real-sensor mode replaced missing powder with test data");
+    check(product.executionAuthorized() && !product.canStart(), "resources bypassed initialization");
     motion_io::freezeClock = false;
 }
 WebServer::Response http(HTTPMethod method, const char* path, WebServer::Arguments args = {}) {
@@ -267,7 +275,8 @@ void uartContext(v4::Pairing pair) {
     check(peer.link.requestResult(query, motion_io::now), "query not queued"); peer.step(100);
     check(peer.link.resultLookupState() == ResultLookupState::Complete && peer.link.resultQueryResponse().status == ResultQueryStatus::Known &&
           peer.link.resultQueryResponse().accepted, "main result-query callback missing");
-    check(!product.executionAuthorized() && productState.state().slot.kind == MotionSlotKind::Empty, "setting temperature authorized physical feed");
+    check(product.executionAuthorized() && !product.canStart() && productState.state().slot.kind == MotionSlotKind::Empty,
+          "setting temperature bypassed initialization or started physical feeding");
 }
 }
 #include "motion_main_http_fixture.h"
@@ -338,7 +347,7 @@ void blankInstallation(bool configured) {
           "missing motor feedback became physical stop proof");
     check(safeForInstallation() && safeForRemoteInstall() && migrationMaintenance.safeToAcquire(),
           "motor-free idle board cannot install");
-    check(!product.canStart() && !product.executionAuthorized(), "installation authorized real feeding");
+    check(!product.canStart(), "installation bypassed mechanical readiness");
     const auto durable = fake_brain::io.disk;
     const auto before = motion_io::canTx.size();
     check(http(HTTP_POST, "/api/queue/start", {{"program", "wait 10000"}, {"repeat", "1"}}).status == 202,
@@ -368,7 +377,7 @@ void blankInstallation(bool configured) {
               "fresh stationary feedback did not restore original commissioning guard");
         check(safeForInstallation() && safeForRemoteInstall() && migrationMaintenance.safeToAcquire(),
               "settled motion permanently blocked installation");
-        check(!product.executionAuthorized() && !product.canStart(),
+        check(!product.canStart(),
               "restored installation guard authorized real preparation");
     }
 }
@@ -383,6 +392,10 @@ int main(int argc, char** argv) {
         if (which == "sdk-crypto") checks += motion_main_crypto_fixture::run();
         else if (which == "sdk-prepare-flow" || which == "sdk-prepare-home-missing" ||
                  which == "sdk-prepare-marker-missing") motion_main_prepare::run(which);
+        else if (which.rfind("sdk-motor-test-", 0) == 0) {
+            check(BABYTECH_V1_MOTOR_TEST == 1, "motor-test case used real-sensor mode");
+            motion_main_prepare::run("sdk-prepare-" + which.substr(15));
+        }
         else if (which == "sdk-water-sampling") { waterSampling(); waterInputValidation(); }
         else if (which == "sdk-result-delete-commit" || which == "sdk-result-delete-applied")
             resultDeleteFault(which == "sdk-result-delete-applied");
@@ -426,7 +439,7 @@ int main(int argc, char** argv) {
         } else check(!productBoardLink.verifiedPairing() && !productState.ready(), "empty boot created pairing/state");
         check(canStarted && motion_io::canStarts == 1, "real CAN setup was not invoked");
         check(motion_io::canTx.empty(), "boot transmitted a motor command");
-        check(!product.executionAuthorized(), "non-consumable default changed");
+        check(product.executionAuthorized() && !product.canStart(), "boot bypassed mechanical readiness");
         tick(100);
         for (const auto& frame : motion_io::canTx)
             check(readOnlyQuery(frame), "idle loop enabled/moved/stopped a motor");

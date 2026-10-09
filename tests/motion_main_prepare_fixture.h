@@ -18,37 +18,48 @@ const char* config = R"({
 })";
 
 void run(const std::string& scenario) {
-    check(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1 && BABYTECH_LOW_WATER_PIN == 21,
-          "Prepare requires explicit host-only build fixture");
+    const bool motorTest = BABYTECH_V1_MOTOR_TEST == 1;
+    check(motorTest || BABYTECH_LOW_WATER_PIN == 21,
+          "Real-sensor Prepare requires explicit host-only water fixture");
     const auto pair = seedPair();
     motion_io::hxReady = true; motion_io::hxRaw = -12040;
     motion_io::flowFeedback = motion_io::automaticFeedback = true;
     motion_io::lowWaterLevel = LOW;
     setup();
     check(product.executionAuthorized() && !product.canStart(), "boot incorrectly ready");
-    tick(80);
-    check(powderScale.snapshot().hasSample && powderScale.snapshot().raw == -12040 &&
-          !powderScale.snapshot().calibrated && motion_io::hxSamples > 4,
-          "HX711 signed data or uncalibrated state incorrect");
-    check(http(HTTP_POST, "/api/scale/calibrate", {{"knownWeightG", "100"}}).status == 409,
-          "calibration bypassed required tare");
-    motion_io::hxRaw = 1000;
-    check(http(HTTP_POST, "/api/scale/tare").status == 202, "HTTP tare rejected");
-    tick(40);
-    check(powderScale.tareCompleted() && powderScale.tareOffsetRaw() == 1000,
-          "production tare did not consume SDK samples");
-    motion_io::hxRaw = 11000; tick(40);
-    check(http(HTTP_POST, "/api/scale/calibrate", {{"knownWeightG", "100"}}).status == 200,
-          "HTTP calibration rejected");
-    motion_io::hxRaw = 31000; tick(80);
-    check(powderScale.calibrationPersisted() && powderScale.snapshot().calibrated &&
-          powderScale.snapshot().stable && std::fabs(powderScale.snapshot().filteredWeightG - 300) < 0.01f,
-          "calibrated GPIO input did not become 300 g");
-    motion_io::hxReady = false; tick(160);
-    check(powderScale.snapshot().status == motion::LoadCellStatus::Stale && !product.canStart(),
-          "missing HX711 input fabricated availability");
-    motion_io::hxReady = true; tick(80);
-    check(lowWaterValid && !lowWater && !product.canStart(), "resources bypassed initialization/context");
+    if (motorTest) {
+        motion_io::hxReady = false;
+        motion_io::lowWaterLevel = HIGH;
+        tick(160);
+        const auto resources = productResources(motion_io::now);
+        check(!powderScale.snapshot().calibrated && resources.waterValid && !resources.lowWater &&
+              resources.powderValid && resources.powderGrams == 300.0f && !product.canStart(),
+              "motor-test resources depended on sensors or bypassed initialization");
+    } else {
+        tick(80);
+        check(powderScale.snapshot().hasSample && powderScale.snapshot().raw == -12040 &&
+              !powderScale.snapshot().calibrated && motion_io::hxSamples > 4,
+              "HX711 signed data or uncalibrated state incorrect");
+        check(http(HTTP_POST, "/api/scale/calibrate", {{"knownWeightG", "100"}}).status == 409,
+              "calibration bypassed required tare");
+        motion_io::hxRaw = 1000;
+        check(http(HTTP_POST, "/api/scale/tare").status == 202, "HTTP tare rejected");
+        tick(40);
+        check(powderScale.tareCompleted() && powderScale.tareOffsetRaw() == 1000,
+              "production tare did not consume SDK samples");
+        motion_io::hxRaw = 11000; tick(40);
+        check(http(HTTP_POST, "/api/scale/calibrate", {{"knownWeightG", "100"}}).status == 200,
+              "HTTP calibration rejected");
+        motion_io::hxRaw = 31000; tick(80);
+        check(powderScale.calibrationPersisted() && powderScale.snapshot().calibrated &&
+              powderScale.snapshot().stable && std::fabs(powderScale.snapshot().filteredWeightG - 300) < 0.01f,
+              "calibrated GPIO input did not become 300 g");
+        motion_io::hxReady = false; tick(160);
+        check(powderScale.snapshot().status == motion::LoadCellStatus::Stale && !product.canStart(),
+              "missing HX711 input fabricated availability");
+        motion_io::hxReady = true; tick(80);
+        check(lowWaterValid && !lowWater && !product.canStart(), "resources bypassed initialization/context");
+    }
     const auto response = http(HTTP_POST, "/api/demo/config", {{"json", config}});
     if (response.status != 200) throw std::runtime_error("fixture config: " + response.body);
     BrainPeer peer(pair); peer.connect();
@@ -72,7 +83,7 @@ void run(const std::string& scenario) {
     check(peer.link.requestCommand(initialize, motion_io::now), "Initialize not queued");
     for (unsigned i = 0; i < 2000 && !product.canStart() &&
          demo.stage() != babytech::display::DisplayStage::Error; ++i) peer.step();
-    if (scenario != "sdk-prepare-flow") {
+    if (scenario == "sdk-prepare-home-missing" || scenario == "sdk-prepare-marker-missing") {
         check(!product.canStart() && !product.referenceValid() &&
               demo.stage() == babytech::display::DisplayStage::Error &&
               productState.state().pendingResultCount == 0 && queue.runId() == 1,
@@ -95,11 +106,25 @@ void run(const std::string& scenario) {
             " endpoint_busy=" + std::to_string(endpoint.busy()) + " motor=" + motor.statusJson(1).c_str());
     check(!motionBusy() && (motion_io::driverFlags[1] & 0x81) == 0x80,
           "actual CAN initialization did not leave a marked, disabled driver");
-    motion_io::hxReady = false; peer.step(160);
-    check(!product.canStart() && powderScale.snapshot().status == motion::LoadCellStatus::Stale,
-          "initialized device ignored missing powder samples");
-    motion_io::hxReady = true; peer.step(80);
-    check(product.canStart(), "fresh restored sensor did not recover without reinitialization");
+    if (motorTest) {
+        peer.step(160);
+        const auto& status = peer.link.peerStatus();
+        check(product.canStart() && !powderScale.snapshot().calibrated && status.lowWaterValid &&
+              !status.lowWater && status.powderValid && status.powderGrams == 300 &&
+              status.snapshot.startEnabled && status.snapshot.temperatureC == 45,
+              "sensor-free admission and actual UART telemetry disagree");
+    } else {
+        motion_io::hxReady = false; peer.step(160);
+        check(!product.canStart() && powderScale.snapshot().status == motion::LoadCellStatus::Stale,
+              "initialized device ignored missing powder samples");
+        motion_io::hxReady = true; peer.step(80);
+        check(product.canStart(), "fresh restored sensor did not recover without reinitialization");
+        motion_io::lowWaterLevel = HIGH; peer.step(80);
+        check(!product.canStart() && peer.link.peerStatus().lowWaterValid &&
+              peer.link.peerStatus().lowWater, "real-sensor low-water input did not block Prepare");
+        motion_io::lowWaterLevel = LOW; peer.step(80);
+        check(product.canStart(), "normal water did not restore readiness");
+    }
     const auto runBefore = queue.runId();
     CommandMessage prepare;
     prepare.remainingTtlMs = 5000;
@@ -109,6 +134,22 @@ void run(const std::string& scenario) {
     std::strcpy(request.babyId, context.babyId); request.profileVersion = context.profileVersion;
     request.waterMl = 150; request.temperatureC = 42; request.powderGPer100Ml = context.powderGPer100Ml;
     check(peer.link.requestCommand(prepare, motion_io::now), "Prepare not queued");
+    if (scenario == "sdk-prepare-stop") {
+        for (unsigned i = 0; i < 100 && !queue.active(); ++i) peer.step();
+        check(product.active() && queue.active() && productRuntime.ownsMotion(),
+              "motor-test Stop fixture did not begin Prepare");
+        auto stop = stopTarget(productState.state().slot.executionId);
+        stop.scope = v4::StopScope::Product;
+        check(peer.link.requestStop(stop, motion_io::now), "product Stop not queued");
+        for (unsigned i = 0; i < 800 && productState.state().pendingResultCount == 0; ++i) peer.step();
+        check(peer.link.stopSendState() == StopSendState::Received && !product.active() &&
+              productState.state().pendingResultCount == 1 &&
+              !productState.state().pendingResults[0].completed &&
+              !std::strcmp(productState.state().pendingResults[0].reason, "stopped") &&
+              queue.runId() == runBefore + 1,
+              "motor-test Stop continued stages or produced a successful result");
+        return;
+    }
     std::array<bool, 5> stages{};
     for (unsigned i = 0; i < 800 && productState.state().pendingResultCount == 0; ++i) {
         peer.step();

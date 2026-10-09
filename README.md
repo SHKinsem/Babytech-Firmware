@@ -10,6 +10,17 @@ Motion 的全部 CAN 调试网页、队列、原始指令、称重/标定、Wi-F
 
 首次安装继续只读导入旧 `productctx/payload` 档案/墓碑，并保留 `formulaevt/payload` 未结事件检查及恢复 Stop；普通启动不擦除或重放旧记录。旧未结事件仍需受控处理，不因退役旧固件而自动迁移或丢弃。NVS/schema、UART v4、App/Cloud 契约及现有空白双板安装许可不变；不需要新数据迁移。
 
+### 当前默认电机测试资源
+
+真实流程总开关 `BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW` 已删除。Motion `device-controller/include/board_config.h` 新增 `BABYTECH_V1_MOTOR_TEST`，默认 1，只选择产品资源，不切换机械执行路径：
+
+- `=1`：低液位有效且 false，剩余粉量固定 300 g（同文件 `kV1TestPowderGrams` 集中可调）；启动/运行检查和 UART 上报使用同源数据。Cloud/App 沿既有字段显示 normal/300，不新增 UI 测试标识；这些是测试占位数据，不是传感器实测、消耗估算或实喂依据，产物不可用于喂养。
+- `=0`：使用当前真实低液位/HX711 入口。低液位 GPIO 默认 -1，需配置 GPIO/极性；HX711 默认 DOUT1/SCK2，需去皮/砝码标定并核对 `scale-cfg`。无效、陈旧或未标定资源仍阻止受影响启动，不回退到测试值。
+
+两种选择均保留真实 CAN、电机反馈/初始化、Stop、冲突、持久记录和身份保护；上电不自动开始运动，完成后 Initialize 再测试。温度不伪造，目标默认 45°C 或沿现有配方，water_temp/measured_water_temp 仍 null，温控未实现。该资源选择只改 Motion 固件，不改 Brain/App/Cloud、UART 字段、NVS 或 SQLite。
+
+Brain USB SIM 默认关闭，SIM ON 是 15 秒整段虚拟动作和四 RAM 结果，不运行真实 CAN；它不同于上述 Motion 真实电机测试。下方按日期保留的旧默认 0、显式测试夹具与测试结果仍只记录当时版本，不作为本项验证证据。
+
 ## First-install offline restart validation (2026-10-08)
 
 From the parent repository run `python3 Test/dual_main_install_check.py --sanitize`.

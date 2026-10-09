@@ -7,10 +7,11 @@
 #include <limits>
 #include <sstream>
 #include "main_install_nvs_fixture.h"
+#ifndef BABYTECH_HOST_PREPARE_FIXTURE
+#define BABYTECH_HOST_PREPARE_FIXTURE 0
+#endif
 
 namespace motion_main_dual_pipe {
-static_assert(BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 0 ||
-              BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1, "invalid host execution switch");
 constexpr const char* device = "bt-main-test";
 constexpr size_t documentCapacity = 2 * 1024 * 1024;
 constexpr size_t fileLimit = 1024 * 1024;
@@ -50,7 +51,7 @@ Options options(int argc, char** argv) {
             require(!result.installation, "duplicate install-fixture");
             result.installation = true;
         } else if (arg == "--prepare-fixture") {
-            require(!result.prepare && BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1,
+            require(!result.prepare && BABYTECH_HOST_PREPARE_FIXTURE == 1,
                     "Prepare pipe requires explicitly built host fixture");
             result.prepare = true;
         } else if (arg == "--seed-history") {
@@ -425,7 +426,7 @@ Input input(const std::string& line) {
         const std::string key = field.key().c_str();
         require(key == "uart_rx" || key == "advance_ms" || key == "feedback" ||
                 key == "missing_axis" || key == "moving_axis" || key == "low_water_level" || key == "quit" ||
-                (BABYTECH_ENABLE_NON_CONSUMABLE_PRODUCT_FLOW == 1 &&
+                (BABYTECH_HOST_PREPARE_FIXTURE == 1 &&
                  (key == "hx_raw" || key == "hx_ready" || key == "http")),
                 "unknown pipe input field");
     }
