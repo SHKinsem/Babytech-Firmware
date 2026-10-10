@@ -55,6 +55,7 @@ public:
               const SimulationStatus* simulation = nullptr);
     bool connected() const { return started_ && cloud_.connected(); }
     bool started() const { return started_; }
+    void diagnostics(char* output, size_t capacity) const;
     bool configureWifi(const char* ssid, const char* password) {
         if (!station_.configure(ssid, password)) return false;
         if (started_) cloud_.requestReconnect();

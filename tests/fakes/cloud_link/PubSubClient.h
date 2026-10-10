@@ -17,6 +17,7 @@ public:
     void setServer(const char* host, uint16_t port);
     bool connect(const char* id, const char* user, const char* password);
     bool connected() const { return connected_; }
+    int state() const { return connected_ ? 0 : -1; }
     void disconnect();
     bool subscribe(const char* topic);
     bool loop();

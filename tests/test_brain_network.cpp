@@ -272,9 +272,16 @@ void periodic(bool rollover) {
         if (tick == 1) {
             first = millis();
             check(network.connected(), "session not connected");
+            char diagnostic[95]{};
+            network.diagnostics(diagnostic, sizeof(diagnostic));
+            check(std::strstr(diagnostic, "mqtt=1 state=0 n=1") != nullptr, "connected diagnostic snapshot missing");
+            check(diagnostic[std::strlen(diagnostic) - 1] == '\n', "diagnostic console reply truncated");
             poll(network, &motion, true);
         } else if (tick == 2) {
             check(fake::io.published.size() == 1, "first status not sent");
+            char diagnostic[256]{};
+            network.diagnostics(diagnostic, sizeof(diagnostic));
+            check(std::strstr(diagnostic, "ok=1 fail=0") != nullptr, "publish diagnostic missing");
             check(packet(0)["device_uptime_ms"] == first, "status uptime not captured with session");
             fake::io.now = first + 1999;
             poll(network, &motion, true);

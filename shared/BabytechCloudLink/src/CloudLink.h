@@ -64,6 +64,11 @@ public:
     bool connected() const { return connected_.load() && !reconnectRequested_.load(); }
     uint32_t sessionGeneration() const { return sessionGeneration_.load(); }
     bool configured() const;
+    int wifiStatus() const { return wifiStatus_.load(); }
+    int mqttState() const { return mqttState_.load(); }
+    uint32_t connectAttempts() const { return connectAttempts_.load(); }
+    uint32_t publishAccepted() const { return publishAccepted_.load(); }
+    uint32_t publishFailed() const { return publishFailed_.load(); }
     // Local provisioning only. Before begin, save/read back without starting I/O;
     // one provisioning owner, no concurrent start or other running CloudLink.
     // After begin, serialize with worker snapshots and request reconnection.
@@ -141,6 +146,12 @@ private:
     WiFiClient socket_;
     PubSubClient client_{socket_};
     std::atomic<bool> connected_{false};
+    // Worker-owned observations; USB diagnostics never touch the MQTT socket.
+    std::atomic<int> wifiStatus_{-99};
+    std::atomic<int> mqttState_{-99};
+    std::atomic<uint32_t> connectAttempts_{0};
+    std::atomic<uint32_t> publishAccepted_{0};
+    std::atomic<uint32_t> publishFailed_{0};
     std::atomic<bool> reconnectRequested_{false};
     std::atomic<uint32_t> sessionGeneration_{1};
     std::atomic<uint32_t> settingsRevision_{0};

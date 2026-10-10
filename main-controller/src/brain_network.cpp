@@ -55,6 +55,16 @@ bool BrainNetwork::begin(const char* pairedDeviceId) {
     return started_;
 }
 
+void BrainNetwork::diagnostics(char* output, size_t capacity) const {
+    std::snprintf(output, capacity,
+        "[network] diag wifi=%d cfg=%u mqtt=%u state=%d n=%lu ok=%lu fail=%lu\n",
+        cloud_.wifiStatus(), unsigned(cloud_.configured()),
+        unsigned(connected()), cloud_.mqttState(),
+        static_cast<unsigned long>(cloud_.connectAttempts()),
+        static_cast<unsigned long>(cloud_.publishAccepted()),
+        static_cast<unsigned long>(cloud_.publishFailed()));
+}
+
 void BrainNetwork::setProductHandlers(CommandHandler command, StopHandler stop, void* context) {
     commandHandler_ = command;
     stopHandler_ = stop;

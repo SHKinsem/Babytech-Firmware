@@ -21,6 +21,10 @@ public:
         };
         if (!std::strcmp(line, "NET STATUS"))
             return reply(network.started() ? "brain_ready" : "brain_unpaired");
+        if (!std::strcmp(line, "NET DIAG")) {
+            network.diagnostics(output, capacity);
+            return true;
+        }
         if (!maintenance) return reply("maintenance_required");
         Fields fields;
         if (!std::strncmp(line, "NET WIFI ", 9)) {

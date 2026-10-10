@@ -159,7 +159,7 @@ void pollCommissioningConsole() {
       }
       if (babytech::brain::BrainInstallConsole::handle(line, installer, millis(), output, capacity)) return true;
       if (installer.busy() && (!std::strncmp(line, "PAIR ", 5) ||
-          (!std::strncmp(line, "NET ", 4) && std::strcmp(line, "NET STATUS")))) {
+          (!std::strncmp(line, "NET ", 4) && std::strcmp(line, "NET STATUS") && std::strcmp(line, "NET DIAG")))) {
         std::snprintf(output, capacity, "[install] busy\n");
         return true;
       }

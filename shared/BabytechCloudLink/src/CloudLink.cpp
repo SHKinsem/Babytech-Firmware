@@ -550,7 +550,9 @@ void CloudLink::run() {
             failPendingPublishes();
             retryAt = millis();
         }
-        if (WiFi.status() != WL_CONNECTED || !configured()) {
+        const int wifiStatus = WiFi.status();
+        wifiStatus_.store(wifiStatus);
+        if (wifiStatus != WL_CONNECTED || !configured()) {
             if (client_.connected()) client_.disconnect();
             invalidateSession();
             failPendingPublishes();
@@ -580,7 +582,10 @@ void CloudLink::run() {
                 continue;
             }
             retryAt = millis() + kRetryMs;
-            if (client_.connect(deviceId_, activeSettings.user, activeSettings.password)) {
+            connectAttempts_.fetch_add(1);
+            const bool mqttConnected = client_.connect(deviceId_, activeSettings.user, activeSettings.password);
+            mqttState_.store(client_.state());
+            if (mqttConnected) {
                 char topic[motion::kCloudTopicCapacity];
                 snprintf(topic, sizeof(topic), "%scommand", topicPrefix_);
                 const bool commands = client_.subscribe(topic);
@@ -603,6 +608,7 @@ void CloudLink::run() {
             }
         }
         if (!client_.loop()) {
+            mqttState_.store(client_.state());
             invalidateSession();
             continue;
         }
@@ -622,6 +628,8 @@ void CloudLink::run() {
             }
             // This is a publish-entry guard, not cancellation of an in-flight TCP write.
             const bool accepted = client_.publish(message.topic, message.payload, false);
+            if (accepted) publishAccepted_.fetch_add(1);
+            else publishFailed_.fetch_add(1);
             publishResult(message, accepted);
             if (!accepted) {
                 client_.disconnect();

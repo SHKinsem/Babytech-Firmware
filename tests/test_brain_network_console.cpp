@@ -51,6 +51,11 @@ struct FakeNetwork {
     bool mqttResult = true;
     std::vector<Call> calls;
 
+    void diagnostics(char* output, size_t capacity) {
+        calls.push_back({"diagnostics", "", "", "", 0});
+        std::snprintf(output, capacity, "[network] diag test\n");
+    }
+
     bool started() {
         calls.push_back({"started", "", "", "", 0});
         return ready;
@@ -117,6 +122,14 @@ void mqttCall(const FakeNetwork& network, size_t index, const std::string& host,
 }
 
 void statusAndGates() {
+    for (bool maintenance : {false, true}) {
+        test("diag/read-only/maintenance=" + std::to_string(maintenance), [=]() {
+            FakeNetwork network;
+            response("NET DIAG", maintenance, network, "diag test");
+            CHECK(network.calls.size() == 1);
+            CHECK(network.calls[0].method == "diagnostics");
+        });
+    }
     for (bool maintenance : {false, true}) {
         for (bool ready : {false, true}) {
             test("status/maintenance=" + std::to_string(maintenance) +
