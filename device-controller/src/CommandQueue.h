@@ -69,6 +69,7 @@ public:
 
     bool active() const { return state_ == QueueState::Running || sync_.active(); }
     bool containsRaw() const { return program_.hasRaw; }
+    bool changesReference() const;
     QueueState state() const { return state_; }
     uint32_t runId() const { return runId_; }
     uint16_t lastErrorLine() const { return errorLine_; }
@@ -115,6 +116,7 @@ private:
 
     MotorControl& motor_;
     SyncSettings syncSettings_;
+    SyncSettings runSyncSettings_;
     SyncRuntime sync_;
     bool motionComplete_=false;
     bool unconfirmedMotion_=false;

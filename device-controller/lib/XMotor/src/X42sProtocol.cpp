@@ -1,5 +1,7 @@
 #include "X42sProtocol.h"
 
+#include <string.h>
+
 #include "x42s_can_id.h"
 
 namespace {

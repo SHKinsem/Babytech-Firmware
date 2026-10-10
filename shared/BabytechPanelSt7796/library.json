@@ -1,0 +1,13 @@
+{
+  "name": "BabytechPanelSt7796",
+  "version": "0.1.0",
+  "description": "ST7796U, GT1151, and XL9555 panel adapter for the Babytech V1 display board.",
+  "dependencies": {
+    "lvgl": "8.4.0"
+  },
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "includeDir": "src"
+  }
+}

@@ -5,6 +5,16 @@
 
 namespace motion {
 enum class CommandKind { Invalid, Read, Configure, Enable, Stop, Move, DirectMove, Experiment, Home, Interrupt };
+// Reference policy only; do not change transport, ownership or OTA evidence.
+inline bool commandChangesReference(CommandKind kind, const uint8_t* bytes) {
+    switch (kind) {
+        case CommandKind::Read: case CommandKind::Enable:
+        case CommandKind::Stop: case CommandKind::Interrupt: return false;
+        case CommandKind::Configure:
+            return bytes[1] == 0x0A || bytes[1] == 0x93 || bytes[1] == 0x46;
+        default: return true;
+    }
+}
 inline uint16_t word(const uint8_t* p) { return (uint16_t(p[0]) << 8) | p[1]; }
 inline uint32_t dword(const uint8_t* p) { return (uint32_t(word(p)) << 16) | word(p + 2); }
 

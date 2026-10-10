@@ -137,6 +137,18 @@ public:
     // True when at least one node has fresh position *and* velocity.
     bool anyMotorOnline() const;
     bool hasActiveMotion() const;
+    // Independent physical evidence, never a manual/queue admission gate.
+    // Natural completion can retire an owner; OTA additionally needs a fully
+    // submitted Stop and fresh responses to queries issued after that Stop.
+    bool otaMotionSafe() const;
+    // Only unreleased known-axis evidence; unknown raw risk is OTA-only.
+    bool affectedAxesStationary() const;
+    // Remains true even at low speed until the finished writer releases it.
+    bool hasUnsettledMotionEvidence() const;
+    // Caller must first finish ALL writers; instantaneous low speed alone must
+    // not retire a live trajectory. This releases only settled control evidence.
+    bool releaseSettledMotion();
+    uint32_t movementGeneration() const { return movementGeneration_; }
 
     enum class MoveOutcome : uint8_t { None, Running, Done, Cancelled, Failed };
     // Homing outcome. NoMotion is the manual's 12/22 answer ("already at the
@@ -164,6 +176,12 @@ public:
     void demoWatch(uint8_t id, bool enabled) { demoWatched_[id] = enabled; }
     bool demoDriverFault(uint8_t id) const;
     bool demoFlags(uint8_t id, uint8_t& flags, uint32_t& age) const;
+    // Product readiness shares the multi-axis budget; manual motion stays 600 ms.
+    uint16_t demoEvidenceWindow() const { return physicalEvidenceWindow(false); }
+    bool demoFeedbackFresh(uint8_t id, uint16_t windowMs) const;
+    // Freeze this same bounded budget at Stop and require post-Stop samples.
+    uint16_t stopEvidenceWindow() const { return physicalEvidenceWindow(false); }
+    bool stopEvidence(uint8_t id, uint32_t stopAt, uint16_t windowMs) const;
     bool operationBusy() const;
     bool stopping() const { return anyStopPending(); }
     bool hasFault() const { return faultTag_ && strcmp(faultTag_, "none") != 0; }
@@ -188,6 +206,30 @@ public:
 
 private:
     friend class CommandQueue;
+    enum class EvidenceEffect : uint8_t { None, Motion, Unknown, Stop };
+    struct PhysicalEvidence {
+        uint32_t movementAt = 0, stopAt = 0, positionAt = 0, velocityAt = 0;
+        int32_t velocity = 0;
+        // Receipt-time bounded TTLs; later load/budget changes are not retroactive.
+        uint16_t positionControlFreshMs = 0, velocityControlFreshMs = 0;
+        uint16_t positionOtaFreshMs = 0, velocityOtaFreshMs = 0;
+        bool affected = false, controlPending = false, stopSubmitted = false;
+        bool positionValid = false, velocityValid = false;
+        bool positionAfterStopQuery = false, velocityAfterStopQuery = false;
+    } physical_[256];
+    struct EvidenceTransmission {
+        EvidenceEffect effect = EvidenceEffect::None;
+        uint8_t id = 0;
+        bool submitted = false;
+    } evidenceTx_;
+    bool unknownPhysicalRisk_ = false;
+    uint32_t movementGeneration_ = 0;
+    static EvidenceEffect logicalEvidenceEffect(const uint8_t* bytes, uint8_t length);
+    void beginEvidenceTx(EvidenceEffect effect, uint8_t id);
+    void finishEvidenceTx(bool complete);
+    void recordEvidenceTx(uint32_t now);
+    uint16_t physicalEvidenceWindow(bool ota) const;
+    bool physicalStationary(const PhysicalEvidence& evidence, uint32_t now, bool ota) const;
     bool demoWatched_[256] = {};
     bool syncObserve_[256]={};
     bool queueTransport_=false;
@@ -233,14 +275,17 @@ private:
         bool positionValid = false;
         int32_t positionTenths = 0;
         uint32_t positionMs = 0;
+        uint16_t demoPositionFreshMs = 600;
 
         bool velocityValid = false;
         int32_t velocityTenths = 0;
         uint32_t velocityMs = 0;
+        uint16_t demoVelocityFreshMs = 600;
 
         bool flagsValid = false;
         uint8_t flags = 0;
         uint32_t flagsMs = 0;
+        uint16_t demoFlagsFreshMs = 600;
 
         // 0x3B homing status byte (bit0 encoder ready, bit1 calibration ready,
         // bit2 homing running, bit3 homing failed, bit4 over-temp, bit5

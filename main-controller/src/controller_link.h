@@ -1,0 +1,117 @@
+#pragma once
+
+#include <Arduino.h>
+
+#include "brain_mode.h"
+
+#include "display_model.h"
+#include "BoardLinkArduino.h"
+
+namespace babytech::display {
+
+class ControllerLink {
+ public:
+  bool begin();
+  void poll(uint32_t nowMs);
+
+  bool connected(uint32_t nowMs) const;
+  bool protocolIncompatible(uint32_t nowMs) const;
+  bool hasSnapshot() const { return hasSnapshot_; }
+  const DisplaySnapshot& snapshot() const { return snapshot_; }
+  const char* deviceId() const { return ready_ ? boardLink_.deviceId() : nullptr; }
+  // Pairing was checked against the actual MAC during begin. A subsequent
+  // UART failure must not hide it from the local read-only recovery owner.
+  const babytech::v4::Pairing* verifiedPairing() const { return boardLink_.verifiedPairing(); }
+  bool setTerminalHandler(babytech::boardlink::ReadOnlyLink::TerminalHandler handler) {
+    return ready_ && boardLink_.setTerminalHandler(handler);
+  }
+  bool forwardCloudReceipt(const babytech::boardlink::CloudReceipt& receipt, uint32_t nowMs) {
+    return ready_ && boardLink_.forwardCloudReceipt(receipt, nowMs);
+  }
+  bool requestCommand(const babytech::boardlink::CommandMessage& command, uint32_t nowMs) {
+    return ready_ && boardLink_.requestCommand(command, nowMs);
+  }
+  bool commandAvailable(uint32_t nowMs) const { return ready_ && boardLink_.commandAvailable(nowMs); }
+  babytech::boardlink::CommandSendState commandSendState() const { return boardLink_.commandSendState(); }
+  const babytech::boardlink::CommandResult& commandResponse() const { return boardLink_.commandResponse(); }
+  void cancelCommand() { boardLink_.cancelCommand(); }
+  bool requestContext(const babytech::boardlink::ProductContext& context, uint32_t nowMs) {
+    return ready_ && boardLink_.requestContext(context, nowMs);
+  }
+  babytech::boardlink::ContextSendState contextSendState() const { return boardLink_.contextSendState(); }
+  const babytech::boardlink::ContextResult& contextResponse() const { return boardLink_.contextResponse(); }
+  void cancelContext() { boardLink_.cancelContext(); }
+  bool requestStop(const babytech::v4::StopRequest& request, uint32_t nowMs) {
+    return ready_ && boardLink_.requestStop(request, nowMs);
+  }
+  babytech::boardlink::StopSendState stopSendState() const { return boardLink_.stopSendState(); }
+  bool requestResult(const babytech::boardlink::ResultQuery& query, uint32_t nowMs) {
+    // Result recovery needs the session, not fresh display telemetry or Cloud.
+    return ready_ && boardLink_.requestResult(query, nowMs);
+  }
+  babytech::boardlink::ResultLookupState resultLookupState() const { return boardLink_.resultLookupState(); }
+  const babytech::boardlink::QueriedResult& resultQueryResponse() const { return boardLink_.resultQueryResponse(); }
+  void cancelResultQuery() { boardLink_.cancelResultQuery(); }
+  bool requestDiscovery(const char* deviceId, uint32_t nowMs) {
+    return ready_ && boardLink_.requestDiscovery(deviceId, nowMs);
+  }
+  const babytech::boardlink::DiscoveryResult& discoveryResult() const {
+    return boardLink_.discoveryResult();
+  }
+  bool requestRecords(const char* device, uint32_t nowMs) {
+    return ready_ && boardLink_.requestRecords(device, nowMs);
+  }
+  babytech::boardlink::ExportTransferState recordsState() const { return boardLink_.recordsState(); }
+  bool requestInstalledRecords(const char* device, const babytech::v4::Pairing& expected, uint32_t nowMs) {
+    return ready_ && boardLink_.requestInstalledRecords(device, expected, nowMs);
+  }
+  bool requestRecoveryRecords(const char* device, const babytech::v4::Pairing& expected, uint32_t nowMs) {
+    return ready_ && boardLink_.requestRecoveryRecords(device, expected, nowMs);
+  }
+  const babytech::boardlink::MotionExportSnapshot* recordsSnapshot() const { return boardLink_.recordsSnapshot(); }
+  bool requestMaintenance(const char* device, uint32_t nowMs) {
+    return ready_ && boardLink_.requestMaintenance(device, nowMs);
+  }
+  bool releaseMaintenance(uint32_t nowMs) {
+    return ready_ && boardLink_.releaseMaintenance(nowMs);
+  }
+  babytech::boardlink::BoardMaintenanceState maintenanceState() const { return boardLink_.maintenanceState(); }
+  // Installation is called only by the explicit local commissioning owner.
+  const char* installationPhysicalId() const { return boardLink_.install().physicalId(); }
+  const char* installationNonce() const { return boardLink_.maintenance().nonce(); }
+  bool installationLeaseValid(uint32_t nowMs) {
+    boardLink_.maintenance().poll(nowMs);
+    return boardLink_.maintenanceState() == babytech::boardlink::BoardMaintenanceState::Active;
+  }
+  bool requestInstallation(const babytech::boardlink::CommissioningImport& request, uint32_t nowMs) {
+    return ready_ && installationLeaseValid(nowMs) && boardLink_.install().request(
+        request, installationNonce(), boardLink_.maintenance().peerBoot(), nowMs);
+  }
+  babytech::boardlink::BoardInstallState installationState() const { return boardLink_.install().state(); }
+  babytech::boardlink::CommissioningResult installationResult() const { return boardLink_.install().result(); }
+  // Historical telemetry survives link expiry/restart; connected() reports
+  // liveness separately. Only a newly accepted sample may replace its values.
+  const babytech::boardlink::Status* lastTelemetry() const {
+    return telemetrySeen_ ? &lastTelemetry_ : nullptr;
+  }
+  // Brain-local receipt time, valid when lastTelemetry() != nullptr (0 is valid).
+  // Consumers must use uint32_t(nowMs - receivedAtMs) for outbound expiry.
+  uint32_t lastTelemetryReceivedAtMs() const { return lastTelemetryReceivedAtMs_; }
+
+  bool sendIntent(DisplayIntent intent, uint32_t nowMs);
+  bool intentPending() const {
+    return boardLink_.commandSendState() == babytech::boardlink::CommandSendState::Pending;
+  }
+
+ private:
+  // ControllerLink is global; keep the large adapter off the task stack.
+  babytech::boardlink::ArduinoBoardLink boardLink_;
+  bool ready_ = false;
+  bool hasSnapshot_ = false;
+  bool telemetrySeen_ = false;
+  babytech::boardlink::Status lastTelemetry_{};
+  uint32_t lastTelemetryReceivedAtMs_ = 0;
+  DisplaySnapshot snapshot_{};
+};
+
+}  // namespace babytech::display

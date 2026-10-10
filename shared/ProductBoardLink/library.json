@@ -1,0 +1,9 @@
+{
+  "name": "ProductBoardLink",
+  "version": "0.1.0",
+  "description": "Product board identity, state and bounded UART v4 message codecs.",
+  "dependencies": {
+    "bblanchon/ArduinoJson": "^6.21.5"
+  },
+  "build": { "includeDir": "src" }
+}

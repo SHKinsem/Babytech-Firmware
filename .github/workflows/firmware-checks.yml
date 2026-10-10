@@ -38,13 +38,22 @@ jobs:
 
       - name: Run protocol, motion, raw CAN, and demo tests
         run: |
+          python -m unittest discover -s tests -p 'test_firmware_defaults.py'
           python tools/test_protocol.py
+          python tools/test_pairing_record.py --sanitize
+          python tools/test_pairing_store.py --sanitize
+          python tests/test_prepare_board_pairing.py
+          python tools/test_cloud_session.py --sanitize
           python tools/test_motion.py
+          python tools/test_motor_control_evidence.py --sanitize
           python tools/test_raw_can.py
           python tools/test_demo.py
 
       - name: Run flash utility unit tests
         run: python -m unittest discover -s tests -p 'test_flash_device.py'
+
+      - name: Check source archive build dependencies
+        run: python -m unittest discover -s tests -p 'test_package_device.py'
 
       - name: Test OTA page when available
         run: |
@@ -66,7 +75,10 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install platformio==6.1.19
 
-      - name: Build BRAIN and both MOTION UART peer variants
+      - name: Install host SHA-256 test dependency
+        run: sudo apt-get update && sudo apt-get install --yes libssl-dev
+
+      - name: Build paired UART v4 BRAIN and MOTION
         shell: bash
         run: |
           set -euo pipefail
@@ -90,6 +102,55 @@ jobs:
           fi
 
           pio run --project-dir "$brain_dir"
+          python tools/test_display_view.py
           pio run --project-dir "$motion_dir"
-          PLATFORMIO_BUILD_FLAGS='-std=gnu++17 -fstack-usage -DBOARD_HAS_PSRAM -DARDUINO_USB_CDC_ON_BOOT=1 -DMOTION_UART_PEER=2' \
-            pio run --project-dir "$motion_dir"
+          python tools/test_cloud_link.py --sanitize
+          python tools/test_cloud_contract.py
+          python tools/test_board_messages.py --sanitize
+          python tools/test_board_commands.py --sanitize
+          python tools/test_product_context.py --sanitize
+          python tools/test_product_context_messages.py --sanitize
+          python tools/test_product_event_messages.py --sanitize
+          python tools/test_result_delivery.py --sanitize
+          python tools/test_brain_simulation.py --sanitize
+          python tools/test_brain_simulation_dispatcher.py --sanitize
+          python tools/test_legacy_context_store.py --sanitize
+          python tools/test_product_state.py --sanitize
+          python tools/test_brain_state_store.py --sanitize
+          python tools/test_brain_pending_recovery.py --sanitize
+          python tools/test_brain_cloud_dispatcher.py --sanitize
+          python tools/test_brain_local_dispatcher.py --sanitize
+          python tools/test_brain_context_sync.py --sanitize
+          python tools/test_motion_state_record.py --sanitize
+          python tools/test_motion_state_store.py --sanitize
+          python tools/test_product_result_query.py --sanitize
+          python tools/test_product_command_result.py --sanitize
+          python tools/test_motion_product_runtime.py --sanitize
+          python tools/test_motion_state_recovery.py --sanitize
+          python tools/test_motion_result_queue.py --sanitize
+          python tools/test_board_commissioning.py --sanitize
+          python tools/test_maintenance_console.py --sanitize
+          python tools/test_maintenance_export.py --sanitize
+          python tools/test_motion_export_snapshot.py --sanitize
+          python tools/test_board_export_transfer.py --sanitize
+          python tools/test_board_maintenance.py --sanitize
+          python tools/test_board_install.py --sanitize
+          python tools/test_motion_install.py --sanitize
+          python tools/test_brain_installer.py --sanitize
+          python -m unittest discover -s tests -p test_capture_board_export.py
+          python -m unittest discover -s tests -p test_maintenance_wiring.py
+          python tools/test_board_link.py --sanitize
+          python tools/test_board_discovery.py --sanitize
+          python tools/test_board_arduino.py --sanitize
+          python tools/test_brain_controller.py --sanitize
+          python tools/test_brain_network.py --sanitize
+          python tools/test_brain_station.py --sanitize
+          python tools/test_brain_portal.py --sanitize
+          python tools/test_brain_network_console.py --sanitize
+          python tools/test_brain_main.py --sanitize
+          python tools/test_motion_main.py --sanitize
+          python tools/test_motion_main.py --sanitize --water-fixture --case sdk-water-sampling
+          python tools/test_motion_main.py --sanitize --prepare-fixture --case sdk-prepare-flow --case sdk-prepare-home-missing --case sdk-prepare-marker-missing
+          python -m unittest discover -s tests -p test_configure_brain_network.py
+          python -m unittest discover -s tests -p test_install_brain.py
+          python -m unittest discover -s tests -p test_package_ota.py

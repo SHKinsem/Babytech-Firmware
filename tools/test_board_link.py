@@ -1,0 +1,45 @@
+"""Exercise the shared read-only board link over bounded in-memory byte sinks."""
+import argparse
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+arguments = argparse.ArgumentParser(description=__doc__)
+arguments.add_argument("--sanitize", action="store_true")
+args = arguments.parse_args()
+if sys.platform not in ("darwin", "linux"):
+    raise SystemExit("System SHA-256 backend supports macOS/Linux/WSL; use WSL on Windows")
+root = Path(__file__).resolve().parents[1]
+compiler = shutil.which(os.environ.get("CXX", "c++"))
+json_headers = root / "device-controller/.pio/libdeps/motion/ArduinoJson/src"
+if not compiler or not json_headers.is_dir():
+    raise SystemExit("A C++17 compiler and `pio run -d device-controller -e motion` are required")
+
+with tempfile.TemporaryDirectory(prefix="babytech-board-link-") as temporary:
+    executable = Path(temporary) / ("link.exe" if os.name == "nt" else "link")
+    includes = [json_headers, root / "shared/BoardProtocol/src",
+                root / "shared/ProductBoardLink/src", root / "shared/BabytechDisplayCore/src",
+                root / "tests/fakes/product_crypto"]
+    sources = [root / "shared/BoardProtocol/src" / name for name in
+               ("BoardProtocol.cpp", "BoardProtocolV4.cpp", "BoardSessionV4.cpp", "BoardTransmitV4.cpp")]
+    sources.extend(root / "shared/ProductBoardLink/src" / name for name in
+                   ("ProductContext.cpp", "ProductDigest.cpp", "ProductContextMessages.cpp",
+                    "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ProductCommandResult.cpp",
+                    "ProductEventMessages.cpp", "MotionStateRecord.cpp", "BoardPairingRecord.cpp",
+                    "ReadOnlyBoardLink.cpp"))
+    sources.append(root / "tests/fakes/product_crypto/FakeProductCrypto.cpp")
+    sources.append(root / "shared/ProductBoardLink/test/test_readonly_link.cpp")
+    command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror"]
+    if sys.platform == "darwin":
+        command += ["-Wno-deprecated-declarations"]
+    if args.sanitize:
+        command += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                    "-fno-omit-frame-pointer", "-g"]
+    for include in includes:
+        command.extend(["-I", str(include)])
+    subprocess.run(command + [str(source) for source in sources] +
+                   (["-lcrypto"] if sys.platform != "darwin" else []) + ["-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True)

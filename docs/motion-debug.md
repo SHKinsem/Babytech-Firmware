@@ -2,7 +2,7 @@
 
 > 本文保留基础 API 与控制器行为说明。最新工作台、Wi-Fi 集成、扩展命令范围和交付流程见 [工作台交付说明](motion-workbench-release.md)；下文旧页面布局说明已被新版替代。
 
-DISPLAY 编译分支的“屏幕流程”、JSON 与 `/api/demo*` 接口见 [演示操作说明](motion-display-demo.md)。其运行期间现有 Stop 保持可用，手动动作和配置修改受流程所有权约束。
+当前唯一固件为 Brain/Motion UART v4；旧 DISPLAY/v3、BRAIN/v2 编译入口已退役。Motion 网页“屏幕流程”、JSON 与 `/api/demo*` 接口保留，见 [调试流程说明](motion-display-demo.md)。其运行期间现有 Stop 保持可用，手动动作和配置修改仍受原流程所有权约束，不新增配对或 Cloud 门禁。
 
 面向 ESP32-S3 运动板卡的单电机台架工具。板卡开启 WiFi 软 AP，提供一个自包含的
 调试页面，并通过 `motion::MotorControl` 经 CAN 把 HTTP 命令转发给电机驱动。
@@ -219,6 +219,10 @@ curl -s -X POST \
 curl -s -X POST -d "id=1" http://192.168.4.1/api/stop
 curl -s -X POST http://192.168.4.1/api/stop-all
 ```
+
+产品流程或调试 Demo 正在占用电机时，这些入口先请求当前所有者停止。若底层立即报告
+Stop 未确认，接口返回 `503 stop_unconfirmed`，不会返回 `202 stop_requested`。
+`202` 仍只是停止请求已发出；是否真正静止要继续看后续状态与反馈。
 
 ### 如何理解返回码
 

@@ -48,6 +48,7 @@ bool script(const cJSON* o, DemoScript& out) {
     }
     return true;
 }
+// Product scripts own their conversion table; manual queues use board NVS.
 class ConfigRotation : public QueueRotationSource {
 public:
     explicit ConfigRotation(const DemoConfig& c) : config(c) {}
@@ -214,13 +215,5 @@ bool parseDemoConfig(const char* json, size_t length, DemoConfig& out, std::stri
     }
     out = std::move(config);
     error.clear(); return true;
-}
-bool demoRotationMatches(const DemoConfig& config, const QueueRotationSource& actual) {
-    for (const auto& axis : config.axes) {
-        double value = 0;
-        const bool exists = actual.rotationMm(axis.id, value);
-        if (axis.rotationMm == 0 ? exists : (!exists || std::abs(value - axis.rotationMm) > 0.0000005)) return false;
-    }
-    return true;
 }
 }
