@@ -62,6 +62,19 @@ Handle& getHandle(nvs_handle_t handle, bool write = false) {
     check(!write || found->second.mode == NVS_READWRITE, "mutation on read-only handle");
     return found->second;
 }
+esp_err_t setValue(nvs_handle_t handle, const char* key, const void* data, size_t length, Type type) {
+    auto& opened = getHandle(handle, true);
+    check(key && data && length && length <= kMaxTestBlobSize, "invalid/beyond-bound set");
+    const auto fault = enter(Op::Set, opened.name, key, handle);
+    if (!fault || fault->error == ESP_OK || fault->apply) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        const Value value{Bytes(bytes, bytes + length), type};
+        opened.pending[key] = value;
+        // Both deferred and early durability are tested, including errors after persistence.
+        if (io.durableOnSet || (fault && fault->apply)) io.disk[opened.name][key] = value;
+    }
+    return fault ? fault->error : ESP_OK;
+}
 [[noreturn]] esp_err_t forbidden(Op op) {
     enter(op);
     check(false, "erase/flash initialization is forbidden");
@@ -111,18 +124,14 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char* key, void* out, size_t* 
 }
 
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char* key, const void* data, size_t length) {
-    auto& opened = getHandle(handle, true);
-    check(key && data && length && length <= kMaxTestBlobSize,
-          "invalid/beyond-bound set");
-    const auto fault = enter(Op::Set, opened.name, key, handle);
-    if (!fault || fault->error == ESP_OK || fault->apply) {
-        const auto* bytes = static_cast<const uint8_t*>(data);
-        const Value value{Bytes(bytes, bytes + length), Type::Blob};
-        opened.pending[key] = value;
-        // Both deferred and early durability are tested, including errors after persistence.
-        if (io.durableOnSet || (fault && fault->apply)) io.disk[opened.name][key] = value;
-    }
-    return fault ? fault->error : ESP_OK;
+    return setValue(handle, key, data, length, Type::Blob);
+}
+
+esp_err_t fake_brain::setString(nvs_handle_t handle, const char* key, const char* value) {
+    check(value, "null string write");
+    const size_t length = strnlen(value, kMaxTestBlobSize);
+    check(length < kMaxTestBlobSize, "unbounded string write");
+    return setValue(handle, key, value, length + 1, Type::String);
 }
 
 esp_err_t nvs_commit(nvs_handle_t handle) {

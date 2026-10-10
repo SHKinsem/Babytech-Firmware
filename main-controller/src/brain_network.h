@@ -7,6 +7,7 @@
 #include "ProductEventMessages.h"
 #include "brain_status.h"
 #include "brain_station.h"
+#include "brain_portal.h"
 #include <ArduinoJson.h>
 
 namespace babytech { namespace brain {
@@ -20,6 +21,11 @@ public:
     using ContextHandler = void(*)(void*, const boardlink::ProductContext&, uint32_t generation, uint32_t nowMs);
     using ReceiptHandler = void(*)(void*, const boardlink::CloudReceipt&);
     bool begin(const char* pairedDeviceId);
+    // Call once after begin, including if pairing/MQTT startup is unavailable.
+    bool beginProvisioning(const char* pairedDeviceId);
+    void pollProvisioning(bool feeding, bool bootDown, uint32_t nowMs) {
+        portal_.poll(station_, cloud_, feeding, bootDown, nowMs);
+    }
     // Handlers receive trusted Current/Expired requests on the UI loop. An
     // expired duplicate must not overwrite an earlier actual acceptance ACK.
     // Only Current requests may start; handlers own dedup/deadline/result ACK.
@@ -59,12 +65,17 @@ public:
     bool configureWifi(const char* ssid, const char* password) {
         if (!station_.configure(ssid, password)) return false;
         if (started_) cloud_.requestReconnect();
+        portal_.configurationChanged();
         return true;
     }
     bool configureMqtt(const char* host, uint16_t port, const char* user, const char* password) {
-        return cloud_.configure(host, port, user, password);
+        if (!cloud_.configure(host, port, user, password)) return false;
+        portal_.configurationChanged();
+        return true;
     }
 private:
+    static void networkService(void* context);
+    static void provisioningTask(void* context);
     bool publishStatus(const boardlink::Status* lastMotion, bool motionConnected,
                        const cloud::SessionSnapshot& session, uint32_t motionReceivedAtMs,
                        const char* challenge = nullptr, bool commandsEnabled = false, bool canStart = false,
@@ -76,6 +87,8 @@ private:
                        const char* session, cloud::Freshness freshness);
     CloudLink cloud_;
     BrainStation station_;
+    BrainPortal portal_;
+    bool provisioningStarted_ = false;
     StaticJsonDocument<4096> status_;
     StaticJsonDocument<768> incomingJson_;
     CloudLink::Inbound inbound_;

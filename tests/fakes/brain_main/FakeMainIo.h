@@ -26,6 +26,7 @@ extern std::deque<uint8_t> uartRx;
 extern std::vector<uint8_t> uartTx;
 extern size_t uartWriteLimit;
 extern bool panelReady, stopClick;
+extern bool allowCredentialWrites;
 extern babytech::display::DisplayIntent intent;
 extern babytech::display::DisplaySnapshot shown;
 extern bool shownConnected, shownPending;

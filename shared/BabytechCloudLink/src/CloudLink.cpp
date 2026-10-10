@@ -54,7 +54,7 @@ bool validHost(const String& host) {
 }
 }
 
-bool CloudLink::loadSettings() {
+bool CloudLink::readSettings(Settings& output) const {
     struct Record { uint32_t magic; Settings settings; } record{};
     Preferences preferences;
     if (!preferences.begin(kNamespace, true)) return false;
@@ -68,8 +68,15 @@ bool CloudLink::loadSettings() {
         !memchr(record.settings.password, 0, sizeof(record.settings.password)) ||
         !validHost(String(record.settings.host)) || !record.settings.user[0] ||
         !record.settings.password[0] || !record.settings.port) return false;
+    output = record.settings;
+    return true;
+}
+
+bool CloudLink::loadSettings() {
+    Settings current;
+    if (!readSettings(current)) return false;
     xSemaphoreTake(settingsLock_, portMAX_DELAY);
-    settings_ = record.settings;
+    settings_ = current;
     ++settingsRevision_;
     xSemaphoreGive(settingsLock_);
     return true;
@@ -140,6 +147,15 @@ bool CloudLink::copySettings(Settings& settings, uint32_t* revision) const {
 bool CloudLink::configured() const {
     Settings current;
     return copySettings(current);
+}
+
+bool CloudLink::configurationSummary(ConfigurationSummary& output) const {
+    Settings current;
+    if (!(started_ ? copySettings(current) : readSettings(current))) return false;
+    std::memcpy(output.host, current.host, sizeof(output.host));
+    std::memcpy(output.user, current.user, sizeof(output.user));
+    output.port = current.port;
+    return true;
 }
 
 String CloudLink::host() const {

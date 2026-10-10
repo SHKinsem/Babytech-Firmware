@@ -422,7 +422,7 @@ python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN wifi
 python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN mqtt
 ```
 
-按提示输入SSID/密码或broker/端口/账号/密码；密码默认隐藏，显式`--show-password`才回显，避免分享终端。工具分别报告保存与维护退出；保存已确认而退出未确认，不要重写设置，只处理`MAINT END`。进入维护回执丢失也尝试退出，但不自动重发设置。`check`子命令只读`NET STATUS`/`NET DIAG`，不进入维护。成功保存仅表示存储读回通过，不代表连接成功。Wi-Fi与MQTT均可在未配对时预存，不创建网络任务、不联网或发布设备身份；有效配对后网络启动时读取已保存凭据。已运行时配置成功由worker重连。网络预存不等于身份安装或实机验收；旧账号撤销仍需受控交接。父仓库`Cloud_System/deploy/factory_setup.py`统一工厂入口，默认只检查、复用安装和账号；范围与步骤见父仓库操作手册。
+按提示输入SSID/密码或broker/端口/账号/密码；密码默认隐藏，显式`--show-password`才回显，避免分享终端。工具分别报告保存与维护退出；保存已确认而退出未确认，不要重写设置，只处理`MAINT END`。进入维护回执丢失也尝试退出，但不自动重发设置。`check`子命令只读`NET STATUS`/`NET DIAG`，不进入维护。成功保存仅表示存储读回通过，不代表连接成功。Wi-Fi与MQTT均可在未配对时预存；USB保存本身不创建任务。Brain当前另有下述AP配网服务，未配对时也可加入Wi-Fi，但不启动MQTT或发布未安装的产品身份；有效配对启动的Cloud worker读取已保存凭据。已运行时配置成功由worker重连。网络预存不等于身份安装或实机验收；旧账号撤销仍需受控交接。父仓库`Cloud_System/deploy/factory_setup.py`统一工厂入口，默认只检查、复用安装和账号；范围与步骤见父仓库操作手册。
 
 底层命令为`NET STATUS`、`NET DIAG`、`NET WIFI <ssid_hex> <password_hex或->`、`NET MQTT <host_hex> <port> <user_hex> <password_hex>`；STATUS/DIAG只读，其余要求本地维护。hex是编码不是加密，不要将完整命令贴聊天。Wi-Fi/MQTT配置由各自NVS格式保存，不是跨两项事务；一项确认成功就保留，不把丢回执当未保存而盲目重复写。凭据保留在设备NVS/RAM中，本工具不提供存储加密。USB打开仍可能因驱动/适配器复位板子；实机验证须在授权安全台架执行。此入口未改变Motion独立网页，也不开放产品动作。
 
@@ -431,6 +431,23 @@ python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN mqtt
 包括短提示和OTA CODE在内的USB回复均排队，每loop最多64 bytes，按可写容量处理短写；5秒未完成或本地安全条件丢失则中止导出，不自动解除维护锁。Brain的Arduino 3.3 HWCDC设1ms超时，避免零超时重试计数下溢；Motion旧SDK保留0ms。不是严格实时USB保证，背压或帧内日志干扰仍可能导致本次采集失败。发送期间不处理下一条USB命令，UART、网络、Stop和反馈轮询继续。文件采集工具`tools/capture_board_export.py`使用随机挑战关联本次请求，排他保存0600文件，保留维护锁，不自动安装、退出或重启。关闭其他串口监视器；串口适配器打开端口仍可能复位板子，必须在已批准的安全台架上使用。需pyserial，可使用已安装PlatformIO的Python环境。
 
 单独维护/导出不写配对或业务记录，也不调用BoardCommissioning；持久安装和网络配置各走上文明确入口。Brain网络仍发布只读状态/probe；`active`不能当作网络已停止或导入获准。测试`python3 tools/test_maintenance_console.py --sanitize`运行解析器/锁；`python3 tools/test_maintenance_export.py --sanitize`运行生产导出/USB调度但使用MAC/NVS/字节端口替身；`python3 -m unittest discover -s tests -p test_maintenance_wiring.py`只是入口连线静态回归，不代替串口/网页/机械实测。
+
+## Brain 临时 AP 配网（2026-10-10）
+
+当前 V1 Brain 固件提供配网入口，不是旧 `Babytech-Debug` 工作台，也不提供运动、安装、配对或 OTA 操作。产品安装/配对和 Cloud 账号仍按工厂流程办理；配网本身不要求配对，不修改配对/业务记录，不擦除、不重启。
+
+- 无有效Wi-Fi配置时自动开启 AP+STA；已有有效配置仅断线重试，不因暂时断网自动开AP。正常启动后按住Brain的BOOT（GPIO0）约5秒手动开启，松开后可再次触发；启动时的硬件下载模式行为不变。
+- 热点名 `Babytech-Brain-Setup`，**开放热点，无密码**。连接后使用自动弹出的配网页；未弹出时手动打开 `http://192.168.4.1/`。仅临时本地可信环境使用：AP及HTTP不加密，附近接入者可配置网络，不能把它当作公网管理接口。
+- Wi-Fi与MQTT分别保存，复用既有 `wifi-cfg`/`cloudcfg` NVS及读回校验。MQTT高级设置默认折叠，默认host `101.33.219.108`、port `1883`；已有自定义SSID/host/port/user预填并保留，不覆盖为默认值。密码不经GET返回、不预填、不记日志；保存时重新输入。Wi-Fi空密码明确表示开放网络，不表示保留旧密码；MQTT保存需密码，不轮换服务器账号。
+- 已提交或运行中的Prepare阻止保存，UI应用请求时再次检查；Initialize、普通诊断、未配对、Cloud离线、历史待回执本身不成为配网门禁。已接受Prepare只有对应终态，或更新且覆盖该来源sequence的空闲STATUS，才能释放运行标记，旧watermark不会释放。既有USB维护准入不变。
+- 自动AP在新Wi-Fi成功加入后关闭，不等待MQTT；手动AP不因已有Wi-Fi连接立即关闭，须成功保存一次并有Wi-Fi连接。单独MQTT保存成功且原Wi-Fi仍连接时也会关闭。关闭前留2秒页面回复时间；Wi-Fi保存失败（包括部分写入后读回失败）或新配置尚未加入时保留AP。保存不是联网/认证成功证明。
+- 页面分别显示已安装Device ID和六位**开发配对码**，提供独立复制按钮及HTTP选择/复制降级。开发码仅按 `bt-` + 12位hex后缀取模1000000并补零；未安装/非标准ID无派生码，Cloud可能已轮换或禁用，不代表权威Cloud存储值。
+
+本地API：`GET /`页面；`GET /api/status`只读非密码字段；`POST /api/wifi`表单字段`ssid/password`；`POST /api/mqtt`表单字段`host/port/user/password`。页面自动发送`X-Babytech-Portal: 1`，不授权跨源请求；HTTP服务按客户端本地目的IP仅接受AP入口。`202 pending`只表示进入单请求mailbox，后续状态`wifi_saved/mqtt_saved/save_failed/feeding_active`才是应用结果；`409 busy`不替换已有请求。Wi-Fi成功后若MQTT未认证，应重新长按BOOT核对MQTT，不盲目重复写Wi-Fi。
+
+Radio、HTTP及DNS均由现有网络worker运行；未配对时仅启用一个配网worker，不访问LVGL/UART。UI owner接收复制的请求并复用原配置保存函数。网络回调先处理portal再进入可能阻塞的MQTT连接。Arduino 3.3内置DNSServer的`resolvedIP`仅用于回复、不能绑定AP接口，因此使用限定AP地址的短UDP处理器，只支持单个非压缩IN问题的A/ANY回复与AAAA空回复，拒绝畸形包；不引入DNS框架。自动弹窗依赖手机行为，手动地址始终是降级入口。
+
+主机测试：`python3 tools/test_brain_portal.py --sanitize`（状态、mailbox并发、真实portal保存/失败/重新加入、HTTP访问与凭据、DNS边界），`python3 tools/test_brain_main.py --sanitize --case portal-guard --case portal-unpaired --case real-readiness`（实际main/UART来源watermark及终态关联）。SDK I/O替身不证明无线范围、手机弹窗/复制、HTTP慢客户端、MQTT连接时延、任务栈余量、真实NVS掉电或GPIO按键行为；这些仍须安全台架验证，不作实机验收或生产部署声明。
 
 ## V1 Motion 集成状态（2026-10-01）
 
@@ -480,7 +497,7 @@ Motion 独立调试网页保留；旧 v3 直连路径已移除。
 
 当前默认可构建成对 Brain/Motion v4，产品 MQTT 在 Brain；共享协议类型和旧 codec 测试保留，旧 Brain 状态网页不编入固件。软件闭环已有验证，真实两板与服务器切换尚未验收。
 
-- `main-controller/`：480×320 ST7796 屏幕、GT1151 触摸、LVGL 页面，默认 UART v4 网络/命令/配置/结果桥接与本地操作。暂不提供旧 `Babytech-Debug` 热点、网页或 Brain OTA。
+- `main-controller/`：480×320 ST7796 屏幕、GT1151 触摸、LVGL 页面，默认 UART v4 网络/命令/配置/结果桥接与本地操作，提供上述 `Babytech-Brain-Setup` 临时AP配网。不恢复旧 `Babytech-Debug` 工作台或 Brain OTA。
 - `device-controller/`：`Babytech-Motion` 热点、可保存的路由器 Wi-Fi 配置、内嵌网页和 HTTP API；任意 CAN ID 1..255 的使能、失能、相对运动、停止、广播停止，以及真实位置/速度/电流反馈。下板默认从 GPIO1/2 采样 HX711，网页可修改并持久化 DOUT/SCK，同时提供称重状态、去皮和标定 API。
 - `shared/BoardProtocol/`：板间 UART v4 帧、会话和调度，并保留旧协议兼容回归。v4 状态包含资源与机械信息，不等于真实传感器和机构已验收。
 - `tools/test_protocol.py`、`tools/test_motion.py`：主机协议、参数与反馈解析检查。

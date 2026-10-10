@@ -145,6 +145,7 @@ jobs:
           python tools/test_brain_controller.py --sanitize
           python tools/test_brain_network.py --sanitize
           python tools/test_brain_station.py --sanitize
+          python tools/test_brain_portal.py --sanitize
           python tools/test_brain_network_console.py --sanitize
           python tools/test_brain_main.py --sanitize
           python tools/test_motion_main.py --sanitize

@@ -32,6 +32,7 @@ public:
     bool busy() const { return active_ || stopQuerying_; }
     bool resultPending() const { return replyPending_; }
     bool ordinaryBusy() const { return active_; }
+    bool preparePending() const { return active_ && current_.request.command == boardlink::ProductCommand::Prepare; }
     bool stopInFlight() const { return stopPending_; }
     void setPrepareReadyHandler(bool (*ready)()) { prepareReady_ = ready; }
     void setConfigurationYieldHandler(void (*yield)(uint32_t)) { configurationYield_ = yield; }

@@ -56,4 +56,5 @@ unsigned count(Op op);
 void fail(Op op, unsigned occurrence, esp_err_t error = ESP_FAIL, bool apply = false,
           std::optional<size_t> reportedLength = std::nullopt);
 void verifyFaults();
+esp_err_t setString(nvs_handle_t handle, const char* key, const char* value);
 }  // namespace fake_brain

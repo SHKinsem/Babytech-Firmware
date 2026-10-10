@@ -4,6 +4,7 @@
 #include "driver/uart.h"
 #include <algorithm>
 #include <cstdarg>
+#include <cstring>
 #include <stdexcept>
 
 namespace fake_main {
@@ -12,6 +13,7 @@ std::deque<uint8_t> uartRx;
 std::vector<uint8_t> uartTx;
 size_t uartWriteLimit = 7;
 bool panelReady = true, stopClick = false;
+bool allowCredentialWrites = false;
 babytech::display::DisplayIntent intent = babytech::display::DisplayIntent::None;
 babytech::display::DisplaySnapshot shown;
 bool shownConnected = false, shownPending = false;
@@ -63,8 +65,11 @@ esp_err_t uart_wait_tx_done(uart_port_t port, TickType_t ticks) {
     fake::check(port == UART_NUM_1 && !ticks, "blocking UART TX check");
     return ESP_OK;
 }
-esp_err_t nvs_set_str(nvs_handle_t, const char*, const char*) {
-    // This fixture deliberately does not emulate credential writes. A future
-    // test must supply write/readback semantics before exercising NET WIFI.
-    throw std::runtime_error("credential writes not supported by main fixture");
+esp_err_t nvs_set_str(nvs_handle_t handle, const char* key, const char* value) {
+    if (!fake_main::allowCredentialWrites)
+        throw std::runtime_error("credential writes not enabled by main fixture");
+    const auto found = fake_brain::io.handles.find(handle);
+    fake_brain::check(found != fake_brain::io.handles.end() && found->second.name == "wifi-cfg" &&
+        key && (!std::strcmp(key, "ssid") || !std::strcmp(key, "pass")), "credential write outside fixture scope");
+    return fake_brain::setString(handle, key, value);
 }

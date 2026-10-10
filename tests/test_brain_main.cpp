@@ -237,6 +237,16 @@ public:
         v4::Message message;
         check(encodeCommandResult(result, message), "peer COMMAND_RESULT encode failed"); send(message);
     }
+    void replyTerminal(const ProductRequest& request) {
+        auto pair = productState.state().pairing;
+        pair.role = v4::Role::Motion;
+        std::swap(pair.localPhysicalId, pair.peerPhysicalId);
+        TerminalEvent event; event.request = request; event.completed = true;
+        event.targetPowderG = productTargetPowderG(request); event.uptimeMs = millis();
+        check(makeProductEventId(pair, request.source, request.sequence, event.eventId), "terminal ID failed");
+        v4::Message message;
+        check(encodeTerminalEvent(pair, event, message), "terminal encode failed"); send(message);
+    }
     void changedStatus() { statusAt_ = millis() - 200; }
 
 private:
@@ -417,6 +427,7 @@ void runRealReadiness(bool exhausted) {
     action("Cloud reply", [&] {
         check(peer.command.request.source == v4::Source::CloudCommand && cloudDispatcher.ordinaryBusy(),
               "test never exercised ordinary Cloud owner");
+        check(feedingForPortal(millis()), "pending Cloud Prepare did not guard portal save");
         peer.replyCommand();
         fake::io.loopOk = fake::io.connectOk = false;
     });
@@ -481,6 +492,9 @@ void runRealReadiness(bool exhausted) {
         return controllerLink.lastTelemetry()->sampleUptimeMs == peer.status.sampleUptimeMs;
     });
     probe("later idle old watermark not ready", false);
+    action("portal rejects old-watermark idle", [&] {
+        check(feedingForPortal(millis()), "newly received old-watermark idle released portal gate");
+    });
     action("accepted watermark but not stationary", [&] {
         std::strcpy(peer.status.cloudWatermark, "3"); peer.status.stationary = false; peer.changedStatus();
     });
@@ -491,6 +505,9 @@ void runRealReadiness(bool exhausted) {
     probe("accepted watermark not stationary", false);
     action("accepted watermark fresh stationary", [&] { peer.status.stationary = true; peer.changedStatus(); });
     wait("accepted movement proof released", [&] { return cloudCanStart(); });
+    action("portal releases accepted-watermark idle", [&] {
+        check(!feedingForPortal(millis()), "idle accepted watermark did not release portal gate");
+    });
     probe("accepted watermark stationary restores ready", true);
     action("touchscreen local Stop", [&] { fake_main::stopClick = true; });
     wait("local Stop on actual UART", [&] {
@@ -765,6 +782,7 @@ void run(const std::string& name) {
 #include "brain_main_offline_fixture.h"
 #include "brain_main_dual_pipe_fixture.h"
 #include "brain_main_install_pipe_fixture.h"
+#include "brain_main_portal_fixture.h"
 int main(int argc, char** argv) {
     try {
         if (argc >= 2 && std::string(argv[1]) == "install-bridge") {
@@ -784,6 +802,10 @@ int main(int argc, char** argv) {
             std::printf("PASS Brain real-readiness %s\n", argc == 3 ? "max-sequence" : "offline-local"); return 0;
         }
         check(argc == 2, "one isolated case required");
+        if (std::string(argv[1]) == "portal-guard" || std::string(argv[1]) == "portal-unpaired") {
+            runPortalMain(std::string(argv[1]) == "portal-unpaired");
+            std::printf("PASS Brain portal setup/loop %s\n", argv[1]); return 0;
+        }
         if (std::string(argv[1]) == "real-results" || std::string(argv[1]) == "real-results-write-failure") {
             runRealResults(std::string(argv[1]) == "real-results-write-failure");
             std::printf("PASS Brain main Motion result recovery %s\n", argv[1]); return 0;

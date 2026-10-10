@@ -51,8 +51,31 @@ bool validReason(const char* reason) {
 
 bool BrainNetwork::begin(const char* pairedDeviceId) {
     if (started_ || !pairedDeviceId || !pairedDeviceId[0]) return false;
-    started_ = cloud_.beginV4(pairedDeviceId, BrainStation::service, &station_);
+    if (provisioningStarted_) return false; // Never introduce a second radio owner.
+    started_ = cloud_.beginV4(pairedDeviceId, networkService, this);
     return started_;
+}
+
+void BrainNetwork::networkService(void* context) {
+    auto& network = *static_cast<BrainNetwork*>(context);
+    network.station_.poll();
+    network.portal_.service(network.station_, network.cloud_.connected());
+}
+
+void BrainNetwork::provisioningTask(void* context) {
+    for (;;) {
+        networkService(context);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+bool BrainNetwork::beginProvisioning(const char* pairedDeviceId) {
+    if (provisioningStarted_) return true;
+    portal_.begin(pairedDeviceId);
+    if (!started_ && xTaskCreatePinnedToCore(provisioningTask, "brain-setup", 6144,
+        this, 1, nullptr, 0) != pdPASS) return false;
+    provisioningStarted_ = true;
+    return true;
 }
 
 void BrainNetwork::diagnostics(char* output, size_t capacity) const {

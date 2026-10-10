@@ -5,6 +5,7 @@
 
 constexpr int WL_CONNECTED = 3;
 constexpr int WIFI_STA = 1;
+constexpr int WIFI_AP_STA = 3;
 constexpr int WIFI_AUTH_OPEN = 0;
 constexpr int WIFI_AUTH_WPA_PSK = 2;
 struct FakeWiFiCall {
@@ -26,6 +27,11 @@ public:
     bool setMinSecurity(int value);
     int begin(const char* ssid, const char* password);
     bool disconnect(bool turnOff = false, bool erase = false);
+    bool softAPConfig(IPAddress address, IPAddress gateway, IPAddress subnet);
+    bool softAP(const char* name);
+    bool softAPdisconnect(bool off);
+    bool apOk = true;
+    std::string apName;
     int state = WL_CONNECTED;
     std::string ssid;
     std::string attemptedSsid;

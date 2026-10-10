@@ -26,10 +26,28 @@ babytech::display::BabytechSt7796Panel panel;
 babytech::display::BabytechDisplayView view;
 babytech::display::ControllerLink controllerLink;
 babytech::brain::BrainNetwork network;
+bool portalFeedingAccepted = false;
+char portalFeedingCommand[129]{};
+uint64_t portalFeedingSequence = 0;
+babytech::v4::Source portalFeedingSource = babytech::v4::Source::CloudCommand;
+uint32_t portalAcceptedAt = 0, portalTerminalAt = 0;
+bool portalTerminalSeen = false;
+char portalLastTerminalCommand[129]{};
+uint64_t portalLastTerminalSequence = 0;
+babytech::v4::Source portalLastTerminalSource = babytech::v4::Source::CloudCommand;
 babytech::brain::BrainResultDelivery<babytech::display::ControllerLink,
   babytech::brain::BrainNetwork> resultDelivery(controllerLink, network);
 bool receiveMotionTerminal(const babytech::v4::Message& message,
-                           const babytech::boardlink::TerminalEvent&, uint32_t) {
+                           const babytech::boardlink::TerminalEvent& event, uint32_t nowMs) {
+  std::strcpy(portalLastTerminalCommand, event.request.commandId);
+  portalLastTerminalSequence = event.request.sequence;
+  portalLastTerminalSource = event.request.source;
+  if (portalFeedingAccepted && event.request.source == portalFeedingSource &&
+      event.request.sequence == portalFeedingSequence && !std::strcmp(event.request.commandId, portalFeedingCommand)) {
+    portalFeedingAccepted = false;
+    portalTerminalSeen = true;
+    portalTerminalAt = nowMs;
+  }
   return resultDelivery.terminal(message);
 }
 using SimulationOwner = babytech::brain::BrainSimulationDispatcher<babytech::brain::BrainNetwork>;
@@ -38,7 +56,17 @@ babytech::brain::BrainSimulationModeGuard simulationModeGuard;
 bool simulating() { return simulation && simulation->enabled(); }
 void observeRealAcceptance(const babytech::boardlink::ProductRequest& request, uint32_t nowMs) {
   simulationModeGuard.observeAccepted(request, nowMs);
+  if (request.command == babytech::boardlink::ProductCommand::Prepare) {
+    if (request.source == portalLastTerminalSource && request.sequence == portalLastTerminalSequence &&
+        !std::strcmp(request.commandId, portalLastTerminalCommand)) return;
+    portalFeedingAccepted = true;
+    portalFeedingSource = request.source;
+    portalFeedingSequence = request.sequence;
+    std::strcpy(portalFeedingCommand, request.commandId);
+    portalAcceptedAt = nowMs;
+  }
 }
+
 babytech::boardlink::MaintenanceUsbConsole commissioningSession;
 // Installation, local requests and result recovery share this single store.
 babytech::boardlink::BrainStateStore productState;
@@ -59,6 +87,19 @@ const char* cloudAdmission() {
 }
 babytech::brain::BrainCloudDispatcher<babytech::display::ControllerLink,
   babytech::brain::BrainNetwork> cloudDispatcher(controllerLink, network, installNowMs, cloudAdmission);
+bool feedingForPortal(uint32_t nowMs) {
+  const auto* status = controllerLink.lastTelemetry();
+  const uint32_t received = controllerLink.lastTelemetryReceivedAtMs();
+  const bool fresh = status && controllerLink.connected(nowMs) && uint32_t(nowMs - received) < 1500;
+  if (portalFeedingAccepted && fresh && uint32_t(received - portalAcceptedAt) < 0x80000000u &&
+      received != portalAcceptedAt && !status->isPreparing && !status->motionBusy && !status->activeExecutionId[0] &&
+      babytech::brain::statusWatermarkAtLeast(*status, portalFeedingSource, portalFeedingSequence))
+    portalFeedingAccepted = false;
+  const bool afterTerminal = !portalTerminalSeen ||
+    (received != portalTerminalAt && uint32_t(received - portalTerminalAt) < 0x80000000u);
+  return (simulation && simulation->running()) || cloudDispatcher.preparePending() || localDispatcher.preparePending() ||
+    portalFeedingAccepted || (fresh && afterTerminal && status->isPreparing);
+}
 bool cloudCanStart() {
   const uint32_t nowMs = uint32_t(millis());
   if (cloudAdmission() || cloudDispatcher.ordinaryBusy() || cloudDispatcher.resultPending() || cloudDispatcher.stopInFlight() ||
@@ -178,6 +219,7 @@ void setup() {
   // Arduino 3.3 HWCDC decrements an unsigned retry counter: zero can wrap.
   Serial.setTxTimeoutMs(1);
   Serial.setTimeout(20);
+  pinMode(0, INPUT_PULLUP);
   displayReady = panel.begin() && view.begin(true);
   if (displayReady) createLocalStopButton();
   if (displayReady) {
@@ -201,6 +243,8 @@ void setup() {
   if (!network.begin(controllerLink.deviceId())) {
     Serial.println("[Brain] Network unavailable; check pairing and resources");
   }
+  if (!network.beginProvisioning(controllerLink.deviceId()))
+    Serial.println("[Brain] Local network setup worker unavailable; USB remains available");
   network.setProductHandlers(dispatchCloudCommand, dispatchCloudStop, nullptr);
   network.setContextHandler(receiveCloudContext, nullptr);
   network.setReceiptHandler(receiveCloudReceipt, nullptr);
@@ -238,6 +282,7 @@ void loop() {
   controllerLink.poll(uint32_t(millis()));
   resultDelivery.poll(uint32_t(millis()), commissioningSession.active());
   localDispatcher.poll(uint32_t(millis()));
+  network.pollProvisioning(feedingForPortal(uint32_t(millis())), digitalRead(0) == LOW, uint32_t(millis()));
   pollCommissioningConsole();
   installer.poll(uint32_t(millis()));
   pendingRecovery.poll(uint32_t(millis()), commissioningSession.active() || cloudDispatcher.busy() || localDispatcher.busy());

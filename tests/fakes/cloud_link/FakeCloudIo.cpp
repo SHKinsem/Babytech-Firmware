@@ -102,6 +102,9 @@ IPAddress FakeWiFi::localIP() const { record("localIP"); return address; }
 void FakeWiFi::persistent(bool enabled) { record("persistent", enabled); }
 void FakeWiFi::setAutoReconnect(bool enabled) { record("autoReconnect", enabled); }
 bool FakeWiFi::mode(int value) { record("mode", value); return true; }
+bool FakeWiFi::softAPConfig(IPAddress, IPAddress, IPAddress) { record("apConfig"); return apOk; }
+bool FakeWiFi::softAP(const char* name) { record("apStart"); apName = name; return apOk; }
+bool FakeWiFi::softAPdisconnect(bool off) { record("apStop", off); return true; }
 bool FakeWiFi::setMinSecurity(int value) { record("security", value); return true; }
 int FakeWiFi::begin(const char* network, const char* password) {
     record("begin");

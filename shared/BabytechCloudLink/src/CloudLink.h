@@ -76,6 +76,12 @@ public:
     // host/password <=127 bytes, user <=63; no ASCII controls; host uses DNS/IP characters.
     // False preserves RAM settings; NVS may already contain an unverified write.
     bool configure(const char* host, uint16_t port, const char* user, const char* password);
+    struct ConfigurationSummary {
+        char host[128]{}, user[64]{};
+        uint16_t port = 1883;
+    };
+    // UI/config owner only, including before begin; never returns a password.
+    bool configurationSummary(ConfigurationSummary& output) const;
     String host() const;
     uint16_t port() const;
     const char* deviceId() const { return deviceId_; }
@@ -116,6 +122,7 @@ private:
     void failPendingPublishes();
     void receive(char* topic, uint8_t* payload, unsigned int length);
     bool loadSettings();
+    bool readSettings(Settings& output) const;
     bool persistSettings(const Settings& settings);
     bool saveSettings(const Settings& settings);
     bool copySettings(Settings& settings, uint32_t* revision = nullptr) const;

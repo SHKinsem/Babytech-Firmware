@@ -95,6 +95,22 @@ void BrainStation::service(void* context) {
     static_cast<BrainStation*>(context)->poll();
 }
 
+bool BrainStation::copySsid(char (&output)[33]) {
+    ConfigGuard guard(configBusy_);
+    if (!guard) return false;
+    loadSnapshot();
+    std::memset(output, 0, sizeof(output));
+    if (snapshotValid_) std::memcpy(output, savedSsid_, sizeof(output));
+    return true;
+}
+
+void BrainStation::provisioningAp(bool enabled) {
+    apActive_ = enabled;
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(false);
+    WiFi.mode(enabled ? WIFI_AP_STA : WIFI_STA);
+}
+
 void BrainStation::poll() {
     bool reload = false;
     bool initializeRadio = false;
@@ -102,33 +118,39 @@ void BrainStation::poll() {
         ConfigGuard guard(configBusy_);
         if (guard) {
             loadSnapshot();
+            // An old STA association cannot confirm a newly saved configuration.
+            connected_.store(false);
             reload = reloadRequested_.exchange(false, std::memory_order_acq_rel);
             initializeRadio = !configured_ && snapshotValid_;
             configured_ = snapshotValid_;
+            hasCredentials_.store(configured_);
             if (configured_) {
                 std::memcpy(ssid_, savedSsid_, sizeof(ssid_));
                 std::memcpy(password_, savedPassword_, sizeof(password_));
             }
             loaded_ = true;
+            credentialsKnown_.store(true);
         }
     }
     // No configuration lock is held over radio/SDK calls.
     if (initializeRadio) {
         WiFi.persistent(false);
         WiFi.setAutoReconnect(false);
-        WiFi.mode(WIFI_STA);
+        WiFi.mode(apActive_ ? WIFI_AP_STA : WIFI_STA);
     }
     if (reload) {
         WiFi.disconnect(false, false);
         joining_ = false;
         attempted_ = false;
     }
+    connected_.store(false);
     if (!configured_) return;
     const uint32_t now = millis();
     if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == ssid_ &&
         WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
         joining_ = false;
         attemptAtMs_ = now;
+        connected_.store(true);
         return;
     }
     if (joining_) {

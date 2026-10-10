@@ -7,6 +7,16 @@
 
 namespace babytech { namespace brain {
 
+inline bool statusWatermarkAtLeast(const boardlink::Status& status, v4::Source source, uint64_t sequence) {
+    const auto* watermark = source == v4::Source::CloudCommand ? status.cloudWatermark : status.localWatermark;
+    if (!std::memchr(watermark, 0, sizeof(status.cloudWatermark))) return false;
+    char expected[20]{};
+    std::snprintf(expected, sizeof(expected), "%llu", static_cast<unsigned long long>(sequence));
+    const size_t actualLength = std::strlen(watermark), expectedLength = std::strlen(expected);
+    return actualLength > expectedLength ||
+        (actualLength == expectedLength && std::strcmp(watermark, expected) >= 0);
+}
+
 // Tracks accepted motion for mode changes and public readiness, not command
 // admission. An acceptance ACK is not proof the physical action has stopped.
 class BrainSimulationModeGuard {
@@ -44,15 +54,9 @@ public:
             !receivedElapsed || receivedElapsed > elapsed || status->motionBusy ||
             status->isPreparing || !status->stationary || status->activeExecutionId[0] ||
             status->executionOwner != boardlink::ExecutionOwner::None) return true;
-        const auto* watermark = source_ == v4::Source::CloudCommand ? status->cloudWatermark : status->localWatermark;
         // The watermark excludes an idle STATUS queued before acceptance but
         // received afterward. Decode already bounds/canonicalizes these fields.
-        if (!std::memchr(watermark, 0, sizeof(status->cloudWatermark))) return true;
-        char expected[20]{};
-        std::snprintf(expected, sizeof(expected), "%llu", static_cast<unsigned long long>(sequence_));
-        const size_t actualLength = std::strlen(watermark), expectedLength = std::strlen(expected);
-        if (actualLength < expectedLength ||
-            (actualLength == expectedLength && std::strcmp(watermark, expected) < 0)) return true;
+        if (!statusWatermarkAtLeast(*status, source_, sequence_)) return true;
         pending_ = false;
         return false;
     }

@@ -16,12 +16,14 @@ import tempfile
 CASES = ("simulation-complete", "simulation-stop", "simulation-context",
          "simulation-receipt", "simulation-offline", "simulation-offline-ack-lost", "panel-failure",
          "bridge-input-validation", "real-readiness", "real-results", "real-results-write-failure",
-         "real-auth-offline", "real-pipe-input-validation")
+         "real-auth-offline", "real-pipe-input-validation", "portal-guard", "portal-unpaired")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--compile-timeout", type=int, default=120,
+                        help="Compiler timeout in seconds (default 120); case timeouts/flags unchanged")
     parser.add_argument("--case", action="append", choices=CASES)
     pipes = parser.add_mutually_exclusive_group()
     pipes.add_argument("--pipe", action="store_true",
@@ -35,6 +37,8 @@ def main():
     parser.add_argument("--build-output", type=Path,
                         help="Build the host binary at this path and return without running")
     args = parser.parse_args()
+    if args.compile_timeout <= 0:
+        parser.error("--compile-timeout must be positive")
     if (args.pipe or args.real_pipe) and args.case:
         parser.error("pipe modes and --case are mutually exclusive")
     if (args.state_file is not None or args.boot_id is not None) and not args.real_pipe:
@@ -63,7 +67,7 @@ def main():
         "ProductBoardMessages.cpp", "ProductRequest.cpp", "ProductResultQuery.cpp", "ProductCommandResult.cpp",
         "ReadOnlyBoardLink.cpp", "ProductContextMessages.cpp", "ProductEventMessages.cpp", "BoardLinkArduino.cpp")]
     sources += ["main-controller/src/" + name for name in
-                ("controller_link.cpp", "brain_network.cpp", "brain_station.cpp", "brain_status.cpp")]
+                ("controller_link.cpp", "brain_network.cpp", "brain_station.cpp", "brain_portal.cpp", "brain_status.cpp")]
     sources += ["shared/BabytechCloudLink/src/" + name for name in ("CloudLink.cpp", "CloudSession.cpp")]
     sources += ["shared/BabytechDisplayCore/src/display_model.cpp",
                 "tests/fakes/brain_state_store/FakeBrainNvs.cpp",
@@ -90,11 +94,11 @@ def main():
         env["ASAN_OPTIONS"] = env.get("ASAN_OPTIONS", "") + ":halt_on_error=1:abort_on_error=1"
         env["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
     if args.build_output is not None:
-        subprocess.run([*command, "-o", str(args.build_output)], check=True, timeout=120)
+        subprocess.run([*command, "-o", str(args.build_output)], check=True, timeout=args.compile_timeout)
         return
     with tempfile.TemporaryDirectory(prefix="babytech-brain-main-") as directory:
         binary = Path(directory) / "brain_main"
-        subprocess.run([*command, "-o", str(binary)], check=True, timeout=120)
+        subprocess.run([*command, "-o", str(binary)], check=True, timeout=args.compile_timeout)
         if args.pipe:
             subprocess.run([str(binary), "broker-bridge"], env=env, check=True, timeout=300)
             return

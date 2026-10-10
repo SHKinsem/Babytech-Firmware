@@ -117,7 +117,7 @@ def main():
                     root / "shared/ProductBoardLink/src", root / "shared/BoardProtocol/src",
                     root / "shared/BabytechDisplayCore/src", root / "tests/fakes/product_crypto", headers):
         command += ["-I", str(include)]
-    for source in ("main-controller/src/brain_network.cpp", "main-controller/src/brain_station.cpp",
+    for source in ("main-controller/src/brain_network.cpp", "main-controller/src/brain_station.cpp", "main-controller/src/brain_portal.cpp",
                    "main-controller/src/brain_status.cpp", "shared/BabytechCloudLink/src/CloudLink.cpp",
                    "shared/BabytechCloudLink/src/CloudSession.cpp", "tests/fakes/cloud_link/FakeCloudIo.cpp",
                    "shared/BoardProtocol/src/BoardProtocol.cpp", "shared/BoardProtocol/src/BoardProtocolV4.cpp",

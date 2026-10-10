@@ -112,7 +112,10 @@ class MaintenanceWiringTest(unittest.TestCase):
 
     def test_v4_retirement_keeps_shared_network_and_legacy_import_protection(self):
         network = (ROOT / "main-controller/src/brain_network.cpp").read_text()
-        self.assertIn("cloud_.beginV4(pairedDeviceId, BrainStation::service, &station_)", network)
+        self.assertIn("cloud_.beginV4(pairedDeviceId, networkService, this)", network)
+        service = function_body(network, "void BrainNetwork::networkService(void* context)")
+        self.assertIn("network.station_.poll();", service)
+        self.assertIn("network.portal_.service(network.station_, network.cloud_.connected());", service)
         transport = (ROOT / "shared/BabytechCloudLink/src/CloudLink.cpp").read_text()
         self.assertIn("bool CloudLink::beginV4(", transport)
         setup = function_body(self.motion, "void setup()")
@@ -552,7 +555,7 @@ class MaintenanceWiringTest(unittest.TestCase):
         self.assertLess(queue.rindex("sendError("), queue.index("queue.start("))
         self.assertLess(queue.index("queue.start("), queue.index("if (started.code < 300)"))
         accepted = function_body(queue, "if (started.code < 300)")
-        self.assertRegex(accepted, r"^\s*productRuntime\.workbenchAccepted\(\);")
+        self.assertIn(release, accepted)
         self.assertLess(accepted.index(release), accepted.index("endpoint.cancelPending("))
         self.assertLess(queue.index(release), queue.index("sendQueueResult(started, true)"))
         for body in (move, raw, queue):

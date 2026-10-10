@@ -18,6 +18,11 @@ public:
     // No rollback/durability guarantee beyond NVS. Reconfigure to repair;
     // failure leaves this instance's verified configuration/reload unchanged.
     bool configure(const char* ssid, const char* password);
+    bool copySsid(char (&output)[33]); // UI owner, no password exposure
+    bool hasCredentials() const { return hasCredentials_.load(); }
+    bool credentialsKnown() const { return credentialsKnown_.load(); }
+    bool connected() const { return !reloadRequested_.load() && connected_.load(); }
+    void provisioningAp(bool enabled); // network owner only
 private:
     void loadSnapshot(); // configBusy_ held; never touches worker radio buffers.
     std::atomic_flag configBusy_ = ATOMIC_FLAG_INIT;
@@ -31,6 +36,8 @@ private:
     char password_[65]{};
     bool loaded_ = false;
     bool configured_ = false;
+    bool apActive_ = false;
+    std::atomic<bool> hasCredentials_{false}, credentialsKnown_{false}, connected_{false};
     bool joining_ = false;
     bool attempted_ = false;
     uint32_t attemptAtMs_ = 0;

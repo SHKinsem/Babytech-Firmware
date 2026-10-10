@@ -20,6 +20,10 @@ public:
     BrainLocalDispatcher& operator=(const BrainLocalDispatcher&) = delete;
 
     bool busy() const { return active_; }
+    bool preparePending() const {
+        return active_ && store_.state().pending &&
+            store_.state().pendingRequest.command == boardlink::ProductCommand::Prepare;
+    }
     const char* reason() const { return reason_; }
     void setPrepareReadyHandler(bool (*ready)()) { prepareReady_ = ready; }
     void setAcceptanceHandler(void (*handler)(const boardlink::ProductRequest&, uint32_t)) { acceptance_ = handler; }
