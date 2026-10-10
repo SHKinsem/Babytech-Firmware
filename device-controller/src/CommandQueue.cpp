@@ -1333,7 +1333,7 @@ void CommandQueue::observeMotion(uint32_t now) {
     demand(0x36,200); demand(0x35,200);
     if (home && !homeComplete_) demand(0x3B,300);
     else motor_.queries_.release(step->id,0x3B,CanQueryScheduler::Await);
-    if (!home && (!n.targetValid || !newer(n.targetMs,phaseAt_))) demand(0x33,500);
+    if (!home && (!n.targetValid || !newer(n.targetMs,phaseAt_) || !expectedTargetSeen)) demand(0x33,500);
     else motor_.queries_.release(step->id,0x33,CanQueryScheduler::Await);
 }
 
