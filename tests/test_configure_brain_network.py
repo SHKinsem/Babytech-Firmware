@@ -26,15 +26,20 @@ class Port:
         data = data[:7]  # Exercise short writes.
         self.writes.extend(data)
         self.pending.extend(data)
-        if self.pending.endswith(b"\n"):
-            command = bytes(self.pending)
-            self.pending.clear()
+        while b"\n" in self.pending:
+            end = self.pending.index(b"\n") + 1
+            command = bytes(self.pending[:end])
+            del self.pending[:end]
+            if command == b"\n":
+                continue
             if command == b"NET STATUS\n":
                 reply = b"[network] brain_ready" if self.ready else b"[network] brain_unpaired"
             elif command == b"MAINT BEGIN\n":
                 reply = b"[maint] active"
             elif command == b"MAINT END\n":
                 reply = b"[maint] inactive" if self.release else b"[maint] unsafe"
+            elif command == b"NET DIAG\n":
+                reply = b"[network] diag wifi=3 cfg=1 mqtt=1 state=0 n=1 ok=2 fail=0"
             elif self.fail:
                 reply = b"[network] wifi_failed" if command.startswith(b"NET WIFI") else b"[network] mqtt_failed"
             else:
@@ -49,6 +54,19 @@ class Port:
 
 
 class ConfigureTest(unittest.TestCase):
+    def test_visible_password_requires_explicit_selection(self):
+        with mock.patch.object(tool, "hidden_password", return_value="private") as hidden, mock.patch("builtins.input", return_value="visible") as visible:
+            self.assertEqual(tool.read_password("Password: "), "private")
+            hidden.assert_called_once()
+            visible.assert_not_called()
+            self.assertEqual(tool.read_password("Password: ", show=True), "visible")
+            visible.assert_called_once()
+
+    def test_failed_save_reports_stage_without_secret(self):
+        with self.assertRaisesRegex(tool.ConfigureError, "configuration save") as failure:
+            tool.configure(Port(fail=True), tool.mqtt_command("localhost", 1883, "user", "private"))
+        self.assertNotIn("private", str(failure.exception))
+
     def test_mistaken_secret_argument_not_echoed(self):
         output = io.StringIO()
         with contextlib.redirect_stderr(output), self.assertRaises(SystemExit):
@@ -83,7 +101,7 @@ class ConfigureTest(unittest.TestCase):
         port = Port()
         command = tool.wifi_command("Home", "secret123")
         self.assertTrue(tool.configure(port, command, sleep=lambda _: None))
-        self.assertEqual(port.writes, b"NET STATUS\nMAINT BEGIN\n" + command + b"MAINT END\n")
+        self.assertEqual(port.writes, b"NET STATUS\nMAINT BEGIN\n" + command + b"\nMAINT END\n")
 
     def test_failed_save_releases_without_claiming_success(self):
         port = Port(fail=True)
@@ -101,7 +119,7 @@ class ConfigureTest(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             self.assertTrue(tool.configure(port, command, sleep=lambda _: None))
-        self.assertEqual(port.writes, b"NET STATUS\nMAINT BEGIN\n" + command + b"MAINT END\n")
+        self.assertEqual(port.writes, b"NET STATUS\nMAINT BEGIN\n" + command + b"\nMAINT END\n")
         self.assertEqual(output.getvalue(), "")
 
     def test_unpaired_mqtt_failed_save_releases_and_retries_without_echo(self):
@@ -116,8 +134,78 @@ class ConfigureTest(unittest.TestCase):
             self.assertTrue(port.writes.endswith(b"MAINT END\n"))
             port.fail = False
             self.assertTrue(tool.configure(port, command, sleep=lambda _: None))
-        self.assertEqual(port.writes, (b"NET STATUS\nMAINT BEGIN\n" + command + b"MAINT END\n") * 2)
+        self.assertEqual(port.writes, (b"NET STATUS\nMAINT BEGIN\n" + command + b"\nMAINT END\n") * 2)
         self.assertEqual(output.getvalue(), "")
+
+    def test_read_only_check(self):
+        port = Port()
+        result = tool.inspect_network(port)
+        self.assertEqual(result["diagnostics"]["mqtt"], 1)
+        self.assertEqual(port.writes, b"NET STATUS\nNET DIAG\n")
+
+    def test_saved_state_survives_release_failure(self):
+        with self.assertRaises(tool.ConfigureError) as failure:
+            tool.configure(Port(release=False), tool.wifi_command("Home", ""))
+        self.assertTrue(failure.exception.saved)
+        self.assertFalse(failure.exception.released)
+        self.assertIn("Settings saved", str(failure.exception))
+
+    def test_lost_begin_ack_still_releases_without_saving(self):
+        port = Port()
+        original_read = port.read
+        def read(size):
+            port.lines[:] = port.lines.replace(b"[maint] active\n", b"lost\n")
+            return original_read(size)
+        port.read = read
+        with self.assertRaises(tool.ConfigureError) as failure:
+            tool.configure(port, tool.wifi_command("Home", ""))
+        self.assertTrue(failure.exception.released)
+        self.assertNotIn(b"NET WIFI", port.writes)
+        self.assertIn(b"MAINT END\n", port.writes)
+
+    def test_save_ack_lost_does_not_retry_write(self):
+        port = Port()
+        original_read = port.read
+        def read(size):
+            port.lines[:] = port.lines.replace(b"[network] wifi_saved\n", b"lost\n")
+            return original_read(size)
+        port.read = read
+        with self.assertRaises(tool.ConfigureError) as failure:
+            tool.configure(port, tool.wifi_command("Home", ""))
+        self.assertFalse(failure.exception.saved)
+        self.assertTrue(failure.exception.released)
+        self.assertEqual(port.writes.count(b"NET WIFI"), 1)
+
+    def test_save_and_release_failures_both_reported(self):
+        with self.assertRaises(tool.ConfigureError) as error:
+            tool.configure(Port(fail=True, release=False), tool.wifi_command("Home", ""))
+        self.assertIn("configuration save", str(error.exception))
+        self.assertIn("release unconfirmed", str(error.exception))
+        self.assertFalse(error.exception.saved)
+
+    def test_malformed_diagnostics_never_echoed(self):
+        port = Port()
+        original_read = port.read
+        def read(size):
+            port.lines[:] = port.lines.replace(b"wifi=3 cfg=1 mqtt=1 state=0 n=1 ok=2 fail=0", b"test-secret")
+            return original_read(size)
+        port.read = read
+        with self.assertRaises((tool.ConfigureError, ValueError)) as error:
+            tool.inspect_network(port)
+        self.assertNotIn("test-secret", str(error.exception))
+
+    def test_stale_reply_does_not_reject_next_stage(self):
+        port = Port()
+        original_read = port.read
+        injected = False
+        def read(size):
+            nonlocal injected
+            if not injected and b"[maint] active\n" in port.lines:
+                port.lines[:] = port.lines.replace(b"[maint] active\n", b"[network] brain_ready\n[maint] active\n")
+                injected = True
+            return original_read(size)
+        port.read = read
+        self.assertTrue(tool.configure(port, tool.wifi_command("Home", "")))
 
     def test_unpaired_mqtt_failed_release_reports_uncertainty_without_secret(self):
         port = Port(ready=False, release=False)

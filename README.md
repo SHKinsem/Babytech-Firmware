@@ -422,9 +422,9 @@ python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN wifi
 python3 tools/configure_brain_network.py --port /dev/cu.usbmodemBRAIN mqtt
 ```
 
-按提示输入SSID/密码或broker/端口/账号/密码；密码隐藏输入，不写命令行、文件或串口日志。工具先确认Brain，再进入本地维护、保存、退出；失败也尝试退出，若USB断开则重新连接后用`MAINT END`解除本地UI锁。成功仅表示存储读回通过，需另查连接状态。Wi-Fi与MQTT均可在未配对时预存，不创建网络任务、不联网或发布设备身份；有效配对后网络启动时读取已保存凭据。已运行时配置成功由worker重连。首次UART安装入口已接，网络预存不等于身份安装或实机验收。旧账号撤销与新Brain独占产品MQTT仍需单独受控交接。
+按提示输入SSID/密码或broker/端口/账号/密码；密码默认隐藏，显式`--show-password`才回显，避免分享终端。工具分别报告保存与维护退出；保存已确认而退出未确认，不要重写设置，只处理`MAINT END`。进入维护回执丢失也尝试退出，但不自动重发设置。`check`子命令只读`NET STATUS`/`NET DIAG`，不进入维护。成功保存仅表示存储读回通过，不代表连接成功。Wi-Fi与MQTT均可在未配对时预存，不创建网络任务、不联网或发布设备身份；有效配对后网络启动时读取已保存凭据。已运行时配置成功由worker重连。网络预存不等于身份安装或实机验收；旧账号撤销仍需受控交接。父仓库`Cloud_System/deploy/factory_setup.py`统一工厂入口，默认只检查、复用安装和账号；范围与步骤见父仓库操作手册。
 
-底层命令为`NET STATUS`、`NET WIFI <ssid_hex> <password_hex或->`、`NET MQTT <host_hex> <port> <user_hex> <password_hex>`；除STATUS外要求本地维护。hex是编码不是加密，不要将完整命令贴聊天。Wi-Fi/MQTT配置由各自NVS格式保存，不是跨两项事务；一项成功另一项失败时仅重试失败项。凭据保留在设备NVS/RAM中，本工具不提供存储加密。USB打开仍可能因驱动/适配器复位板子；实机验证须在授权安全台架执行。此入口未改变Motion独立网页，也不开放产品动作。
+底层命令为`NET STATUS`、`NET DIAG`、`NET WIFI <ssid_hex> <password_hex或->`、`NET MQTT <host_hex> <port> <user_hex> <password_hex>`；STATUS/DIAG只读，其余要求本地维护。hex是编码不是加密，不要将完整命令贴聊天。Wi-Fi/MQTT配置由各自NVS格式保存，不是跨两项事务；一项确认成功就保留，不把丢回执当未保存而盲目重复写。凭据保留在设备NVS/RAM中，本工具不提供存储加密。USB打开仍可能因驱动/适配器复位板子；实机验证须在授权安全台架执行。此入口未改变Motion独立网页，也不开放产品动作。
 
 维护中可发`MAINT EXPORT <device_id> <32位非零小写hex挑战值>`，导出实际MAC、启动识别号、配对及业务记录；Motion另读旧完整上下文/墓碑并检查旧事件是否存在。缺失、损坏、IO错误和身份冲突分别报告，错误记录不冒充空状态。导出只读，不含Wi-Fi/MQTT密码；可能含宝宝姓名/配方和任务信息，须私密保存，不提交Git或贴聊天。重组后的内容以`[maint-export] `开头，是一行schema=1 JSON，三类记录以hex承载；USB实际使用`[mx] offset:crc:hex`分片，每片至多16 bytes，采集工具校验连续偏移和CRC后重组，可忽略片间普通日志。它不是迁移资格或新机证明，更不是日常冲奶前置步骤。
 
