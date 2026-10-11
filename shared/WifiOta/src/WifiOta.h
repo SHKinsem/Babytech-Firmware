@@ -18,6 +18,11 @@ public:
     void begin();
     void poll();
     bool maintenanceActive() const;
+    // A board console may own Serial instead. Supply validated, complete lines
+    // through handleSerialLine; default firmware keeps the legacy reader.
+    void useExternalSerialReader() { externalSerialReader_ = true; serialLength_ = 0; }
+    bool handleSerialLine(const char* line);
+    bool formatSerialLine(const char* line, char* output, size_t capacity) const;
 
 private:
     enum class State : uint8_t { Idle, Ready, Uploading, Staged, Failed };
@@ -61,6 +66,8 @@ private:
     char adminKey_[33] = {};
     char serialLine_[16] = {};
     uint8_t serialLength_ = 0;
+    bool externalSerialReader_ = false;
+    bool serialDropping_ = false;
     uint8_t expectedHash_[32] = {};
     size_t expectedSize_ = 0;
     size_t received_ = 0;

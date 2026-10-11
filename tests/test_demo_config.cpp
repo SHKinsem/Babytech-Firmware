@@ -1,4 +1,5 @@
 #include "DemoFlowConfig.h"
+#include "CommandQueue.h"
 #include <cassert>
 #include <cstring>
 #include <fstream>
@@ -23,6 +24,30 @@ int main(int argc, char** argv) {
     assert(program.steps[6].action == QueueAction::SyncEnd);
     assert(program.steps[7].action == QueueAction::SyncBegin &&
            program.steps[7].groupSize == 2 && program.steps[7].syncTriggerOnly);
+    {
+        MotorControl motor; CommandQueue queue(motor);
+        assert(motor.begin(4, 5, 500000));
+        assert(!queue.syncSettings().valid());
+        assert(queue.startDemo(program, 1).code == 202); // Actual embedded close-cap script.
+        assert(!queue.syncSettings().valid()); // Product fallback does not configure manual sync.
+        queue.cancel("test");
+        struct Rotation : QueueRotationSource {
+            bool rotationMm(uint8_t, double&) const override { return false; }
+        } rotation;
+        const char* text = "sync begin trigger\nmove 1 360 deg 1 60 60 800\nmove 2 -180 deg 1 60 60 800\nsync end";
+        auto result = queue.start(text, std::strlen(text), 1, rotation, 2);
+        assert(result.code == 400 && std::strcmp(result.message, "sync_settings_unconfigured") == 0);
+        auto settings = productSyncDefaults(); settings.responseBudgetMs = 500;
+        assert(queue.setSyncSettings(settings));
+        result = queue.startDemo(program, 3);
+        assert(result.code == 400 && std::strcmp(result.message, "sync_feedback_budget_insufficient") == 0);
+        assert(queue.syncSettings().responseBudgetMs == 500); // No fallback over an existing valid setting.
+        settings.responseBudgetMs = 20; settings.stopTimeoutMs = 2000;
+        assert(queue.setSyncSettings(settings) && queue.startDemo(program, 4).code == 202);
+        assert(queue.syncSettings().responseBudgetMs == 20 && queue.syncSettings().stopTimeoutMs == 2000);
+        queue.cancel("test");
+        std::cout << "PASS embedded close-cap sync: blank product defaults, manual isolation and existing-setting preservation\n";
+    }
     DemoScript badSync;
     badSync.commands = {"sync begin trigger", "move 1 1 mm 10 20 20 100",
                         "move 2 360 deg 10 20 20 100"};
@@ -44,6 +69,21 @@ int main(int argc, char** argv) {
     assert(!parseDemoConfig("{\"schema_version\":1,\"schema_version\":2}",39,c,error));
     const char* configured = R"({"schema_version":1,"name":"fixture","axes":[{"motor_id":1,"rotation_distance_mm":0}],"display":{"baby_name":"demo","formula_brand":"test","water_ml":180,"temperature_c":45},"initialization":{"timeout_ms":5000,"zero_axes":[{"motor_id":1,"zero_tolerance_deg":1}],"commands":["enable 1","home 1 2 await"]},"stages":[{"id":"open_cap","timeout_ms":5000,"commands":["move 1 1 deg 10 20 20 100 await"]},{"id":"water","timeout_ms":5000,"commands":["wait 100"]},{"id":"powder","timeout_ms":5000,"commands":["wait 100"]},{"id":"close_cap","timeout_ms":5000,"commands":["wait 100"]},{"id":"mix","timeout_ms":5000,"commands":["zero 1 10 20 20 100","wait 100"]}]})";
     assert(parseDemoConfig(configured, std::strlen(configured), c,error)); assert(c.configured);
+    const std::string distanceField = "\"rotation_distance_mm\":0";
+    std::string millimetres(configured);
+    millimetres.replace(millimetres.find("move 1 1 deg"), std::strlen("move 1 1 deg"), "move 1 1 mm");
+    for (const char* value : {"0", "-2", "null", "false", "\"2\"", "1e309", "1000001"}) {
+        std::string invalid(millimetres);
+        invalid.replace(invalid.find(distanceField), distanceField.size(),
+                        std::string("\"rotation_distance_mm\":") + value);
+        DemoConfig rejected;
+        assert(!parseDemoConfig(invalid.c_str(), invalid.size(), rejected, error));
+    }
+    millimetres.replace(millimetres.find(distanceField), distanceField.size(), "\"rotation_distance_mm\":2");
+    DemoConfig metric;
+    assert(parseDemoConfig(millimetres.c_str(), millimetres.size(), metric, error) && metric.configured);
+    assert(buildDemoProgram(metric.stages[0], metric, false, zeros, program, error));
+    assert(program.steps[0].distanceTenths == 1800);
     assert(buildDemoProgram(c.stages[4],c,false,zeros,program,error));
     assert(program.steps[0].absolute && program.steps[0].distanceTenths == -123);
     assert(program.steps[0].awaitCompletion && program.count == 2);
@@ -74,5 +114,5 @@ int main(int argc, char** argv) {
     bad.assign(20,'['); bad.append(20,']'); assert(!parseDemoConfig(bad.c_str(),bad.size(),c,error));
     bad = configured; bad.replace(bad.find("wait 100"),8,"wait 100\\nstop 1");
     assert(!parseDemoConfig(bad.c_str(),bad.size(),c,error));
-    std::cout << "PASS demo JSON bounds, sync groups, atomic validation, safe commands, axes and absolute software zero\n";
+    std::cout << "PASS demo JSON bounds, required finite mm conversion, sync groups, atomic validation, safe commands, axes and absolute software zero\n";
 }

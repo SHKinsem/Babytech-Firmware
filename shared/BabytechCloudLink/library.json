@@ -1,0 +1,12 @@
+{
+  "name": "BabytechCloudLink",
+  "version": "0.1.0",
+  "description": "Shared queued MQTT transport for Babytech Brain and Motion.",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": {
+    "bblanchon/ArduinoJson": "^6.21.3",
+    "knolleary/PubSubClient": "^2.8"
+  },
+  "build": { "includeDir": "src" }
+}

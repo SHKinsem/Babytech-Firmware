@@ -48,6 +48,7 @@ public:
     virtual bool available() const = 0;
     virtual bool configurationValid() const { return true; }
     virtual DemoEvidence evidence(uint8_t id) const = 0;
+    virtual DemoEvidence stopEvidence(uint8_t id) const { return evidence(id); }
     virtual bool start(const DemoScript& script, bool initializing,
                        const std::array<int32_t, 256>& zeros, uint32_t now) = 0;
     virtual DemoExecution execution() const = 0;
@@ -62,12 +63,14 @@ public:
     const DemoConfig& config() const { return config_; }
     bool busy() const { return running_ || stopping_ || resetPending_ || stage_ == DisplayStage::Complete; }
     bool referenceValid() const { return reference_; }
+    bool stationary() const { return settled(false); }
     bool initializing() const { return running_ && index_ == -1; }
     DisplayStage stage() const { return stage_; }
     DisplayError error() const { return stage_ == DisplayStage::Error ? error_ : DisplayError::None; }
     bool startEnabled() const { return stage_ == DisplayStage::Ready; }
     const char* reason() const { return reason_; }
     bool apply(DemoConfig config);
+    bool canInitialize() const;
     bool initialize(uint32_t now);
     bool start(uint32_t now);
     bool single(uint8_t index, uint32_t now);
@@ -76,7 +79,7 @@ public:
     void tick(uint32_t now);
     babytech::display::DisplaySnapshot snapshot() const;
 private:
-    bool settled(bool zero) const;
+    bool settled(bool zero, bool stopping = false) const;
     bool begin(int index, uint32_t now);
     void fail(DisplayError error, const char* reason, uint32_t now);
     DemoExecutor& executor_;

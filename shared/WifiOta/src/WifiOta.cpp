@@ -113,18 +113,36 @@ bool WifiOta::loadAdminKey() {
     return true;
 }
 
+bool WifiOta::formatSerialLine(const char* line, char* output, size_t capacity) const {
+    if (!line || strcmp(line, "OTA CODE") != 0) return false;
+    if (!output || capacity < 64) return false;
+    if (adminReady_) snprintf(output, capacity, "OTA administrator code: %s\n", adminKey_);
+    else snprintf(output, capacity, "OTA administrator storage unavailable\n");
+    return true;
+}
+
+bool WifiOta::handleSerialLine(const char* line) {
+    char response[64];
+    if (!formatSerialLine(line, response, sizeof(response))) return false;
+    Serial.print(response);
+    memset(response, 0, sizeof(response));
+    return true;
+}
+
 void WifiOta::pollSerialRecovery() {
     for (size_t n = 0; n < 32 && Serial.available() > 0; ++n) {
         const char c = static_cast<char>(Serial.read());
         if (c == '\r' || c == '\n') {
             serialLine_[serialLength_] = '\0';
-            if (adminReady_ && strcmp(serialLine_, "OTA CODE") == 0)
-                Serial.printf("OTA administrator code: %s\n", adminKey_);
+            if (!serialDropping_) handleSerialLine(serialLine_);
             serialLength_ = 0;
-        } else if (serialLength_ < sizeof(serialLine_) - 1) {
+            serialDropping_ = false;
+        } else if (serialDropping_) {
+            continue;
+        } else if (c >= 0x20 && c <= 0x7e && serialLength_ < sizeof(serialLine_) - 1) {
             serialLine_[serialLength_++] = c;
         } else {
-            serialLength_ = 0;
+            serialDropping_ = true;
         }
     }
 }
@@ -152,7 +170,7 @@ void WifiOta::begin() {
 }
 
 void WifiOta::poll() {
-    pollSerialRecovery();
+    if (!externalSerialReader_) pollSerialRecovery();
     if (state_ == State::Ready && elapsed(sessionDeadline_)) {
         state_ = State::Idle;
         token_ = "";

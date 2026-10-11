@@ -1191,6 +1191,43 @@ static void test_syntax_failure_sends_nothing_and_keeps_the_old_run() {
 }
 
 
+static void test_manual_move_await_shared_budget() {
+    QueueRig rig;
+    rig.begin();
+    for (uint8_t id = 1; id <= 5; ++id) rig.motor.demoWatch(id, true);
+    feedStationary(rig, 2, 10, 0);
+    CHECK(startQueue(rig, "move 2 2000 deg 400 1500 1500 500 await\nwait 1", 1, 20).code == 202);
+    tick(rig, 30);
+    injectRx(makeAck(2, 0xCD, 2));
+    tick(rig, 40);
+    injectRx(makeTarget(2, 20000));
+    tick(rig, 50);
+    // Position and velocity arrive more than one second apart on a five-axis bus.
+    setMillis(100);
+    injectRx(makePosition(2, 20000));
+    rig.motor.poll();
+    setMillis(1300);
+    injectRx(makeVelocity(2, 0));
+    tick(rig, 1300);
+    CHECK(has(status(rig), "\"step\":1")); // One pair is not completion.
+    tick(rig, 6000);
+    CHECK(has(status(rig), "waiting_feedback")); // Expired pair cannot complete.
+    setMillis(6100);
+    injectRx(makePosition(2, 20000));
+    rig.motor.poll();
+    setMillis(7300);
+    injectRx(makeVelocity(2, 0));
+    tick(rig, 7300);
+    CHECK(has(status(rig), "\"step\":1"));
+    setMillis(7500);
+    injectRx(makePosition(2, 20000));
+    rig.motor.poll();
+    setMillis(8700);
+    injectRx(makeVelocity(2, 0));
+    tick(rig, 8700);
+    CHECK(has(status(rig), "\"step\":2"));
+}
+
 static void test_explicit_await() {
     QueueRig rig;
     rig.begin();
@@ -1286,6 +1323,79 @@ static void test_await_move_rejects_unchanged_target_after_ack() {
     rig.queue.poll(140);
     CHECK(has(status(rig), "\"step\":1"));
     CHECK(rig.queue.active());
+}
+
+static void test_await_move_refreshes_mismatched_target_until_confirmed() {
+    for (bool product : {false, true}) {
+        QueueRig rig;
+        rig.begin();
+        rig.motor.setAutoQueriesEnabled(false);
+        rig.motor.watch(1);
+        feedStationary(rig, 1, 10, 0);
+        const char* text = "move 1 10 deg 30 60 60 800 await\nwait 1\n";
+        if (product) {
+            QueueProgram program;
+            QueueError error;
+            CHECK(parseQueueProgram(text, std::strlen(text), rig.rotation, program, error));
+            setMillis(20);
+            CHECK(rig.queue.startDemo(program, 20).code == 202);
+        } else {
+            CHECK(startQueue(rig, text, 1, 20).code == 202);
+        }
+        tick(rig, 30);
+        CHECK(countTxOpcode(0xCD) > 0);
+        injectRx(makeAck(1, 0xCD, 0x02));
+        tick(rig, 40);
+        injectRx(makeTarget(1, 0));
+        feedStationary(rig, 1, 50, 0);
+        rig.queue.poll(50);
+        CHECK(has(status(rig), "waiting_move_target"));
+
+        // Return feedback only for actual scheduler queries, not unsolicited targets.
+        const auto pollAndReply = [&](uint32_t now, int32_t target) {
+            setMillis(now);
+            rig.motor.poll(false);
+            rig.queue.poll(now);
+            const size_t before = capturedTX.size();
+            rig.motor.dispatchQueries();
+            for (size_t i = before; i < capturedTX.size(); ++i) {
+                const auto& frame = capturedTX[i];
+                if (frame.length != 2 || frame.data[1] != 0x6B) continue;
+                if (frame.data[0] == 0x33) injectRx(makeTarget(1, target));
+                else if (frame.data[0] == 0x36) injectRx(makePosition(1, 0));
+                else if (frame.data[0] == 0x35) injectRx(makeVelocity(1, 0));
+            }
+            setMillis(now + 10);
+            rig.motor.poll(false);
+            rig.queue.poll(now + 10);
+        };
+
+        const auto initialQueries = countTxOpcode(0x33);
+        for (uint32_t now = 150; now <= 2150; now += 100) pollAndReply(now, 0);
+        CHECK(countTxOpcode(0x33) >= initialQueries + 2);
+        CHECK(rig.queue.active());
+        CHECK(has(status(rig), "\"step\":1"));
+        CHECK(has(status(rig), "waiting_move_target"));
+
+        const auto wrongTargetQueries = countTxOpcode(0x33);
+        for (uint32_t now = 2250; now <= 4250; now += 100) pollAndReply(now, 100);
+        CHECK(countTxOpcode(0x33) == wrongTargetQueries + 1);
+        CHECK(rig.queue.active()); // Correct target alone is not arrival.
+        CHECK(has(status(rig), "\"step\":1"));
+        CHECK(has(status(rig), "waiting_position"));
+
+        feedStationary(rig, 1, 4300, 100);
+        rig.queue.poll(4300);
+        CHECK(has(status(rig), "\"step\":1")); // One new pair is insufficient.
+        feedStationary(rig, 1, 4320, 100);
+        rig.queue.poll(4320);
+        CHECK(has(status(rig), "\"step\":2"));
+        tick(rig, 4340);
+        tick(rig, 4342);
+        tick(rig, 4343);
+        CHECK(rig.queue.state() == QueueState::Done);
+        CHECK(countTxOpcode(0x33) == wrongTargetQueries + 1);
+    }
 }
 
 static void test_trigger_only_sync_parse() {
@@ -1549,8 +1659,10 @@ int main() {
         {"bottle cap cycle preset is accepted without sending", test_bottle_cap_cycle_example_is_accepted},
         {"paused idle Page reads preserve home await and explicit TX", test_paused_page_queries_keep_home_await_and_manual_tx},
         {"await switches from motor 1 to unselected motor 3", test_home_await_switches_to_motor_three},
+        {"manual move await shares multi-axis sample budget", test_manual_move_await_shared_budget},
         {"explicit await syntax, completion, rejection and cancellation", test_explicit_await},
         {"await move does not complete on unchanged target", test_await_move_rejects_unchanged_target_after_ack},
+        {"await move refreshes mismatched target and releases confirmed target queries", test_await_move_refreshes_mismatched_target_until_confirmed},
         {"program validation is atomic and reports source lines", test_program_validation_is_atomic_with_source_lines},
         {"strict numbers, units and raw id/DLC bounds", test_strict_numeric_and_raw_bounds},
         {"rotation distance, rev conversion and direction", test_rotation_distance_and_direction_conversion},
