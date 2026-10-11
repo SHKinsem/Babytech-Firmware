@@ -251,13 +251,13 @@ static void test_product_await_keeps_completion_proof() {
     feedback(motor, 1800, 100); queue.poll(1800); queue.poll(1810);
     assert(queue.state() == QueueState::Done);
 
-    // A later manual run must not inherit the product's larger validity window.
+    // A later manual run must not inherit old product completion samples.
     assert(queue.start(text, std::strlen(text), 1, rotation, 1820).code == 202);
     setMillis(1820); queue.poll(1820);
     setMillis(1830); injectRx(makeAck(1, 0xCD, 2)); motor.poll(false); queue.poll(1830);
     setMillis(1840); injectRx(makeTarget(1, 200)); motor.poll(false);
     feedback(motor, 1850, 200); queue.poll(1850);
-    setMillis(2851); queue.poll(2851); assert(queue.active()); // Manual 1 s expiry resets count.
+    setMillis(2851); queue.poll(2851); assert(queue.active()); // Expired receipt-time samples reset count.
     feedback(motor, 3550, 200); queue.poll(3550); assert(queue.active());
     feedback(motor, 3560, 200); queue.poll(3560); queue.poll(3570);
     assert(queue.state() == QueueState::Done);
@@ -273,7 +273,7 @@ static void test_product_await_keeps_completion_proof() {
     feedback(motor, 9050, 300); queue.poll(9050); assert(queue.active());
     feedback(motor, 9060, 300); queue.poll(9060); queue.poll(9070);
     assert(queue.state() == QueueState::Done);
-    std::cout << "PASS product await preserves target, post-proof, speed, two new pairs and expiry; manual stays 1 s\n";
+    std::cout << "PASS product/manual await preserves target, post-proof, speed, two new pairs and expiry\n";
 }
 
 static void test_product_mm_uses_script_configuration() {

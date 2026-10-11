@@ -1191,6 +1191,43 @@ static void test_syntax_failure_sends_nothing_and_keeps_the_old_run() {
 }
 
 
+static void test_manual_move_await_shared_budget() {
+    QueueRig rig;
+    rig.begin();
+    for (uint8_t id = 1; id <= 5; ++id) rig.motor.demoWatch(id, true);
+    feedStationary(rig, 2, 10, 0);
+    CHECK(startQueue(rig, "move 2 2000 deg 400 1500 1500 500 await\nwait 1", 1, 20).code == 202);
+    tick(rig, 30);
+    injectRx(makeAck(2, 0xCD, 2));
+    tick(rig, 40);
+    injectRx(makeTarget(2, 20000));
+    tick(rig, 50);
+    // Position and velocity arrive more than one second apart on a five-axis bus.
+    setMillis(100);
+    injectRx(makePosition(2, 20000));
+    rig.motor.poll();
+    setMillis(1300);
+    injectRx(makeVelocity(2, 0));
+    tick(rig, 1300);
+    CHECK(has(status(rig), "\"step\":1")); // One pair is not completion.
+    tick(rig, 6000);
+    CHECK(has(status(rig), "waiting_feedback")); // Expired pair cannot complete.
+    setMillis(6100);
+    injectRx(makePosition(2, 20000));
+    rig.motor.poll();
+    setMillis(7300);
+    injectRx(makeVelocity(2, 0));
+    tick(rig, 7300);
+    CHECK(has(status(rig), "\"step\":1"));
+    setMillis(7500);
+    injectRx(makePosition(2, 20000));
+    rig.motor.poll();
+    setMillis(8700);
+    injectRx(makeVelocity(2, 0));
+    tick(rig, 8700);
+    CHECK(has(status(rig), "\"step\":2"));
+}
+
 static void test_explicit_await() {
     QueueRig rig;
     rig.begin();
@@ -1622,6 +1659,7 @@ int main() {
         {"bottle cap cycle preset is accepted without sending", test_bottle_cap_cycle_example_is_accepted},
         {"paused idle Page reads preserve home await and explicit TX", test_paused_page_queries_keep_home_await_and_manual_tx},
         {"await switches from motor 1 to unselected motor 3", test_home_await_switches_to_motor_three},
+        {"manual move await shares multi-axis sample budget", test_manual_move_await_shared_budget},
         {"explicit await syntax, completion, rejection and cancellation", test_explicit_await},
         {"await move does not complete on unchanged target", test_await_move_rejects_unchanged_target_after_ack},
         {"await move refreshes mismatched target and releases confirmed target queries", test_await_move_refreshes_mismatched_target_until_confirmed},
