@@ -463,9 +463,9 @@ void demo_stop_window() {
     CHECK(!r.motor.stopEvidence(2,stopAt,window));
     const auto stamp=hw::now;
     hw::now=stamp+601;
-    CHECK(!r.motor.snapshot(1).positionValid && !r.motor.snapshot(1).velocityValid);
+    CHECK(r.motor.snapshot(1).positionValid && r.motor.snapshot(1).velocityValid);
     uint8_t flags; uint32_t age;
-    CHECK(!r.motor.demoFlags(1,flags,age));
+    CHECK(r.motor.demoFlags(1,flags,age));
     CHECK(r.motor.stopEvidence(1,stopAt,window));
     auto c=r.motor.queries().config(); c.queriesPerSecond=100;c.gapMs=2;c.timeoutMs=20;
     CHECK(r.motor.queries().configure(c));
@@ -486,6 +486,96 @@ void demo_stop_window() {
     hw::now=2;r.feed(1,0,false);hw::frame(1,{0x3A,1,0x6B});r.motor.poll(false);
     CHECK(r.motor.stopEvidence(1,wrappedStop,window));
 }
+void workbench_budget_and_stop() {
+    Rig r;
+    for(uint8_t id=1;id<=5;++id) r.motor.demoWatch(id,true);
+    r.enabled(1);r.enabled(3);
+    CHECK(r.motor.stopAll().code==202);
+    CHECK(r.motor.snapshot(1).stopPending && r.motor.snapshot(3).stopPending);
+    hw::now+=10;hw::position(1);r.motor.poll(false);
+    hw::now+=900;hw::velocity(1);r.motor.poll(false);
+    CHECK(!r.motor.snapshot(1).stopPending);
+    const auto status=std::string(r.motor.statusJson(1).c_str());
+    CHECK(status.find("\"online\":true")!=std::string::npos);
+    CHECK(status.find("\"speedRpm\":0.0")!=std::string::npos);
+    CHECK(r.motor.snapshot(3).stopPending); // Pre-Stop samples never clear it.
+    r.feed(3,30);CHECK(r.motor.snapshot(3).stopPending);
+    r.feed(3);CHECK(!r.motor.operationBusy());
+    const uint32_t stamp=hw::now;
+    hw::now+=5001;
+    CHECK(!r.motor.snapshot(1).positionValid && !r.motor.snapshot(1).velocityValid);
+    CHECK(!r.motor.anyMotorOnline());
+    auto c=r.motor.queries().config();c.queriesPerSecond=1;c.gapMs=1000;c.cooldownMs=1000;
+    CHECK(r.motor.queries().configure(c));
+    CHECK(!r.motor.snapshot(1).positionValid); // Expanding budget cannot revive samples.
+    hw::now=stamp+5002;r.feed(1);CHECK(r.motor.snapshot(1).positionValid);
+}
+void workbench_default_schedule() {
+    Rig r;hw::responseDelay=4;hw::automatic=true;
+    for(uint8_t id=1;id<=5;++id) r.motor.demoWatch(id,true);
+    r.enabled(1);r.enabled(3);CHECK(r.motor.stopAll().code==202);
+    const auto stopAt=hw::now;
+    uint32_t settledAt=0;
+    for(unsigned i=0;i<600;++i) {
+        hw::now+=10;
+        for(uint8_t id=1;id<=5;++id) for(uint8_t field=0;field<4;++field)
+            r.motor.demoProbe(id,field);
+        r.motor.poll();
+        if(!settledAt && !r.motor.operationBusy()) settledAt=hw::now;
+    }
+    CHECK(settledAt && settledAt-stopAt<=3000);CHECK(!r.motor.operationBusy());
+    for(uint8_t id=1;id<=5;++id) {
+        CHECK(r.motor.snapshot(id).positionValid && r.motor.snapshot(id).velocityValid);
+        CHECK(std::string(r.motor.statusJson(id).c_str()).find("\"online\":true")!=std::string::npos);
+    }
+    unchanged_rate();default_budget(r);
+    hw::automatic=false;hw::now+=5001;r.motor.poll(false);
+    CHECK(!r.motor.anyMotorOnline());
+}
+void workbench_single_axis_expiry() {
+    Rig r;r.feed(1);hw::now+=601;
+    CHECK(!r.motor.snapshot(1).positionValid);
+    for(uint8_t id=1;id<=5;++id) r.motor.demoWatch(id,true);
+    CHECK(!r.motor.snapshot(1).positionValid); // Adding axes cannot renew the old sample.
+    r.feed(1);hw::now+=900;CHECK(r.motor.snapshot(1).positionValid);
+    for(uint8_t id=2;id<=5;++id) r.motor.demoWatch(id,false);
+    r.feed(1);hw::now+=601;CHECK(!r.motor.snapshot(1).positionValid);
+    for(uint8_t id=2;id<=5;++id) r.motor.demoWatch(id,true);
+    CHECK(!r.motor.snapshot(1).positionValid); // A newly shortened sample stays expired.
+}
+void workbench_released_history_budget() {
+    Rig r;
+    for(uint8_t id=1;id<=5;++id) r.move(id);
+    CHECK(converge(r,false));CHECK(r.motor.releaseSettledMotion());
+    CHECK(!r.motor.hasUnsettledMotionEvidence());
+    r.prove(4000); // No Demo/Page owner: the five historic axes still consume queries.
+    for(uint8_t id=1;id<=5;++id)
+        CHECK(r.motor.snapshot(id).positionValid && r.motor.snapshot(id).velocityValid);
+    unchanged_rate();default_budget(r);
+    hw::automatic=false;hw::now+=5001;r.motor.poll(false);
+    CHECK(!r.motor.anyMotorOnline());
+}
+void workbench_manual_admission_and_loss() {
+    for(unsigned mode=0;mode<3;++mode) {
+        Rig r;for(uint8_t id=1;id<=5;++id) r.motor.demoWatch(id,true);
+        r.enabled();hw::now+=4500;
+        CHECK(r.motor.snapshot(1).positionValid);
+        if(mode==0) {
+            MoveRequest move{1,10,30,60,60,800};CHECK(r.motor.move(move).code==202);
+        } else if(mode==1) CHECK(r.motor.home(1,2).code==202);
+        else {
+            DirectPositionRequest d;d.id=1;d.speedTenths=300;d.angleTenths=100;d.motionMode=2;
+            CHECK(r.motor.directPosition(d).code==202);
+        }
+        hw::now+=900;
+        hw::frame(1,{uint8_t(mode==0?0xCD:mode==1?0x9A:0xFB),2,0x6B});
+        r.motor.poll(false);CHECK(!r.motor.hasFault());
+        CHECK(!r.motor.snapshot(1).positionValid); // Old samples expire inside the new job's grace.
+        CHECK(r.motor.operationBusy()); // ACK and old zero-speed samples are not completion.
+        hw::now+=5001;r.motor.poll(false);CHECK(r.motor.hasFault());
+        CHECK(r.motor.snapshot(1).stopPending); // Missing feedback still stops the supervisor.
+    }
+}
 int main() {
     struct Case {const char* name;void(*run)();};
     const Case cases[]={{"harmless/held-enable",harmless},{"inherit/reset/raw/owner",inheritance},
@@ -503,7 +593,12 @@ int main() {
         {"window expansion cannot revive and 600ms minimum",expansion_and_minimum},
         {"receipt TTL survives shrink but expiry survives expansion",shrink_expand_receipt},
         {"millis wrap/zero Stop",wrap},{"actual queue lifecycle",queue_lifecycle},
-        {"Demo Stop budget frozen/bounded/post-Stop only",demo_stop_window}};
+        {"Demo Stop budget frozen/bounded/post-Stop only",demo_stop_window},
+        {"workbench budget and ordered stationary Stop",workbench_budget_and_stop},
+        {"workbench five-axis default schedule",workbench_default_schedule},
+        {"workbench single-axis expiry and no revival",workbench_single_axis_expiry},
+        {"workbench released history uses actual query budget",workbench_released_history_budget},
+        {"manual move/home/direct budget and feedback loss",workbench_manual_admission_and_loss}};
     unsigned failed=0;
     for(const auto& test:cases) {
         try {test.run();std::cout<<"PASS "<<test.name<<'\n';}

@@ -8,7 +8,7 @@
 namespace motion {
 namespace {
 
-// Feedback is considered fresh for this long after the frame arrived.
+// Single-axis/current feedback lifetime; multi-axis samples freeze a budget on RX.
 constexpr uint32_t kFeedbackFreshMs = 600;
 // How long an enable or a move acknowledgement may take before it is treated
 // as missing. Neither timeout ever implies success.
@@ -282,6 +282,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
         node.homeFlagsValid = true;
         node.homeFlags = frame.data[1];
         node.homeFlagsMs = now;
+        node.homeFlagsFreshMs = feedbackEvidenceWindow();
         if (id == queueObserveId_ && node.queueExpectedFunction == kFrameHome) {
             if (node.homeFlags & 0x38) node.queueHomeFailed = true;
             if (node.homeFlags & 4) {
@@ -326,17 +327,20 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.positionTenths = sample.value;
             node.positionMs = now;
             node.demoPositionFreshMs = demoEvidenceWindow();
+            node.positionFreshMs = feedbackEvidenceWindow();
             break;
         case FeedbackField::Target:
             node.targetValid = true;
             node.targetTenths = sample.value;
             node.targetMs = now;
+            node.targetFreshMs = feedbackEvidenceWindow();
             break;
         case FeedbackField::Velocity:
             node.velocityValid = true;
             node.velocityTenths = sample.value;
             node.velocityMs = now;
             node.demoVelocityFreshMs = demoEvidenceWindow();
+            node.velocityFreshMs = feedbackEvidenceWindow();
             break;
         case FeedbackField::Current:
             node.currentValid = true;
@@ -348,6 +352,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.flags = static_cast<uint8_t>(sample.value);
             node.flagsMs = now;
             node.demoFlagsFreshMs = demoEvidenceWindow();
+            node.flagsFreshMs = feedbackEvidenceWindow();
             // A real disabled flag invalidates an old software confirmation.
             if (!(node.flags & 1)) node.enableConfirmed = false;
             if (node.enablePending && node.enableAck &&
@@ -409,7 +414,7 @@ void MotorControl::handleAck(
             // F3 02 means accepted, not actual enable. Require a post-request
             // 3A flag too; it may have arrived before this acknowledgement.
             if (node.flagsValid && isStrictlyNewerThan(node.flagsMs, node.enablePendingMs) &&
-                ageWithin(now, node.flagsMs, kFeedbackFreshMs) &&
+                ageWithin(now, node.flagsMs, node.flagsFreshMs) &&
                 bool(node.flags & 1) == node.enableDesired) {
                 node.enableConfirmed = node.enableDesired;
                 node.enablePending = false;
@@ -470,7 +475,7 @@ void MotorControl::handleAck(
 
 bool MotorControl::freshPosition(uint8_t id, uint32_t now, int32_t& out) const {
     const NodeState& node = nodes_[id];
-    if (!node.positionValid || !ageWithin(now, node.positionMs, kFeedbackFreshMs)) {
+    if (!node.positionValid || !ageWithin(now, node.positionMs, node.positionFreshMs)) {
         return false;
     }
     out = node.positionTenths;
@@ -479,7 +484,7 @@ bool MotorControl::freshPosition(uint8_t id, uint32_t now, int32_t& out) const {
 
 bool MotorControl::freshVelocity(uint8_t id, uint32_t now, int32_t& out) const {
     const NodeState& node = nodes_[id];
-    if (!node.velocityValid || !ageWithin(now, node.velocityMs, kFeedbackFreshMs)) {
+    if (!node.velocityValid || !ageWithin(now, node.velocityMs, node.velocityFreshMs)) {
         return false;
     }
     out = node.velocityTenths;
@@ -488,7 +493,7 @@ bool MotorControl::freshVelocity(uint8_t id, uint32_t now, int32_t& out) const {
 
 bool MotorControl::freshTarget(uint8_t id, uint32_t now, int32_t& out) const {
     const NodeState& node = nodes_[id];
-    if (!node.targetValid || !ageWithin(now, node.targetMs, kFeedbackFreshMs)) {
+    if (!node.targetValid || !ageWithin(now, node.targetMs, node.targetFreshMs)) {
         return false;
     }
     out = node.targetTenths;
@@ -517,7 +522,7 @@ void MotorControl::armTargetPoll(uint8_t id, uint32_t now) {
 
 bool MotorControl::freshHomeFlags(uint8_t id, uint32_t now, uint8_t& out) const {
     const NodeState& node = nodes_[id];
-    if (!node.homeFlagsValid || !ageWithin(now, node.homeFlagsMs, kFeedbackFreshMs)) {
+    if (!node.homeFlagsValid || !ageWithin(now, node.homeFlagsMs, node.homeFlagsFreshMs)) {
         return false;
     }
     out = node.homeFlags;
@@ -528,8 +533,8 @@ bool MotorControl::stationaryFeedback(
     uint8_t id, uint32_t now, uint32_t sinceMs) const {
     const NodeState& node = nodes_[id];
     if (!node.positionValid || !node.velocityValid) return false;
-    if (!ageWithin(now, node.positionMs, kFeedbackFreshMs)) return false;
-    if (!ageWithin(now, node.velocityMs, kFeedbackFreshMs)) return false;
+    if (!ageWithin(now, node.positionMs, node.positionFreshMs)) return false;
+    if (!ageWithin(now, node.velocityMs, node.velocityFreshMs)) return false;
     // A confirmation needs samples that strictly follow the request; a frame
     // that arrived in the same millisecond is not proof of the new state.
     if (sinceMs != 0 && !isStrictlyNewerThan(node.positionMs, sinceMs)) return false;
@@ -619,7 +624,7 @@ void MotorControl::serviceJob(uint32_t now) {
     // been silent past the grace window the job is a fault, not something to
     // ride out.
     if (!(posFresh && velFresh) &&
-        !ageWithin(now, job_.startMs, kFeedbackFreshMs)) {
+        !ageWithin(now, job_.startMs, job_.feedbackGraceMs)) {
         failJob(kFaultFeedbackStale, now);
         return;
     }
@@ -691,7 +696,7 @@ void MotorControl::serviceHome(uint32_t now) {
     // Same grace rule as a move: once position and velocity have both been
     // silent past the window, the supervised run is a fault, not something to
     // ride out.
-    if (!(posFresh && velFresh) && !ageWithin(now, home_.startMs, kFeedbackFreshMs)) {
+    if (!(posFresh && velFresh) && !ageWithin(now, home_.startMs, home_.feedbackGraceMs)) {
         failHome(kFaultFeedbackStale, now);
         return;
     }
@@ -727,7 +732,7 @@ void MotorControl::serviceHome(uint32_t now) {
             home_.stoppedMs = node.homeFlagsMs;
         }
     } else if (home_.completedMs == 0 && home_.ackSeen &&
-               !ageWithin(now, home_.startMs, kFeedbackFreshMs)) {
+               !ageWithin(now, home_.startMs, home_.feedbackGraceMs)) {
         // An acknowledged run with no homing status evidence cannot be judged:
         // fail instead of riding the deadline out. The explicit 9A/9F completion
         // is the only path that does not need 0x3B at all.
@@ -1171,6 +1176,7 @@ Result MotorControl::move(const MoveRequest& request) {
             : static_cast<uint32_t>(kTargetToleranceTenths));
     job_.expectedDurationMs = plan.expectedDurationMs;
     job_.startMs = now;
+    job_.feedbackGraceMs = feedbackEvidenceWindow();
     job_.deadlineMs = limits_.maxMoveDurationMs;
     job_.ackSeen = false;
     job_.doneUpdates = 0;
@@ -1307,6 +1313,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     }
     job_.expectedDurationMs = resolved.expectedDurationMs;
     job_.startMs = now;
+    job_.feedbackGraceMs = feedbackEvidenceWindow();
     // The configured policy duration is the deadline, not an invented ramp: the
     // driver plans this motion itself, so there is no acceleration profile here
     // to derive a tighter one from.
@@ -1380,6 +1387,7 @@ Result MotorControl::home(uint8_t id, uint8_t mode) {
     home_ = HomeJob{};
     home_.active = true;
     home_.startMs = now;
+    home_.feedbackGraceMs = feedbackEvidenceWindow();
     // Configured budget, not a new hardcoded timeout.
     home_.deadlineMs = limits_.maxMoveDurationMs;
     home_.lastDonePosMs = now;
@@ -1760,9 +1768,9 @@ String MotorControl::statusJson(uint8_t id) const {
     const uint32_t now = millis();
     const NodeState& node = nodes_[id];
     const bool posFresh =
-        node.positionValid && ageWithin(now, node.positionMs, kFeedbackFreshMs);
+        node.positionValid && ageWithin(now, node.positionMs, node.positionFreshMs);
     const bool velFresh =
-        node.velocityValid && ageWithin(now, node.velocityMs, kFeedbackFreshMs);
+        node.velocityValid && ageWithin(now, node.velocityMs, node.velocityFreshMs);
     const bool curFresh =
         node.currentValid && ageWithin(now, node.currentMs, kFeedbackFreshMs);
 
@@ -1827,7 +1835,7 @@ String MotorControl::statusJson(uint8_t id) const {
         json += "null";
     }
     json += ",\"driverFlags\":";
-    const bool flagsFresh = node.flagsValid && ageWithin(now, node.flagsMs, kFeedbackFreshMs);
+    const bool flagsFresh = node.flagsValid && ageWithin(now, node.flagsMs, node.flagsFreshMs);
     if (flagsFresh) json += static_cast<unsigned int>(node.flags); else json += "null";
     json += ",\"driverEnabled\":";
     json += flagsFresh ? ((node.flags & 1) ? "true" : "false") : "null";
@@ -1844,7 +1852,7 @@ String MotorControl::statusJson(uint8_t id) const {
     json += ",\"homeMode\":";
     if (homeId_ != 0) json += static_cast<unsigned int>(homeMode_); else json += "null";
     const bool homeFreshFlags =
-        node.homeFlagsValid && ageWithin(now, node.homeFlagsMs, kFeedbackFreshMs);
+        node.homeFlagsValid && ageWithin(now, node.homeFlagsMs, node.homeFlagsFreshMs);
     json += ",\"homeOrg\":";
     if (homeFreshFlags) json += static_cast<unsigned int>(node.homeFlags); else json += "null";
     json += ",\"homeRunning\":";
@@ -1925,7 +1933,7 @@ bool MotorControl::demoFlags(uint8_t id, uint8_t& flags, uint32_t& age) const {
     const auto& n = nodes_[id];
     age = n.flagsValid ? millis() - n.flagsMs : UINT32_MAX;
     flags = n.flags;
-    return n.flagsValid && age <= kFeedbackFreshMs;
+    return n.flagsValid && age <= n.flagsFreshMs;
 }
 
 MotorControl::Snapshot MotorControl::snapshot(uint8_t id) const {
@@ -1935,8 +1943,8 @@ MotorControl::Snapshot MotorControl::snapshot(uint8_t id) const {
     s.positionAge=n.positionValid ? now-n.positionMs : UINT32_MAX;
     s.velocityAge=n.velocityValid ? now-n.velocityMs : UINT32_MAX;
     s.currentAge=n.currentValid ? now-n.currentMs : UINT32_MAX;
-    s.positionValid=n.positionValid && s.positionAge<=kFeedbackFreshMs;
-    s.velocityValid=n.velocityValid && s.velocityAge<=kFeedbackFreshMs;
+    s.positionValid=n.positionValid && s.positionAge<=n.positionFreshMs;
+    s.velocityValid=n.velocityValid && s.velocityAge<=n.velocityFreshMs;
     s.currentValid=n.currentValid && s.currentAge<=kFeedbackFreshMs;
     s.position=n.positionTenths; s.velocity=n.velocityTenths; s.current=n.currentMa;
     s.enabled=n.enableConfirmed; s.enablePending=n.enablePending;
@@ -2045,6 +2053,25 @@ void MotorControl::finishEvidenceTx(bool complete) {
         }
     }
     evidenceTx_ = EvidenceTransmission{};
+}
+
+uint16_t MotorControl::feedbackEvidenceWindow() const {
+    const bool controlPending = hasUnsettledMotionEvidence();
+    uint8_t first = 0;
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        const auto& n = nodes_[id];
+        const bool physicalQueried = controlPending ? physical_[id].controlPending : physical_[id].affected;
+        if (!demoWatched_[id] && !physicalQueried &&
+            !(autoQueriesEnabled_ && selectedId_ == id) &&
+            !(job_.active && job_.id == id) && !(home_.active && homeId_ == id) &&
+            !n.stopRequested && !n.enablePending) continue;
+        // Match serviceQueries: after control settles, historical affected axes
+        // are still queried for OTA evidence and consume the shared budget.
+        if (first) return physicalEvidenceWindow(!controlPending);
+        first = static_cast<uint8_t>(id);
+    }
+    // Single-axis debugging keeps its original fast feedback requirement.
+    return kFeedbackFreshMs;
 }
 
 uint16_t MotorControl::physicalEvidenceWindow(bool ota) const {
@@ -2178,7 +2205,7 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
     NodeState& node = nodes_[id];
     if (kind == CommandKind::Configure) {
         if (hasActiveMotion() || !stationaryFeedback(id, millis(), 0) ||
-            !node.flagsValid || !ageWithin(millis(), node.flagsMs, kFeedbackFreshMs) || (node.flags & 1))
+            !node.flagsValid || !ageWithin(millis(), node.flagsMs, node.flagsFreshMs) || (node.flags & 1))
             return Result{409, "disable_and_wait_for_stationary_feedback"};
     }
     if (kind == CommandKind::Experiment) {
@@ -2292,8 +2319,8 @@ bool MotorControl::anyMotorOnline() const {
     for (uint16_t id = 1; id < kNodeCount; ++id) {
         const NodeState& node = nodes_[id];
         if (!node.positionValid || !node.velocityValid) continue;
-        if (!ageWithin(now, node.positionMs, kFeedbackFreshMs)) continue;
-        if (!ageWithin(now, node.velocityMs, kFeedbackFreshMs)) continue;
+        if (!ageWithin(now, node.positionMs, node.positionFreshMs)) continue;
+        if (!ageWithin(now, node.velocityMs, node.velocityFreshMs)) continue;
         return true;
     }
     return false;

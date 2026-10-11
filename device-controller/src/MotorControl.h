@@ -276,16 +276,19 @@ private:
         int32_t positionTenths = 0;
         uint32_t positionMs = 0;
         uint16_t demoPositionFreshMs = 600;
+        uint16_t positionFreshMs = 600;
 
         bool velocityValid = false;
         int32_t velocityTenths = 0;
         uint32_t velocityMs = 0;
         uint16_t demoVelocityFreshMs = 600;
+        uint16_t velocityFreshMs = 600;
 
         bool flagsValid = false;
         uint8_t flags = 0;
         uint32_t flagsMs = 0;
         uint16_t demoFlagsFreshMs = 600;
+        uint16_t flagsFreshMs = 600;
 
         // 0x3B homing status byte (bit0 encoder ready, bit1 calibration ready,
         // bit2 homing running, bit3 homing failed, bit4 over-temp, bit5
@@ -294,6 +297,7 @@ private:
         bool homeFlagsValid = false;
         uint8_t homeFlags = 0;
         uint32_t homeFlagsMs = 0;
+        uint16_t homeFlagsFreshMs = 600;
 
         bool currentValid = false;
         uint16_t currentMa = 0;
@@ -308,6 +312,7 @@ private:
         bool targetValid = false;
         int32_t targetTenths = 0;
         uint32_t targetMs = 0;
+        uint16_t targetFreshMs = 600;
 
         bool enableConfirmed = false;
         bool enableDesired = false;
@@ -345,6 +350,7 @@ private:
         int32_t toleranceTenths = 0;
         uint32_t expectedDurationMs = 0;
         uint32_t startMs = 0;
+        uint16_t feedbackGraceMs = 600;
         uint32_t deadlineMs = 0;
         bool ackSeen = false;
         // Direct (FB/CB) jobs additionally prove completion with the driver's own
@@ -370,6 +376,7 @@ private:
     bool sendHomeInterrupt(uint8_t id);
 
     // Feedback helpers.
+    uint16_t feedbackEvidenceWindow() const;
     bool freshPosition(uint8_t id, uint32_t now, int32_t& out) const;
     bool freshVelocity(uint8_t id, uint32_t now, int32_t& out) const;
     // Fresh 0x33 target sample of the driver, or false when none arrived in the
@@ -450,6 +457,7 @@ private:
     struct HomeJob {
         bool active = false;
         uint32_t startMs = 0;
+        uint16_t feedbackGraceMs = 600;
         // Duration budget taken from the configured limits (no extra hardcoded
         // timeout); it is a duration, compared wrap-safely against startMs.
         uint32_t deadlineMs = 0;

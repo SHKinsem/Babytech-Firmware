@@ -146,12 +146,12 @@ static void test_default_five_axis_flow_stop() {
         if (id < 5) assert(flow.busy());
     }
     assert(!flow.busy() && std::strcmp(flow.reason(), "stopped") == 0);
-    assert(executor.stopConfirmed() && !motor.snapshot(1).positionValid);
+    assert(executor.stopConfirmed() && motor.snapshot(1).positionValid);
     assert(executor.evidence(1).fresh && executor.stopEvidence(1).fresh);
     assert(flow.stationary()); // Product readiness shares the frozen post-Stop budget.
     assert(motor.queries().config().queriesPerSecond == 10);
     setMillis(6000); assert(!executor.stopConfirmed());
-    std::cout << "PASS actual five-axis Flow Stop and readiness use bounded proof, manual feedback stays 600 ms\n";
+    std::cout << "PASS actual five-axis Flow Stop and workbench share bounded feedback proof\n";
 }
 
 static void test_default_five_axis_readiness() {
@@ -185,12 +185,11 @@ static void test_default_five_axis_readiness() {
     };
     runUntil(4000);
     assert(flow.referenceValid() && flow.startEnabled() && flow.stationary());
-    bool ordinaryExpired = false;
     for (uint8_t id = 1; id <= 5; ++id) {
         assert(executor.evidence(id).fresh);
-        ordinaryExpired = ordinaryExpired || !motor.snapshot(id).positionValid;
+        assert(motor.snapshot(id).positionValid && motor.snapshot(id).velocityValid);
     }
-    assert(ordinaryExpired && motor.queries().config().queriesPerSecond == 10);
+    assert(motor.queries().config().queriesPerSecond == 10);
     for (const auto& frame : capturedTX) assert(frame.length == 2); // No fabricated movement.
     missingId = 5; runUntil(11000); assert(!flow.stationary());
     missingId = 0; runUntil(15000); assert(flow.stationary());
