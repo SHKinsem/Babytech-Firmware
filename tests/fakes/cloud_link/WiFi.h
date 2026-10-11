@@ -8,6 +8,9 @@ constexpr int WIFI_STA = 1;
 constexpr int WIFI_AP_STA = 3;
 constexpr int WIFI_AUTH_OPEN = 0;
 constexpr int WIFI_AUTH_WPA_PSK = 2;
+constexpr int WIFI_SCAN_RUNNING = -1;
+constexpr int WIFI_SCAN_FAILED = -2;
+struct FakeNetwork { std::string ssid; int32_t rssi; int encryption = WIFI_AUTH_WPA_PSK; };
 struct FakeWiFiCall {
     std::string method;
     bool worker;
@@ -20,6 +23,15 @@ public:
     int status() const;
     IPAddress softAPIP() const { return IPAddress(0xC0A80401); }
     String SSID() const;
+    String SSID(uint8_t index) const;
+    int32_t RSSI(uint8_t index) const;
+    int encryptionType(uint8_t index) const;
+    int scanNetworks(bool async);
+    int scanComplete() const;
+    void scanDelete();
+    int scanStartResult = WIFI_SCAN_RUNNING;
+    int scanResult = WIFI_SCAN_RUNNING;
+    std::vector<FakeNetwork> networks;
     IPAddress localIP() const;
     void persistent(bool enabled);
     void setAutoReconnect(bool enabled);

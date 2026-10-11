@@ -4,6 +4,9 @@
 #include "CloudLink.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include <algorithm>
+#include <memory>
+#include <new>
 
 namespace babytech { namespace brain {
 namespace {
@@ -25,6 +28,19 @@ bool portNumber(const String& value, uint16_t& output) {
     if (!number || number > 65535) return false;
     output = uint16_t(number);
     return true;
+}
+String htmlValue(const char* value) {
+    String escaped;
+    for (; *value; ++value) {
+        switch (*value) {
+        case '&': escaped += "&amp;"; break;
+        case '"': escaped += "&quot;"; break;
+        case '<': escaped += "&lt;"; break;
+        case '>': escaped += "&gt;"; break;
+        default: { const char character[] = {*value, 0}; escaped += character; }
+        }
+    }
+    return escaped;
 }
 }
 
@@ -104,6 +120,82 @@ void BrainPortal::status() {
     server_.send(200, "application/json", body);
 }
 
+void BrainPortal::page() {
+    if (!localRequest()) return;
+    PortalInfo info;
+    if (!state_.snapshot(info)) { reply(503, "busy"); return; }
+    String body = kBrainPortalPage;
+    body.replace("{{DEVICE_ID}}", htmlValue(info.deviceId));
+    body.replace("{{PAIRING_CODE}}", htmlValue(info.developmentCode));
+    server_.send(200, "text/html", body);
+}
+
+void BrainPortal::networks() {
+    if (!localRequest()) return;
+    if (scanState_ != ScanState::Running && scanState_ != ScanState::TimedOut &&
+        (scanState_ == ScanState::Idle || server_.arg("refresh") == "1")) {
+        networkCount_ = 0;
+        const int result = WiFi.scanNetworks(true);
+        scanState_ = result == WIFI_SCAN_FAILED ? ScanState::Failed : ScanState::Running;
+    }
+    updateScan();
+    if (scanState_ == ScanState::Running) { reply(202, "scanning"); return; }
+    if (scanState_ == ScanState::Failed || scanState_ == ScanState::TimedOut) { reply(503, "scan_failed"); return; }
+    DynamicJsonDocument document(4096);
+    document["result"] = "ready";
+    auto list = document.createNestedArray("networks");
+    for (size_t n = 0; n < networkCount_; ++n) {
+        auto network = list.createNestedObject();
+        network["ssid"] = networks_[n].ssid;
+        network["rssi"] = networks_[n].rssi;
+        network["open"] = networks_[n].open;
+    }
+    if (document.overflowed()) { reply(503, "scan_unavailable"); return; }
+    const size_t capacity = measureJson(document) + 1;
+    std::unique_ptr<char[]> body(new (std::nothrow) char[capacity]);
+    if (!body) { reply(503, "scan_unavailable"); return; }
+    serializeJson(document, body.get(), capacity);
+    server_.send(200, "application/json", body.get());
+}
+
+void BrainPortal::updateScan() {
+    if (scanState_ == ScanState::Running || scanState_ == ScanState::TimedOut) {
+        const int count = WiFi.scanComplete();
+        // SDK timeout does not stop its callback. Do not restart/free that scan until it finishes.
+        if (count == WIFI_SCAN_FAILED) scanState_ = ScanState::TimedOut;
+        else if (count >= 0) {
+            if (!state_.active()) {
+                WiFi.scanDelete();
+                scanState_ = ScanState::Idle;
+                return;
+            }
+            // Keep the strongest distinct visible networks; no radio calls from the UI task.
+            // SDK per-network accessors take uint8_t; never wrap back to record zero.
+            for (int n = 0; n < std::min(count, 256); ++n) {
+                Network network;
+                if (!field(WiFi.SSID(n), network.ssid) || !network.ssid[0]) continue;
+                network.rssi = WiFi.RSSI(n);
+                network.open = WiFi.encryptionType(n) == WIFI_AUTH_OPEN;
+                size_t index = 0;
+                while (index < networkCount_ && std::strcmp(networks_[index].ssid, network.ssid)) ++index;
+                if (index < networkCount_) {
+                    if (network.rssi <= networks_[index].rssi) continue;
+                } else if (networkCount_ < 16) ++networkCount_;
+                else {
+                    index = networkCount_ - 1;
+                    if (network.rssi <= networks_[index].rssi) continue;
+                }
+                networks_[index] = network;
+                std::sort(networks_, networks_ + networkCount_, [](const Network& a, const Network& b) {
+                    return a.rssi > b.rssi;
+                });
+            }
+            WiFi.scanDelete();
+            scanState_ = ScanState::Ready;
+        }
+    }
+}
+
 void BrainPortal::save(PortalSave kind) {
     if (!localRequest()) return;
     // A custom header prevents cross-origin browser form POSTs (no CORS grant).
@@ -121,8 +213,9 @@ void BrainPortal::save(PortalSave kind) {
 void BrainPortal::routes() {
     const char* headers[] = {"X-Babytech-Portal"};
     server_.collectHeaders(headers, 1);
-    server_.on("/", HTTP_GET, [this] { if (localRequest()) server_.send_P(200, "text/html", kBrainPortalPage); });
+    server_.on("/", HTTP_GET, [this] { page(); });
     server_.on("/api/status", HTTP_GET, [this] { status(); });
+    server_.on("/api/networks", HTTP_GET, [this] { networks(); });
     server_.on("/api/wifi", HTTP_POST, [this] { save(PortalSave::Wifi); });
     server_.on("/api/mqtt", HTTP_POST, [this] { save(PortalSave::Mqtt); });
     server_.onNotFound([this] {
@@ -135,6 +228,7 @@ void BrainPortal::routes() {
 
 void BrainPortal::service(BrainStation& station, bool mqttConnected) {
     if (!enabled_.load() || !station.credentialsKnown()) return;
+    updateScan();
     wifiConnected_ = station.connected();
     mqttConnected_ = mqttConnected;
     const auto action = state_.action(station.hasCredentials(), wifiConnected_, millis());
@@ -153,6 +247,10 @@ void BrainPortal::service(BrainStation& station, bool mqttConnected) {
     } else if (action == BrainPortalState::Action::Stop) {
         server_.stop();
         dns_.stop();
+        // scanDelete frees SDK callback-owned memory; only do so after scanComplete succeeds.
+        // Closing AP need not wait: the network task finishes cleanup even without an HTTP client.
+        if (scanState_ == ScanState::Ready) scanState_ = ScanState::Idle;
+        networkCount_ = 0;
         WiFi.softAPdisconnect(false);
         station.provisioningAp(false);
         state_.stopped();

@@ -98,6 +98,12 @@ void FakeWiFi::record(const char* method, int first, int second) const {
 }
 int FakeWiFi::status() const { record("status"); return state; }
 String FakeWiFi::SSID() const { record("SSID"); return String(ssid); }
+String FakeWiFi::SSID(uint8_t index) const { record("scanSSID"); return String(networks.at(index).ssid); }
+int32_t FakeWiFi::RSSI(uint8_t index) const { record("scanRSSI"); return networks.at(index).rssi; }
+int FakeWiFi::encryptionType(uint8_t index) const { record("scanEncryption"); return networks.at(index).encryption; }
+int FakeWiFi::scanNetworks(bool async) { record("scanStart", async); return scanStartResult; }
+int FakeWiFi::scanComplete() const { record("scanComplete"); return scanResult; }
+void FakeWiFi::scanDelete() { record("scanDelete"); }
 IPAddress FakeWiFi::localIP() const { record("localIP"); return address; }
 void FakeWiFi::persistent(bool enabled) { record("persistent", enabled); }
 void FakeWiFi::setAutoReconnect(bool enabled) { record("autoReconnect", enabled); }

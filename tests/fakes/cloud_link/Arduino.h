@@ -28,6 +28,15 @@ public:
     }
     String& operator+=(const char* value) { value_ += value; return *this; }
     String& operator+=(const String& value) { value_ += value.value_; return *this; }
+    void replace(const char* from, const String& to) {
+        const size_t length = std::strlen(from);
+        if (!length) return;
+        size_t at = 0;
+        while ((at = value_.find(from, at)) != std::string::npos) {
+            value_.replace(at, length, to.value_);
+            at += to.value_.size();
+        }
+    }
     template <typename T, typename = typename std::enable_if<std::is_integral<T>::value>::type>
     String& operator+=(T value) { value_ += std::to_string(value); return *this; }
 private:
