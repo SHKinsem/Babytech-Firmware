@@ -739,6 +739,7 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     program_ = scratch;
     runSyncSettings_ = syncSettings_;
     strictHome_ = false;
+    startSettled_ = false;
     programHash_=2166136261u;
     for(size_t i=0;i<length;++i) programHash_=(programHash_^uint8_t(text[i]))*16777619u;
     sync_.reset();
@@ -812,6 +813,7 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
     program_ = program;
     runSyncSettings_ = settingsForRun;
     strictHome_ = true;
+    startSettled_ = false;
     sync_.reset();
     programHash_ = 0;  // Demo programs have no DSL source text.
     motionComplete_ = false;
@@ -887,6 +889,7 @@ void CommandQueue::fail(uint32_t now, const char* reason, uint16_t line) {
 }
 
 void CommandQueue::advance(uint32_t now) {
+    startSettled_ = false;
     motor_.queueObserveId_ = 0;
     motor_.queries_.release(CanQueryScheduler::Await);
     ++stepIndex_;
@@ -1124,7 +1127,25 @@ void CommandQueue::beginStep(uint32_t now) {
         int32_t position = 0, velocity = 0;
         const bool positionFresh = motor_.freshPosition(step.id, now, position);
         const bool velocityFresh = motor_.freshVelocity(step.id, now, velocity);
-        if (!positionFresh || !velocityFresh || velocity < -5 || velocity > 5) {
+        const auto& node = motor_.nodes_[step.id];
+        const auto& evidence = motor_.physical_[step.id];
+        // A timed torque/velocity stop may leave a fresh but still-moving position
+        // cached. Resolve the next relative target only from post-stop settled data.
+        const bool needsSettledStart = !step.absolute && evidence.stopSubmitted;
+        if (needsSettledStart) {
+            if (!velocityFresh || velocity < -5 || velocity > 5 ||
+                int32_t(node.velocityMs - evidence.stopAt) <= 0) startSettled_ = false;
+            else if (!startSettled_) {
+                startSettled_ = true;
+                startSettledAt_ = node.velocityMs;
+            }
+        }
+        // Frames drained together share a timestamp. Latch zero speed once, then
+        // require a later position update rather than chasing each velocity poll.
+        const bool settledStart = !needsSettledStart ||
+            (startSettled_ && int32_t(node.positionMs - evidence.stopAt) > 0 &&
+             int32_t(node.positionMs - startSettledAt_) > 0);
+        if (!positionFresh || !velocityFresh || velocity < -5 || velocity > 5 || !settledStart) {
             motor_.queries_.demand(step.id, 0x36, CanQueryScheduler::Await, 150, 1000, 2, now);
             motor_.queries_.demand(step.id, 0x35, CanQueryScheduler::Await, 150, 1000, 2, now);
             setMessage(positionFresh && velocityFresh ? "waiting_move_stationary" :
