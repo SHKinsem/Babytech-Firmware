@@ -14,6 +14,7 @@ USB adapters/drivers may still reset a board on open. No production commands.
 import argparse
 import getpass
 import importlib.util
+import math
 from pathlib import Path
 import re
 import sys
@@ -73,12 +74,34 @@ def mqtt_command(host, port, user, password):
     return f"NET MQTT {host_hex} {port} {user_hex} {password_hex}\n".encode("ascii")
 
 
+def _read_only_query(port, command, prefix, stage, *, timeout, clock):
+    """USB open may reset the board and drop an early query; only reads are repeated."""
+    timeout = _capture._timeout(timeout)
+    deadline = clock() + timeout
+    transport = _capture._Transport(port, timeout, clock)
+    for attempt in range(math.ceil(timeout) + 1):
+        if clock() >= deadline:
+            break
+        transport.deadline = min(deadline, clock() + 1)
+        transport.calls = 0
+        try:
+            transport.send((b"\n" if attempt else b"") + command)
+            while True:
+                line = transport.line().removesuffix(b"\r")
+                if line.startswith(prefix):
+                    return line
+        except _capture.CaptureError:
+            continue
+    raise ConfigureError(f"No complete reply during {stage}; this was a read-only query.")
+
+
 def configure(port, command, *, timeout=15, clock=time.monotonic, sleep=time.sleep):
     """Write one prepared command. Fake-port testable; never echo serial logs.
 
     64-byte/10ms pacing matches the firmware's 64-byte/poll bounded reader.
     Best-effort END follows any acknowledged BEGIN, including save failures.
     A timeout cannot prove whether a write persisted; do not claim rollback.
+    Timeout is per status/entry/save stage, not aggregate; cleanup gets 3 s.
     """
     if not isinstance(command, bytes) or len(command) > 767 or command.count(b"\n") != 1 or not command.endswith(b"\n") or b"\r" in command:
         raise ConfigureError("Invalid command.")
@@ -88,9 +111,17 @@ def configure(port, command, *, timeout=15, clock=time.monotonic, sleep=time.sle
         expected = b"[network] mqtt_saved"
     else:
         raise ConfigureError("Invalid command.")
-    transport = _capture._Transport(port, _capture._timeout(timeout), clock)
+    timeout = _capture._timeout(timeout)
+    port.reset_input_buffer()
+    status = _read_only_query(port, b"NET STATUS\n", b"[network] brain_", "network status check",
+                              timeout=timeout, clock=clock)
+    if status not in (b"[network] brain_ready", b"[network] brain_unpaired"):
+        raise ConfigureError("Unsupported network status; no setting was written.")
+    transport = _capture._Transport(port, timeout, clock)
 
-    def exchange(data, expected_lines, stage, rejected=()):
+    def exchange(data, expected_lines, stage, rejected=(), budget=None):
+        transport.deadline = clock() + (timeout if budget is None else budget)
+        transport.calls = transport.received = 0
         for offset in range(0, len(data), 64):
             transport.send(data[offset:offset + 64])
             if offset + 64 < len(data):
@@ -105,8 +136,6 @@ def configure(port, command, *, timeout=15, clock=time.monotonic, sleep=time.sle
             if line in rejected:
                 raise ConfigureError(f"Board rejected {stage}.")
 
-    port.reset_input_buffer()
-    exchange(b"NET STATUS\n", (b"[network] brain_ready", b"[network] brain_unpaired"), "network status check")
     saved = False
     failure = None
     released = False
@@ -123,11 +152,9 @@ def configure(port, command, *, timeout=15, clock=time.monotonic, sleep=time.sle
     finally:
         # New budget, preserving buffered replies. END is cleanup, not a retry
         # of an uncertain credential write. Never send the setting twice.
-        transport.deadline = clock() + 3
-        transport.calls = 0
         try:
             exchange(b"\nMAINT END\n", (b"[maint] inactive",), "maintenance release",
-                     (b"[maint] unsafe", b"[maint] busy"))
+                     (b"[maint] unsafe", b"[maint] busy"), budget=3)
             released = True
         except (ConfigureError, _capture.CaptureError, OSError):
             pass
@@ -147,29 +174,25 @@ def configure(port, command, *, timeout=15, clock=time.monotonic, sleep=time.sle
 
 def inspect_network(port, *, timeout=5, clock=time.monotonic):
     """Read-only status and diagnostics. Never enters maintenance or saves."""
-    transport = _capture._Transport(port, _capture._timeout(timeout), clock)
+    timeout = _capture._timeout(timeout)
     result = {}
     port.reset_input_buffer()
     for command, prefix, key in ((b"NET STATUS\n", b"[network] brain_", "status"),
                                  (b"NET DIAG\n", b"[network] diag ", "diagnostics")):
-        transport.send(command)
-        while True:
-            line = transport.line().removesuffix(b"\r")
-            if line.startswith(prefix):
-                if key == "status":
-                    if line not in (b"[network] brain_ready", b"[network] brain_unpaired"):
-                        raise ConfigureError("Unsupported network status.")
-                    result[key] = line.decode().split()[-1]
-                else:
-                    try:
-                        fields = line[len(prefix):].decode("ascii").split()
-                        values = dict(field.split("=", 1) for field in fields)
-                        if len(fields) != 7 or set(values) != {"wifi", "cfg", "mqtt", "state", "n", "ok", "fail"}:
-                            raise ValueError
-                        result[key] = {name: int(value) for name, value in values.items()}
-                    except (ValueError, UnicodeError):
-                        raise ConfigureError("Unsupported network diagnostics.") from None
-                break
+        line = _read_only_query(port, command, prefix, "network " + key + " check", timeout=timeout, clock=clock)
+        if key == "status":
+            if line not in (b"[network] brain_ready", b"[network] brain_unpaired"):
+                raise ConfigureError("Unsupported network status.")
+            result[key] = line.decode().split()[-1]
+        else:
+            try:
+                fields = line[len(prefix):].decode("ascii").split()
+                values = dict(field.split("=", 1) for field in fields)
+                if len(fields) != 7 or set(values) != {"wifi", "cfg", "mqtt", "state", "n", "ok", "fail"}:
+                    raise ValueError
+                result[key] = {name: int(value) for name, value in values.items()}
+            except (ValueError, UnicodeError):
+                raise ConfigureError("Unsupported network diagnostics.") from None
     return result
 
 
