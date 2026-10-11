@@ -133,6 +133,8 @@ private:
     uint32_t phaseAt_ = 0;            // when the current phase started
     uint32_t deadlineAt_ = 0;         // wait/timed phase deadline
     uint32_t lastRawAt_ = 0;          // spacing between raw frames
+    bool startSettled_ = false;
+    uint32_t startSettledAt_ = 0;
     uint16_t errorLine_ = 0;          // line of the first failure / bad program
     char message_[64] = "idle";
 };
