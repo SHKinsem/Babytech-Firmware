@@ -2,6 +2,7 @@
 import configparser
 import json
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import sys
@@ -50,8 +51,9 @@ class SourceArchiveTest(unittest.TestCase):
             config.read(project / "platformio.ini")
             board_dir = project / config["platformio"]["boards_dir"]
             self.assertTrue((board_dir / (config["env:brain"]["board"] + ".json")).is_file())
-            script = config["env:brain"]["extra_scripts"].removeprefix("pre:")
-            self.assertTrue((project / script).is_file())
+            for script in config["env:brain"]["extra_scripts"].splitlines():
+                if script.strip():
+                    self.assertTrue((project / script.strip().removeprefix("pre:")).is_file())
             for folder, environment in (("main-controller", "brain"), ("device-controller", "motion")):
                 project = extracted / folder
                 config.read(project / "platformio.ini")
@@ -135,6 +137,11 @@ class SourceArchiveTest(unittest.TestCase):
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ProductResultQuery.cpp").is_file())
             self.assertTrue((extracted / "shared/ProductBoardLink/src/ProductResultQuery.h").is_file())
             self.assertTrue((extracted / "shared/BabytechDisplayCore/src/generated/feeding_flow_ui.h").is_file())
+            header = extracted / "shared/BabytechDisplayCore/src/generated/feeding_flow_ui.h"
+            before = (header.read_bytes(), header.stat().st_mtime_ns)
+            hook = runpy.run_path(str(extracted / "tools/sync_feeding_flow_ui.py"))
+            hook["sync_feeding_flow_ui"](extracted / "main-controller")
+            self.assertEqual((header.read_bytes(), header.stat().st_mtime_ns), before)
 
 
 if __name__ == "__main__":

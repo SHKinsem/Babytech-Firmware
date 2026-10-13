@@ -49,8 +49,10 @@ jobs:
           python tools/test_raw_can.py
           python tools/test_demo.py
 
-      - name: Run flash utility unit tests
-        run: python -m unittest discover -s tests -p 'test_flash_device.py'
+      - name: Run flash and UI build utility unit tests
+        run: |
+          python -m unittest discover -s tests -p 'test_flash_device.py'
+          python -m unittest discover -s tests -p 'test_sync_feeding_flow_ui.py'
 
       - name: Check source archive build dependencies
         run: python -m unittest discover -s tests -p 'test_package_device.py'
