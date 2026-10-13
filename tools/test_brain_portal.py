@@ -12,7 +12,8 @@ import sys
 import tempfile
 
 CASES = ["state", "mailbox", "auto", "manual", "wifi", "failed-wifi", "feeding",
-         "mqtt", "prefill", "http", "invalid", "dns", "page"]
+         "mqtt", "prefill", "http", "invalid", "dns", "page", "scan", "scan-failure", "scan-limit",
+         "scan-close", "scan-index", "scan-timeout"]
 
 
 def main():

@@ -54,6 +54,76 @@ class Port:
 
 
 class ConfigureTest(unittest.TestCase):
+    def test_usb_boot_can_drop_first_read_only_query(self):
+        port = Port()
+        clock = mock.Mock(return_value=0)
+        original_read = port.read
+        dropped = False
+        def read(size):
+            nonlocal dropped
+            if not dropped and b"[network] brain_ready\n" in port.lines:
+                port.lines[:] = port.lines.replace(b"[network] brain_ready\n", b"")
+                dropped = True
+            return original_read(size)
+        port.read = read
+        self.assertTrue(tool.configure(port, tool.wifi_command("Home", "secret123"), clock=clock, sleep=lambda _: None))
+        self.assertEqual(port.writes.count(b"NET STATUS\n"), 2)
+        self.assertEqual(port.writes.count(b"NET WIFI "), 1)
+        self.assertEqual(port.writes.count(b"MAINT BEGIN\n"), 1)
+
+    def test_each_stage_has_its_own_reply_budget(self):
+        now = [0.0]
+        class DelayedPort(Port):
+            due = 0.0
+            commands = bytearray()
+            def write(self, data):
+                count = super().write(data)
+                self.commands.extend(data[:count])
+                while b"\n" in self.commands:
+                    end = self.commands.index(b"\n") + 1
+                    command = bytes(self.commands[:end])
+                    del self.commands[:end]
+                    if command == b"MAINT BEGIN\n" or command.startswith(b"NET WIFI "):
+                        self.due = now[0] + 3
+                return count
+            def read(self, size):
+                now[0] += 0.1
+                return b"" if now[0] < self.due else super().read(size)
+        port = DelayedPort()
+        self.assertTrue(tool.configure(port, tool.wifi_command("Home", "secret123"), timeout=5,
+                                       clock=lambda:now[0], sleep=lambda _:None))
+        self.assertGreater(now[0], 5)
+        self.assertEqual(port.writes.count(b"NET WIFI "), 1)
+
+    def test_unresponsive_boot_never_enters_maintenance_or_writes(self):
+        port = Port()
+        now = [0.0]
+        def read(_size):
+            now[0] += 0.1
+            return b""
+        port.read = read
+        with self.assertRaisesRegex(tool.ConfigureError, "read-only query"):
+            tool.configure(port, tool.wifi_command("Home", "secret123"), timeout=3, clock=lambda: now[0])
+        self.assertGreaterEqual(now[0], 3)
+        self.assertLessEqual(port.writes.count(b"NET STATUS\n"), 4)
+        self.assertNotIn(b"MAINT", port.writes)
+        self.assertNotIn(b"NET WIFI", port.writes)
+
+    def test_diagnostics_read_only_query_can_be_repeated(self):
+        port = Port()
+        original_read = port.read
+        dropped = False
+        def read(size):
+            nonlocal dropped
+            if not dropped and b"[network] diag " in port.lines:
+                port.lines.clear()
+                dropped = True
+            return original_read(size)
+        port.read = read
+        self.assertEqual(tool.inspect_network(port, clock=lambda: 0)["diagnostics"]["mqtt"], 1)
+        self.assertEqual(port.writes.count(b"NET DIAG\n"), 2)
+        self.assertNotIn(b"MAINT", port.writes)
+
     def test_visible_password_requires_explicit_selection(self):
         with mock.patch.object(tool, "hidden_password", return_value="private") as hidden, mock.patch("builtins.input", return_value="visible") as visible:
             self.assertEqual(tool.read_password("Password: "), "private")
@@ -175,6 +245,55 @@ class ConfigureTest(unittest.TestCase):
         self.assertFalse(failure.exception.saved)
         self.assertTrue(failure.exception.released)
         self.assertEqual(port.writes.count(b"NET WIFI"), 1)
+
+    def test_partial_credential_write_is_not_replayed(self):
+        class InterruptedPort(Port):
+            interrupted = False
+            def write(self, data):
+                if self.writes.endswith(b"NET WIF") and not self.interrupted:
+                    self.interrupted = True
+                    raise OSError("private driver error")
+                return super().write(data)
+        port = InterruptedPort()
+        with self.assertRaises(tool.ConfigureError) as failure:
+            tool.configure(port, tool.wifi_command("Home", "secret123"))
+        self.assertTrue(port.interrupted)
+        self.assertFalse(failure.exception.saved)
+        self.assertTrue(failure.exception.released)
+        self.assertNotIn("private", str(failure.exception))
+        self.assertEqual(port.writes.count(b"NET WIF"), 1)
+        self.assertEqual(port.writes.count(b"MAINT END\n"), 1)
+
+    def test_late_save_reply_during_cleanup_does_not_replay_write(self):
+        class LatePort(Port):
+            def write(self, data):
+                count = super().write(data)
+                if self.writes.endswith(b"MAINT END\n"):
+                    self.lines[:0] = b"[network] wifi_saved\n"
+                else:
+                    self.lines[:] = self.lines.replace(b"[network] wifi_saved\n", b"")
+                return count
+        port = LatePort()
+        with self.assertRaises(tool.ConfigureError) as failure:
+            tool.configure(port, tool.wifi_command("Home", "secret123"), clock=lambda: 0)
+        self.assertFalse(failure.exception.saved)
+        self.assertTrue(failure.exception.released)
+        self.assertEqual(port.writes.count(b"NET WIFI "), 1)
+        self.assertEqual(port.writes.count(b"MAINT END\n"), 1)
+
+    def test_lost_release_reply_keeps_saved_confirmation_without_replay(self):
+        port = Port()
+        original_read = port.read
+        def read(size):
+            port.lines[:] = port.lines.replace(b"[maint] inactive\n", b"")
+            return original_read(size)
+        port.read = read
+        with self.assertRaises(tool.ConfigureError) as failure:
+            tool.configure(port, tool.wifi_command("Home", "secret123"), clock=lambda: 0)
+        self.assertTrue(failure.exception.saved)
+        self.assertFalse(failure.exception.released)
+        self.assertEqual(port.writes.count(b"NET WIFI "), 1)
+        self.assertEqual(port.writes.count(b"MAINT END\n"), 1)
 
     def test_save_and_release_failures_both_reported(self):
         with self.assertRaises(tool.ConfigureError) as error:

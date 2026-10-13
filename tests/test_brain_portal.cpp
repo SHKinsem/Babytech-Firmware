@@ -210,6 +210,7 @@ void httpCase() {
     Fixture f; f.ui(); f.worker();
     f.http.client().local = IPAddress(192, 168, 1, 20);
     f.request("/api/status", HTTP_GET); check(f.http.status == 403, "STA GET accepted");
+    f.request("/api/networks", HTTP_GET); check(f.http.status == 403, "STA scan accepted");
     f.wifi(); check(f.http.status == 403, "STA POST accepted");
     f.http.client().local = IPAddress(192, 168, 4, 1);
     f.http.requestHeaders.clear(); f.request("/api/wifi", HTTP_POST);
@@ -220,6 +221,110 @@ void httpCase() {
     f.ui(); check(f.status().find("wifi_saved") != std::string::npos, "queued password missing completion");
     check(f.http.headers["Cache-Control"] == "no-store", "sensitive metadata response cacheable");
     f.noLeaks();
+}
+void scanCase() {
+    Fixture f; f.ui(); f.worker();
+    f.request("/api/networks", HTTP_GET);
+    check(f.http.status == 202 && f.http.response.find("scanning") != std::string::npos, "scan not asynchronous");
+    f.http.arguments = {{"refresh", "1"}};
+    f.request("/api/networks", HTTP_GET);
+    size_t starts = 0;
+    for (const auto& call : WiFi.calls) if (call.method == "scanStart") { ++starts; check(call.first == 1, "blocking scan"); }
+    check(starts == 1, "pending refresh restarted scan");
+    WiFi.networks = {{"cheese meow", -70}, {"", -10}, {"cheese meow", -30},
+                     {"guest & <test> \"wifi\"", -50, WIFI_AUTH_OPEN}, {" trailing ", -60},
+                     {std::string(33, 'x'), -5}};
+    WiFi.scanResult = int(WiFi.networks.size());
+    f.http.arguments.clear(); f.request("/api/networks", HTTP_GET);
+    StaticJsonDocument<4096> json;
+    check(f.http.status == 200 && !deserializeJson(json, f.http.response), "scan JSON invalid");
+    auto list = json["networks"].as<JsonArray>();
+    check(list.size() == 3 && list[0]["ssid"] == "cheese meow" && list[0]["rssi"] == -30 &&
+          list[1]["ssid"] == "guest & <test> \"wifi\"" && list[1]["open"] == true &&
+          list[2]["ssid"] == " trailing ", "scan dedup/order/escaping incorrect");
+    const auto body = f.http.response;
+    WiFi.scanResult = WIFI_SCAN_FAILED; f.request("/api/networks", HTTP_GET);
+    check(f.http.response == body, "scan results not cached");
+    f.wifi("cheese meow", "wifi-secret"); f.ui(); f.worker();
+    check(WiFi.attemptedSsid == "cheese meow", "selected SSID not saved exactly");
+    f.noLeaks();
+    joined("cheese meow"); f.worker(); fake::io.now += 2000; f.worker();
+    check(!f.portal.active() && WiFi.calls.back().method == "mode", "scan prevented AP closing");
+}
+void scanFailureCase() {
+    Fixture f; f.ui(); f.worker();
+    WiFi.scanStartResult = WIFI_SCAN_FAILED;
+    f.request("/api/networks", HTTP_GET);
+    check(f.http.status == 503 && f.http.response.find("scan_failed") != std::string::npos, "failed scan hidden");
+    WiFi.scanStartResult = WIFI_SCAN_RUNNING; WiFi.scanResult = 0;
+    f.http.arguments = {{"refresh", "1"}}; f.request("/api/networks", HTTP_GET);
+    check(f.http.status == 200 && f.http.response.find("\"networks\":[]") != std::string::npos, "empty scan cannot recover");
+    f.wifi("hidden-wifi", "wifi-secret"); f.ui(); f.worker();
+    check(WiFi.attemptedSsid == "hidden-wifi", "scan became config gate");
+    f.noLeaks();
+}
+void scanLimitCase() {
+    Fixture f; f.ui(); f.worker();
+    for (int n = 0; n < 40; ++n) WiFi.networks.push_back({"network-" + std::to_string(n), -100 + n});
+    WiFi.scanResult = int(WiFi.networks.size()); f.request("/api/networks", HTTP_GET);
+    StaticJsonDocument<4096> json;
+    check(!deserializeJson(json, f.http.response), "bounded scan JSON invalid");
+    auto list = json["networks"].as<JsonArray>();
+    check(list.size() == 16 && list[0]["ssid"] == "network-39" && list[15]["ssid"] == "network-24",
+          "scan did not retain strongest networks");
+    f.noLeaks();
+}
+void scanCloseCase() {
+    Fixture f; f.ui(); f.worker(); f.request("/api/networks", HTTP_GET);
+    check(f.http.status == 202, "scan was not running");
+    f.wifi(); f.ui(); f.worker(); joined("new-wifi"); f.worker();
+    const auto before = WiFi.calls.size();
+    fake::io.now += 2000; f.worker();
+    check(!f.portal.active(), "scan blocked closing joined AP");
+    for (size_t n = before; n < WiFi.calls.size(); ++n)
+        check(WiFi.calls[n].method != "scanDelete", "AP close freed unfinished callback data");
+    WiFi.networks = {{"late", -40}}; WiFi.scanResult = 1;
+    const auto closed = WiFi.calls.size(); f.worker();
+    bool cleaned = false;
+    for (size_t n = closed; n < WiFi.calls.size(); ++n) if (WiFi.calls[n].method == "scanDelete") cleaned = true;
+    check(cleaned, "late completed scan leaked without HTTP client");
+    for (const auto& call : WiFi.calls) check(call.worker, "scan cleanup outside network worker");
+}
+void scanIndexCase() {
+    Fixture f; f.ui(); f.worker();
+    for (int n = 0; n < 300; ++n) WiFi.networks.push_back({"network-" + std::to_string(n), -100 + n});
+    WiFi.scanResult = int(WiFi.networks.size()); f.request("/api/networks", HTTP_GET);
+    StaticJsonDocument<4096> json;
+    check(!deserializeJson(json, f.http.response), "large scan invalid");
+    check(json["networks"][0]["ssid"] == "network-255", "SDK scan index wrapped");
+    size_t reads = 0;
+    for (const auto& call : WiFi.calls) if (call.method == "scanSSID") ++reads;
+    check(reads == 256, "scan read beyond SDK addressable range");
+    f.noLeaks();
+}
+void scanTimeoutCase() {
+    Fixture f; f.ui(); f.worker(); f.request("/api/networks", HTTP_GET);
+    WiFi.scanResult = WIFI_SCAN_FAILED;
+    f.http.arguments = {{"refresh", "1"}};
+    f.request("/api/networks", HTTP_GET);
+    check(f.http.status == 503, "SDK timeout did not report scan failure");
+    size_t starts = 0;
+    for (const auto& call : WiFi.calls) {
+        if (call.method == "scanStart") ++starts;
+        check(call.method != "scanDelete", "timed out callback data released early");
+    }
+    check(starts == 1, "refresh restarted unfinished timed out scan");
+    f.wifi("manual-after-timeout", "wifi-secret"); f.ui(); f.worker();
+    check(WiFi.attemptedSsid == "manual-after-timeout", "scan timeout blocked WiFi save");
+    joined("manual-after-timeout"); f.worker(); fake::io.now += 2000; f.worker();
+    check(!f.portal.active(), "timed out scan blocked AP closing");
+    WiFi.networks = {{"late-timeout", -50}}; WiFi.scanResult = 1; f.worker();
+    size_t deleted = 0; starts = 0;
+    for (const auto& call : WiFi.calls) {
+        if (call.method == "scanDelete") ++deleted;
+        if (call.method == "scanStart") ++starts;
+    }
+    check(starts == 1 && deleted == 1, "timed out late callback restarted or was not cleaned exactly once");
 }
 void invalidCase() {
     Fixture f; f.ui(); f.worker();
@@ -267,6 +372,15 @@ void pageCase() {
           "HTTP copy fallback missing");
     check(page.find("Cloud") != std::string::npos && page.find("development") != std::string::npos,
           "development code caveat missing");
+    check(page.find("<select name=\"ssid\"") != std::string::npos && page.find("/api/networks") != std::string::npos,
+          "WiFi selection missing");
+    Fixture f; f.ui(); f.worker(); f.request("/", HTTP_GET);
+    check(f.http.status == 200 && f.http.response.find("value=\"bt-000000000001\"") != std::string::npos &&
+          f.http.response.find("value=\"000001\"") != std::string::npos &&
+          f.http.response.find("{{DEVICE_ID}}") == std::string::npos, "identity not rendered before JavaScript");
+    f.portal.begin("unit-\"<&>"); f.request("/", HTTP_GET);
+    check(f.http.response.find("value=\"unit-&quot;&lt;&amp;&gt;\"") != std::string::npos &&
+          f.http.response.find("id=\"code\" value=\"\"") != std::string::npos, "HTML injection/invalid pairing code");
 }
 }
 int main(int argc, char** argv) {
@@ -285,6 +399,12 @@ int main(int argc, char** argv) {
         else if (name == "invalid") invalidCase();
         else if (name == "dns") dnsCase();
         else if (name == "page") pageCase();
+        else if (name == "scan") scanCase();
+        else if (name == "scan-failure") scanFailureCase();
+        else if (name == "scan-limit") scanLimitCase();
+        else if (name == "scan-close") scanCloseCase();
+        else if (name == "scan-index") scanIndexCase();
+        else if (name == "scan-timeout") scanTimeoutCase();
         else check(false, "unknown case");
         fake::cleanupLifetimeResources();
         std::cout << "PASS brain-portal " << name << '\n';
