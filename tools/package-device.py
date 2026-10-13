@@ -49,7 +49,7 @@ for folder in ['main-controller','device-controller','shared','boards','tests','
 sources.update((root / 'docs').glob('*.md'))
 for name in ['build-wsl.ps1','build-wsl.sh','test_protocol.py','test_motion.py','package-device.py',
              'test_raw_can.py','test_demo.py','test_cloud_contract.py',
-             'export_boot_app0.py','test_display_view.py','test_board_messages.py','test_board_commands.py','test_board_link.py',
+             'export_boot_app0.py','sync_feeding_flow_ui.py','test_display_view.py','test_board_messages.py','test_board_commands.py','test_board_link.py',
              'test_pairing_record.py','test_board_arduino.py','test_board_discovery.py',
              'test_motion_export_snapshot.py','test_board_export_transfer.py','test_board_maintenance.py',
              'test_board_install.py','test_motion_install.py','test_brain_installer.py','test_brain_pending_recovery.py','test_brain_cloud_dispatcher.py',

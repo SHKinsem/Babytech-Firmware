@@ -18,6 +18,11 @@ Tools/generate_feeding_flow_ui.py generates that header from its single shared
 JSON and records the source SHA-256; --check detects drift. Standalone firmware
 builds consume the committed generated header without requiring the parent tree.
 
+2026-10-13: Brain's pre-build tools/sync_feeding_flow_ui.py invokes the parent
+generator as a CLI when built in the product checkout. Unchanged text leaves
+the header untouched; standalone builds still consume the committed header.
+No runtime parsing, network dependency, protocol or admission check was added.
+
 2026-09-23 additive update, kept identical with the product repository at 62abe5d:
 BabytechDisplayCore: Initialize=2, intent validation and initialization button
 eligibility tests. Protocol/schema remain v3; no State field or stage changes.
