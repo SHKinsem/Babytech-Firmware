@@ -175,7 +175,7 @@ OTA场景通过实际USB `OTA CODE` 和已注册HTTP接口取得nonce、验证�
 
 `--case real-auth-offline` 用三个独立冷启动进程分别模拟MQTT CONNECT被拒绝、command订阅失败、config订阅失败。每次重连继续注入同一拒绝；本地Initialize在NotReady阶段派发，脚本Motion回覆Ready后才派发Prepare，生产Brain保留原宝宝/配方及序号，两个动作各只发送一次。持续三次连接尝试后仍无Cloud会话/消息处理/发布、屏幕本地可用，不擦配对或改凭据。覆盖实际main/网络worker/本地owner和UART适配器，不复制派发逻辑；SDK拒绝返回值和Motion回复是测试输入，不证明真实密码校验、Mosquitto ACL、机械执行、触摸布局、Flash或RTOS时序。
 
-App/屏幕文案唯一手写来源仍在父项目 `Shared/feeding_flow_ui/feeding_flow_ui.json`。父项目 `python3 Tools/generate_feeding_flow_ui.py` 自动更新本仓库生成 header，`--check` 检查内容及源哈希；生成物须随固件 commit 提交。独立 clone 编译锁定的 header，不读取父项目或下载文案，禁止手改 generated 文件。
+App/屏幕文案唯一手写来源仍在父项目 `Shared/feeding_flow_ui/feeding_flow_ui.json`。父项目内正常 Brain 构建通过 `tools/sync_feeding_flow_ui.py` pre-build 自动调用父生成器；内容未变不重写 header。`python3 Tools/generate_feeding_flow_ui.py` 保留为手动同步入口，`--check` 检查内容及源哈希；生成物须随固件 commit 提交，并同步父项目 gitlink。独立 clone 没有父资产时编译锁定的 header，不依赖父项目或下载文案，禁止手改 generated 文件。父项目生成失败不能静默回退旧文字；该检查仅在电脑构建阶段，不增加设备运行门禁。纯文案变更只更新 App/Brain，不改 Motion、Cloud、NVS 或配对。
 
 ## B1.1 共享协议基础（2026-10-06）
 
