@@ -1,8 +1,8 @@
 # Wi-Fi 固件升级：实现与使用
 
-描述对象：Motion 独立调试网页的签名 OTA 与本地打包工具。Milestone：V1。
+描述对象：Motion 独立调试网页的签名 OTA 与本地打包工具。Milestone：V1，`V1-device`，成对 Brain/Motion UART v4。仅在明确维护升级时采用，不是每次启动或云端更新的前置流程。
 
-2026-10-06 边界：屏幕基线迁入 Brain 后，`main-controller` 已不包含旧 Brain 的 OTA 服务和 `ota_identity.h`。当前可用目标是 Motion，Brain OTA 重新接入不在本次通信迁移范围。
+屏幕基线迁入 Brain 后，`main-controller` 不包含旧 Brain OTA 服务和 `ota_identity.h`。当前可用目标只有 Motion；打包器保留 Brain 参数别名不代表 Brain OTA 已实现。旧双板候选方案见 [历史计划](wifi-ota-plan.md)，不能按其步骤升级当前 Brain。
 
 ## 当前状态
 
@@ -18,7 +18,7 @@ Motion 的 ESP32-S3 固件已接入共用 `WifiOta` 模块，提供 `/ota` 网�
 
 ## 首次安装与管理员代码
 
-Demo 的 Stop/reset 等待与恢复另使用上述预算公式，在每次 Stop/reset 时冻结 600–5000ms 窗口，检查全部配置轴的位置、速度、flags 均有效且接收时间严格晚于 Stop。普通运动、启动前和回零位置检查也使用接收时冻结的反馈有效期：单轴600ms，多轴复用共享预算。查询频率、ACK期限、运动总期限和产品3秒停止等待期限不变。此证据与 OTA 的独立参与轴/Stop 后查询证据不同，不互相替代；不保证迟到 CAN 回复的物理采样时刻，也不取消动力隔离要求。
+网页流程的 Stop/reset 使用上述预算公式，在每次请求时冻结 600–5000ms 样本窗口，要求全部配置轴的位置、速度、flags 有效且接收时间严格晚于 Stop；3 秒停止等待期限不变。底层普通反馈单轴600ms、多轴按实际查询参与者冻结预算；普通手动 `move await` 和产品 `move/home await` 使用共享预算，普通 `home await` 保留原1000ms时效，见 [队列说明](motor-queue.md#反馈有效期与停止后起点)。这些不是 OTA 的独立参与轴和 Stop 后查询证明，不互相替代，也不取消动力隔离。扩大预算不复活旧样本，不提高查询频率或重发动作。
 
 未带 OTA 接口的 Motion 固件，必须先用 USB/串口安装带 OTA 的固件。先核对实板为 ESP32-S3 N16R8、16 MB Flash，读回分区表并确认有 `otadata`、`app0`、`app1`。首次安装保留原有 NVS；不要擦除整片 Flash。现有 [`flash-device.py`](../tools/flash-device.py) 只覆盖设备板串口发布包，不能拿 OTA 的双文件包代替它。
 
@@ -36,7 +36,7 @@ Motion 首次启动时在 NVS 生成独立的 32 字符十六进制管理员代�
 
    WSL 产物已导出到 `out/wsl/<board>/` 时，可省略 `--build-dir`。脚本核对芯片镜像头、双应用槽容量、源文件时间和私钥对应的公钥，生成 `firmware.bin`、`manifest.json`。私钥默认在忽略的 `out/ota/signing-key.pem`；发布时只交付这两个输出文件，不交付私钥。当前仓库嵌入的是开发公钥，正式产品必须改用离线保管的发布密钥并重建固件。
 
-   源文件时间检查覆盖板端 `src/include/data/lib` 和共享的 `WifiOta`、`BoardProtocol`、`ProductBoardLink`、`BabytechCloudLink`、`BabytechDisplayCore` 的 `src`。其中任意文件比镜像新，都须重新构建后再打包。该检查是时间戳检查，不证明镜像完整复现了全部构建输入；修改编译参数或依赖后仍须主动重新构建。
+   源文件时间检查覆盖板端 `src/include/data/lib` 和共享的 `WifiOta`、`BoardProtocol`、`ProductBoardLink`、`BabytechCloudLink`、`BabytechDisplayCore` 的 `src`。其中任意文件比镜像新，都须重新构建后再打包。该检查是时间戳检查，不证明镜像完整复现了全部构建输入；修改编译参数或依赖后仍须主动重新构建。正式发布密钥更换属于另行安排的产品发布工作，不要求本次云端更新、普通 USB 升级或每次启动先重做。
 
 4. 在 Motion 的 `/ota` 页面选择两个文件并输入管理员代码。发布包内的 `board` 与板卡必须一致。完成后等待重启，重新打开 `/api/ota/status` 检查版本和 build，并核对所用版本的 UART 通信恢复。
 
@@ -48,4 +48,4 @@ Motion 首次启动时在 NVS 生成独立的 32 字符十六进制管理员代�
 
 Motion 工具链的 ESP32-S3 bootloader 配置启用了 OTA rollback。本项目覆盖 Arduino 核心的默认提前确认行为：新镜像启动后须在 5 秒后通过本地服务检查才标记有效，30 秒内始终未通过则请求回退。Motion 检查 AP 与 CAN 控制器初始化。实板 bootloader 版本及回退行为仍需实测；本地检查不代表电机、称重或另一块板的物理功能均已验收。
 
-至少在电机动力电源已断开的台架上验证：错误板卡/签名/摘要拒绝、上传中断及断电后旧固件可启动、首次启动失败回退、NVS 保留及升级后网页/UART/CAN/称重功能。本文的打包测试不代替上述实板验收。
+至少在电机动力电源已断开的台架上验证：错误板卡/签名/摘要拒绝、上传中断及断电后旧固件可启动、首次启动失败回退、NVS 保留及升级后网页/UART/CAN/称重功能。已有电机流程限定实机成功不证明 OTA 回退已验收；打包测试也不代替上述实板验证。升级保留配对与业务 NVS，不重新安装、登记、认领或配网；HTTP/HMAC/签名不等于 TLS。

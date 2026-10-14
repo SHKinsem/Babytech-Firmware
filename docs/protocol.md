@@ -1,6 +1,6 @@
-# Brain / Motion UART 协议
+# 历史参考：Brain / Motion UART v1
 
-本文保留 v1 历史协议。当前上下板已改用 [v2 四指令协议](protocol-v2.md)，两板须一起更新。以下字段不再是当前运行接口。
+描述对象：保留的 UART v1 帧和 codec 回归参考。Milestone：V1，当前 `V1-device` 只运行成对 Brain/Motion UART v4；见 [当前 README](../README.md)。本页与 [v2 历史参考](protocol-v2.md)都不是现行固件操作或升级契约，不要求把两板更新到 v1/v2。旧 API 和字段仅描述当时实现。
 
 ## v1 帧格式
 
@@ -49,6 +49,6 @@ Status 沿用请求的 Sequence。brain 只接受当前待处理请求的响应�
 
 页面通过后续状态响应展示结果。链路离线时不展示缓存运行时间为实时值。
 
-## 当前版本
+## 后续历史版本
 
-当前实现和后续边界以 [v2 四指令协议](protocol-v2.md) 为准：READ / WRITE / EXEC / STOP，统一 RESPONSE / EVENT，支持单电机阶段最小闭环。
+当时的后续实现为 [v2 四指令协议](protocol-v2.md)：READ / WRITE / EXEC / STOP。两者 codec 仍保留回归，但旧运行入口已退役；现行产品身份、持久请求和结果桥接使用 UART v4。
