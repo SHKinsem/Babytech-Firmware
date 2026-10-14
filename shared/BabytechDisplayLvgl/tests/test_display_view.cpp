@@ -29,7 +29,10 @@ int main(int argc, char** argv) {
   lv_disp_drv_register(&driver);
   BabytechDisplayView view; assert(view.begin(true));
   auto* init = lv_obj_get_parent(label(lv_scr_act(), "Initialize"));
-  auto* start = lv_obj_get_parent(label(lv_scr_act(), "Start feeding"));
+  assert(std::strcmp(feedingFlowUiAction("start"), "Start") == 0);
+  auto* startLabel = label(lv_scr_act(), feedingFlowUiAction("start"));
+  assert(startLabel != nullptr);
+  auto* start = lv_obj_get_parent(startLabel);
   assert(lv_obj_has_state(init, LV_STATE_DISABLED));
   DisplaySnapshot s; s.stage = DisplayStage::NotReady;
   s.waterMl = 180; s.temperatureC = 40; s.thermalSimulated = true;

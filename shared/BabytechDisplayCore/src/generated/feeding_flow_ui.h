@@ -1,4 +1,4 @@
-// Source SHA-256: efd101bc82a9f906b78e9386631fbfb721884b1addbcb3103ddaa871e9c386ff
+// Source SHA-256: b79eb28a6068823afde32df8aebe6f202369d1370ff196e467eadc47f898ff8c
 // Generated from Shared/feeding_flow_ui/feeding_flow_ui.json.
 // DO NOT EDIT: update the shared contract and rebuild instead.
 #pragma once
@@ -18,8 +18,8 @@ struct FeedingFlowUiStage {
 };
 
 static constexpr FeedingFlowUiStage kFeedingFlowUiStages[] = {
-  {"idle", "Standby", "Checking readiness", "Checking readiness", "Start feeding", 0.00f, FeedingFlowUiTone::Neutral},
-  {"ready", "Ready", "Ready for {baby_name}", "Ready to prepare", "Start feeding", 0.00f, FeedingFlowUiTone::Ready},
+  {"idle", "Standby", "Checking readiness", "Checking readiness", "Start", 0.00f, FeedingFlowUiTone::Neutral},
+  {"ready", "Ready", "Ready for {baby_name}", "Ready to prepare", "Start", 0.00f, FeedingFlowUiTone::Ready},
   {"noready", "Not ready", "Not ready", "Not ready", "Not ready", 0.00f, FeedingFlowUiTone::Neutral},
   {"unscrewing_cap", "Preparing", "Opening cap", "Opening cap", "Preparing", 0.25f, FeedingFlowUiTone::Active},
   {"dispensing_water", "Preparing", "Adding water", "Adding water", "Preparing", 0.40f, FeedingFlowUiTone::Active},
@@ -92,7 +92,7 @@ inline const char* feedingFlowUiError(const char* key) {
 
 static constexpr FeedingFlowUiText kFeedingFlowUiActions[] = {
   {"initialize", "Initialize"},
-  {"start", "Start feeding"},
+  {"start", "Start"},
   {"sending", "Sending"},
   {"starting", "Starting"},
   {"preparing", "Preparing"},
