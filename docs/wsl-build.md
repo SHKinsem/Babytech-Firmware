@@ -1,6 +1,8 @@
 # WSL 编译
 
-Windows 目录仍是源码主目录；WSL 只维护自动同步的编译副本，不在副本中编辑源码。
+描述对象：Windows/PowerShell 用户的 WSL 编译副本和产物导出。Milestone：V1，`V1-device`，唯一固件为成对 Brain/Motion UART v4；不描述烧录、设备安装或验收。
+
+使用本流程时，Windows 目录是源码主目录；WSL 只维护自动同步的编译副本，不在副本中编辑源码。
 无需移动整个 Git 仓库，也不在 `/mnt/d` 上编译。
 
 ## 使用
@@ -16,7 +18,7 @@ Windows 目录仍是源码主目录；WSL 只维护自动同步的编译副本�
 
 默认发行版 `Ubuntu`，默认 8 个编译任务。可传 `-Distro Ubuntu -Jobs 4`。
 
-2026-10-09 起 Brain/Motion 仅支持成对 UART v4，无需额外宏；旧 Brain 宏 0、Motion peer 1/2 编译失败，WSL 脚本不另设协议版本。编译不自动开启 `SIM ON`、安装配对或启用真实非食用流程。本次未执行 WSL 实际构建，历史验证范围见文末。
+Brain/Motion 仅支持成对 UART v4，无需额外协议宏；旧 Brain 宏 0、Motion peer 1/2 编译失败，WSL 脚本不另设协议版本。编译不会开启 `SIM ON`、安装配对或执行运动；Motion 默认产品资源仍是 `BABYTECH_V1_MOTOR_TEST=1` 的非饮用测试值，不代表真实传感器或食品安全闭环。历史 WSL 验证见文末，不作为当前镜像重建证据。
 
 脚本会：
 
@@ -43,14 +45,12 @@ WSL 需要 `pio`、`rsync`、`flock`、`python3`、`g++` 和 `libssl-dev`。后�
 工具链以各自 `platformio.ini` 为准：Motion 为 Espressif32 6.4.0 / Arduino-ESP32 2.0.11；迁入屏幕的 Brain 为 pioarduino 55.03.30-2 / Arduino-ESP32 3.3.0。不要为了统一工具链而互相升降版本。
 正常联网环境下，首次编译由 PlatformIO 下载缺失依赖。
 
-当前电脑的 WSL 无法直接连接软件源，因此初次配置通过 Windows 下载官方 Linux 工具包并校验 SHA256；
-跨平台通用的 framework、platform 和 Python 工具从已有 Windows 缓存复制。没有使用 Windows 编译器在 WSL 中交叉调用。
+2026-09-21 的验证环境曾无法从 WSL 直接访问软件源，采用 Windows 下载官方 Linux 工具包、校验 SHA256，再复用跨平台缓存；这是当时环境的替代办法，不是每台电脑的必做配置，也不表示使用 Windows 编译器在 WSL 中交叉调用。
 
 ## 烧录
 
 此脚本只编译和导出，不连接 USB、不烧录、不修改 WSL USB 配置。
-USB 继续留在 Windows。当前仍可使用 README 中的 Windows PlatformIO 烧录流程，
-但该流程会执行 Windows 构建；直接烧录 WSL 导出产物的工具留待真实烧录阶段接入。
+USB 继续留在 Windows。README 的原生 PlatformIO 上传会重新构建；如需上传已验证的 WSL 产物，使用现有 Motion 发布包与 [烧录工具](flash-workflow.md)，它不自动重编译。两条路径先核对板型、提交、配置、镜像和端口，保留 NVS；不把导出成功当作实机验收。
 
 ## 本机验证（2026-09-21）
 

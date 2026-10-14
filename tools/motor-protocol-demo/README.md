@@ -1,14 +1,16 @@
-# Babytech 电机协议工作台（桌面原型）
+# Babytech 电机协议工作台源码
 
-已增加独立实机入口 `src/DeviceApp.jsx`，集成 Wi-Fi 与真实板端 API。`npm run build:device` 生成固件内嵌网页；本地访问 `/?device` 可以检查实机界面（需要同源板端 API 才有数据）。默认 `/` 仍是原来的仿真 Demo。完整交付范围见 [固件交付说明](../../docs/motion-workbench-release.md)。
+描述对象：当前 Motion 内嵌实机网页和保留的电脑端模拟 Demo。Milestone：V1，`V1-device`，Brain/Motion UART v4；此目录是前端源码，不提供真实运动或部署授权。
+
+实机入口 `src/DeviceApp.jsx` 使用 Motion 的 Wi-Fi 与板端 API。`npm run build:device` 生成 `device-controller/data/index.html`，不需要另外烧录文件系统；本地 `/?device` 仅在有同源 API 时取得实机数据。默认 `/` 是电脑端模拟 Demo，不是 Brain 的产品 SIM，也不代表真实电机完成。当前能力及交付见 [工作台说明](../../docs/motion-workbench-release.md)。
 
 X42S / X28S 电机 CAN 协议的桌面端调试前端原型：左侧指令库、中间参数编辑器、右侧电机反馈、底部 TX/RX 收发记录。
-原型的字节布局与校验参考 `references/` 中的固件源码。默认 Demo 为本地模拟；实机入口则向当前设备提交 HTTP 请求，并由当前固件再次校验。
+`references/` 保留早期源码参考，不是当前能力清单；手册确认的字段见 `docs/ZDT_X42S`，实际执行以当前 Motion 代码为准。默认 Demo 本地模拟，实机入口提交 HTTP 后由固件校验；HTTP 202 和驱动 ACK 都不等于机械完成。
 
 ## 运行
 
 ```bash
-npm install
+npm ci
 npm run dev -- --host 127.0.0.1 --port 4175
 ```
 
@@ -16,7 +18,8 @@ npm run dev -- --host 127.0.0.1 --port 4175
 
 ```bash
 npm run build      # vite build + scripts/prepare-sites-build.mjs
-npm test           # node:test 协议单元测试（tests/protocol.test.mjs）
+npm run build:device # 生成 Motion 内嵌实机网页
+npm test           # node:test 协议、手册、策略、草稿、日志和队列测试
 npm run test:sites # Sites 打包自检（需要先执行 npm run build）
 ```
 
@@ -43,15 +46,17 @@ npm run test:sites # Sites 打包自检（需要先执行 npm run build）
 | `references/x42s_can_id.h` | 扩展帧 ID = (地址 << 8) \| 包序号，地址不放在数据段 |
 | `references/MotionCore.h` | 线上单位（位置 0.1°、速度 0.1 RPM、电流 mA、加减速整数 RPM/s）、ACK 状态字节、梯形时长算法、请求取值范围 |
 
-界面上每个参数字段都带标注：
+参数说明区分源码/手册已确认、仅有参数名和未定义语义。已由手册确认的模式与单位不再按旧参考缺少注释视为未知：
 
 - **源码明确**：单位与含义在固件源码中直接可查（例如位置 0.1°、速度 0.1 RPM、电流 mA、方向 0/1）。
 - **参数名推断**：源码只给出参数名（例如 `intervalMs`、`stallMa`、`accelMaPerSec`）。
-- **协议字段**：固件只暴露原始字节，含义或单位未在源码中定义（例如 `motionMode`、`ctrlMode`、`clk`、`maxSpeed`），界面不做猜测，按原始字节透传。
+- **协议字段**：含义或单位尚无当前源码/手册依据时，保留原字段，不猜测、不虚构解码。具体模式、方向、单位和速度范围以手册标注与当前编码为准。
 
 力矩类指令按**电流（mA）**下发，界面不使用 Nm。
 
-## 功能范围
+## 电脑端 Demo 范围
+
+下列模拟行为不是当前实机固件的限制。实机另有称重、队列/同步、流程调试、Wi-Fi、OTA 及保存的调试策略；真实入口见工作台说明，不把 Demo 的固定时长或未知模式当成板端未实现。
 
 - 顶部工具栏：CAN ID（十进制 1..255，写入扩展帧 ID 高字节）、位速率显示（500 kbit/s / 1 Mbit/s，仅显示）、**模拟模式**连接开关、固定的「全部停止」。CAN ID 非法时两个标签页都会禁用发送并给出原因。
 - 全部停止走**广播路径**：发送扩展帧 ID `0x00000000`、数据 `FE 98 00 6B`，同时作废所有地址的模拟运动、定时任务与待触发队列；广播没有寻址应答方，因此不会伪造 ACK。
@@ -66,7 +71,7 @@ npm run test:sites # Sites 打包自检（需要先执行 npm run build）
 2. **ACK 不等于到位**：`0x02` 只表示固件收到指令，`0x9F` 只是完成回执；界面明确提示「不代表运动完成」。
 3. **只模拟源码定义过的行为**：
    - 位置指令仅在运动模式为 `2`（MotionCore `kMotionModeRelativeToCurrent`）时按梯形公式模拟有界运动，仿真窗口 0.3–10 秒；其它模式字节只发送帧并提示「未建模」。
-   - 直通位置的行程单位（clk）在源码中没有定义，因此只发送帧，不模拟位移与完成回执。
+   - Demo 未建立直通位置的运动模型，只生成帧，不模拟其到位回执；实际 FB/CB 已按手册单位接入受监督控制器，见 [直通位置说明](../../docs/direct-position-implementation.md)。
    - 速度模式为连续运动，最多模拟 10 秒后自动停转；力矩指令只更新电流读数，不建模力学。
    - 读取指令中只有 `0x27 / 0x35 / 0x36 / 0x3A` 有源码定义的应答布局，其余只发送 TX 帧，不构造数据帧、不回执。
    - 回零、控制模式、堵转复位、反馈间隔等网页未接入的指令只发送真实帧并给出模拟说明，不会伪造回零或参数生效。
