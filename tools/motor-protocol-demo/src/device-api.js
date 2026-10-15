@@ -425,7 +425,7 @@ export const queueStateLabels = {
   idle:'空闲', running:'运行中', done:'发送结束', failed:'失败', cancelled:'已取消／停止待确认', unknown:'状态未知',
 };
 
-export const queueActionLabels = {enable:'使能',disable:'失能',move:'相对移动',home:'回零',torque:'限速力矩',velocity:'限流速度',stop:'停止',wait:'等待',hex:'逻辑帧直通',can:'CAN 帧直通',none:'—'};
+export const queueActionLabels = {enable:'使能',disable:'失能',move:'相对移动',moveabs:'绝对位置移动',home:'回零',torque:'限速力矩',velocity:'限流速度',stop:'停止',wait:'等待',hex:'逻辑帧直通',can:'CAN 帧直通',none:'—'};
 export function queueMessageText(message) {
   const syncLabels={sync_settings_unconfigured:'尚未配置同步容差与反馈期限',sync_queries_paused:'自动查询暂停，无法监督同步组',
     sync_feedback_budget_insufficient:'当前查询预算无法在所选速度与容差下可靠判定：请降低速度、放宽容差或根据台架数据调整预算',

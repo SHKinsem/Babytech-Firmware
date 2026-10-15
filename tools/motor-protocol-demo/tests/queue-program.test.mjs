@@ -49,6 +49,24 @@ test('sync groups validate whole structure and preserve ordinary move semantics'
   assert.equal(buildActionLine('sync',{boundary:'end'}).line,'sync end');
   assert.equal(buildActionLine('sync',{boundary:'begin trigger'}).line,'sync begin trigger');
 });
+
+test('moveabs uses driver coordinates, allows zero and stays outside sync groups', () => {
+  const commands = parseProgram('MOVEABS 1 -1 REV 30 60 60 800 AwAiT\nmoveabs 1 0');
+  assert.deepEqual(commands.errors, []);
+  assert.equal(commands.actions[0].verb, 'moveabs');
+  assert.equal(commands.actions[0].awaitCompletion, true);
+  assert.equal(actionAngleDegrees(commands.actions[0], {}).deg, -360);
+  assert.equal(commands.actions[1].value, 0);
+  assert.deepEqual(previewAction(commands.actions[1], {}).warnings, []);
+  assert.match(previewAction(commands.actions[0], {}).summary, /驱动器绝对坐标目标 -1 rev/);
+  assert.deepEqual(validateProgram('moveabs 1 0 await').errors, []);
+  assert.equal(validateProgram('move 1 0').ok, false);
+  assert.equal(actionAngleDegrees(parseProgram('moveabs 1 20 mm').actions[0], {1:8}).deg, 900);
+  assert.equal(validateProgram('moveabs 1 20 mm', {distances:{1:null}}).ok, false);
+  assert.equal(buildActionLine('moveabs', builderDefaults('moveabs')).line, 'moveabs 1 0 deg 30 60 60 800');
+  assert.equal(validateProgram('sync begin\nmoveabs 1 90\nmove 2 90\nsync end').ok, false);
+  assert.match(errorsOf('moveabs 1 90 deg 3001')[0], /转速/);
+});
 test('helix requires explicit geometry and limits, counts expanded steps, and uses board linear conversion',()=>{
   const line='helix 1 2 3 2 1 1 -1 1 60 60 800 0.1';
   const result=validateProgram(line,{distances:{2:8}});

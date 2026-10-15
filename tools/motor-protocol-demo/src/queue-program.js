@@ -112,6 +112,23 @@ export const QUEUE_VERBS = [
     ],
   },
   {
+    verb: 'moveabs',
+    label: '绝对位置运动',
+    usage: 'moveabs ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]] [await]',
+    shortForm: 'moveabs 1 0 await',
+    defaults: '驱动器绝对坐标零点 · 单位 deg · RPM 30 · 加减速 60 · 电流 800 mA',
+    note: 'VALUE 是相对驱动器绝对坐标零点的目标位置，允许 0；rev = 360°，mm 用该地址已保存的 mm/rev 换算。发送 CD 绝对模式 1；默认发送后继续，末尾加 await 才等待到位。同步组内不可使用。',
+    args: [
+      { key: 'id', label: '电机地址', kind: 'address', default: '1' },
+      { key: 'value', label: '目标坐标', kind: 'number', unit: 'deg|rev|mm', default: '0' },
+      { key: 'unit', label: '单位', kind: 'unit', default: 'deg' },
+      { key: 'rpm', label: '转速', kind: 'number', unit: 'RPM', default: '30' },
+      { key: 'accel', label: '加速度', kind: 'number', unit: 'RPM/s', default: '60' },
+      { key: 'decel', label: '减速度', kind: 'number', unit: 'RPM/s', default: '60' },
+      { key: 'current', label: '电流上限', kind: 'number', unit: 'mA', default: '800' },
+    ],
+  },
+  {
     verb: 'home',
     label: '回零',
     usage: 'home ID [MODE] [await]',
@@ -328,18 +345,20 @@ function parseCanLine(tokens, fail) {
   return { extended: form === 'ext', canId, data: bytes };
 }
 
-function parseMove(tokens, fail) {
+function parseMove(tokens, fail, absolute = false) {
+  const verb = absolute ? 'moveabs' : 'move';
+  const valueLabel = absolute ? '目标坐标' : '行程';
   const [idToken, valueToken, ...rest] = tokens;
   if (idToken === undefined) {
-    fail('缺少电机地址（用法：move ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]]）');
+    fail(`缺少电机地址（用法：${verb} ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]]）`);
     return null;
   }
   if (valueToken === undefined) {
-    fail('缺少行程 VALUE（用法：move ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]]）');
+    fail(`缺少${valueLabel} VALUE（用法：${verb} ID VALUE [deg|rev|mm] [RPM [ACCEL [DECEL [CURRENT]]]]）`);
     return null;
   }
   const id = readAddress(idToken, fail);
-  const value = readNumber(valueToken, { label: '行程', min: QUEUE_LIMITS.minAngleDeg, signed: true, absMin: QUEUE_LIMITS.minAngleDeg }, fail);
+  const value = readNumber(valueToken, { label: valueLabel, min: absolute ? 0 : QUEUE_LIMITS.minAngleDeg, signed: true, absMin: absolute ? 0 : QUEUE_LIMITS.minAngleDeg }, fail);
   if (id == null || value == null) return null;
   let unit = 'deg';
   if (rest.length && QUEUE_UNITS.includes(rest[0].toLowerCase())) unit = rest.shift().toLowerCase();
@@ -348,7 +367,7 @@ function parseMove(tokens, fail) {
   const defaults = { rpm: 30, accel: 60, decel: 60, current: 800 };
   const values = { ...defaults };
   if (rest.length > optional.length) {
-    fail(`相对运动最多 4 个可选参数（RPM ACCEL DECEL CURRENT），多出 ${rest.length - optional.length} 个`);
+    fail(`${absolute ? '绝对位置运动' : '相对运动'}最多 4 个可选参数（RPM ACCEL DECEL CURRENT），多出 ${rest.length - optional.length} 个`);
     return null;
   }
   for (let index = 0; index < rest.length; index += 1) {
@@ -462,6 +481,7 @@ function parseTokens(verb, tokens, fail) {
       return { id, mode };
     }
     case 'move': return parseMove(tokens, fail);
+    case 'moveabs': return parseMove(tokens, fail, true);
     case 'torque': return parseTorque(tokens, fail);
     case 'velocity': return parseVelocity(tokens, fail);
     case 'hex': {
@@ -506,14 +526,14 @@ export function parseProgram(text) {
     const awaitIndex = tokens.findIndex((token, i) => i > 0 && token.toLowerCase() === 'await');
     const awaitCompletion = awaitIndex !== -1;
     if (awaitCompletion) {
-      if (!['move', 'home'].includes(verb) || awaitIndex !== tokens.length - 1) {
-        fail('await 只能放在 move/home 指令末尾，且只能出现一次');
+      if (!['move', 'moveabs', 'home'].includes(verb) || awaitIndex !== tokens.length - 1) {
+        fail('await 只能放在 move/moveabs/home 指令末尾，且只能出现一次');
         return;
       }
       tokens.pop();
     }
     const body = parseTokens(verb, tokens.slice(1), fail);
-    if (body && ['move', 'home'].includes(verb)) body.awaitCompletion = awaitCompletion;
+    if (body && ['move', 'moveabs', 'home'].includes(verb)) body.awaitCompletion = awaitCompletion;
     if (body) actions.push({ line, verb, ...body });
   });
   return { actions, errors, lineCount: lines.length };
@@ -546,7 +566,7 @@ const tenths = (deg) => Math.round(Math.abs(deg) * QUEUE_LIMITS.tenthsPerDegree)
  * must not guess a conversion.
  */
 export function actionAngleDegrees(action, distances) {
-  if (action.verb !== 'move') return { ok: false, reason: 'not_a_move' };
+  if (!['move', 'moveabs'].includes(action.verb)) return { ok: false, reason: 'not_a_move' };
   const lookup = distanceLookup(distances, action.id);
   if (action.unit === 'deg') return { ok: true, deg: action.value, lookup };
   if (action.unit === 'rev') return { ok: true, deg: action.value * QUEUE_LIMITS.degreesPerRev, lookup };
@@ -585,10 +605,12 @@ export function previewAction(action, { distances = null } = {}) {
         summary: `电机 ${action.id}：发送回零触发 9A · 模式 ${action.mode} ${homeModeLabel(action.mode)}（${action.awaitCompletion ? '等待完成' : '发送后继续'}）`,
         warnings,
       };
-    case 'move': {
+    case 'move':
+    case 'moveabs': {
       const angle = actionAngleDegrees(action, distances);
       const counts = angle.ok ? tenths(angle.deg) : null;
-      const head = `电机 ${action.id}：相对运动 ${signed(action.value)} ${action.unit}`;
+      const absolute = action.verb === 'moveabs';
+      const head = `电机 ${action.id}：${absolute ? '驱动器绝对坐标目标' : '相对运动'} ${signed(action.value)} ${action.unit}`;
       let detail = `${num(action.rpm)} RPM · 加减速 ${num(action.accel)}/${num(action.decel)} RPM/s · 电流上限 ${action.current} mA`;
       if (angle.ok) {
         if (action.unit === 'mm') {
@@ -596,8 +618,10 @@ export function previewAction(action, { distances = null } = {}) {
         } else {
           detail = `${degrees(angle.deg)}（${counts} × 0.1°）· ${detail}`;
         }
-        if (counts < 1) {
-          warnings.push(`行程换算后不足 1 个 0.1° 计数（${counts}），板端会以“取整为零”拒绝。`);
+        if (counts < 1 && !(absolute && angle.deg === 0)) {
+          warnings.push(absolute
+            ? `目标坐标换算后不足 1 个 0.1° 计数（${counts}），板端会发送坐标零点。`
+            : `行程换算后不足 1 个 0.1° 计数（${counts}），板端会以“取整为零”拒绝。`);
         }
       } else if (angle.reason === 'distance_missing') {
         warnings.push(`电机 ${action.id} 尚未保存 mm/rev 旋转距离：mm 行程无法换算角度，板端会拒绝这一步。`);
@@ -715,7 +739,7 @@ export function validateProgram(text, { distances = null } = {}) {
   // board cannot convert mm without it. An unread profile stays a warning,
   // because a failed read must never be turned into an assumed value.
   parsed.actions.forEach((action) => {
-    if (action.verb !== 'move' || action.unit !== 'mm') return;
+    if (!['move', 'moveabs'].includes(action.verb) || action.unit !== 'mm') return;
     const angle = actionAngleDegrees(action, distances);
     if (!angle.ok && angle.reason === 'distance_missing') {
       errors.push({ line: action.line, message: `电机 ${action.id} 的 mm/rev 旋转距离为 0（未配置）：mm 行程无法换算，请先在右侧保存该地址的旋转距离，或改用 deg/rev。` });

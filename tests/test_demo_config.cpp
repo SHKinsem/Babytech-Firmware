@@ -85,8 +85,15 @@ int main(int argc, char** argv) {
     assert(buildDemoProgram(metric.stages[0], metric, false, zeros, program, error));
     assert(program.steps[0].distanceTenths == 1800);
     assert(buildDemoProgram(c.stages[4],c,false,zeros,program,error));
-    assert(program.steps[0].absolute && program.steps[0].distanceTenths == -123);
+    assert(program.steps[0].absolute && !program.steps[0].absoluteCommand &&
+           program.steps[0].distanceTenths == -123);
     assert(program.steps[0].awaitCompletion && program.count == 2);
+    DemoScript absoluteStage;
+    absoluteStage.commands = {"moveabs 1 0 await"};
+    assert(buildDemoProgram(absoluteStage,c,false,zeros,program,error));
+    assert(program.count == 1 && program.steps[0].absolute && program.steps[0].absoluteCommand &&
+           program.steps[0].distanceTenths == 0 && program.steps[0].awaitCompletion);
+    assert(zeros[1] == -123);  // moveabs does not replace the demo software zero.
     DemoScript disableScript;
     disableScript.commands = {"enable 1", "disable 1"};
     assert(buildDemoProgram(disableScript,c,false,zeros,program,error));
