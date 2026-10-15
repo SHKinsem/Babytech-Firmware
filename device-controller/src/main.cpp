@@ -1,21 +1,27 @@
-// ESP32-S3 motion board MVP.
+// ESP32-S3 Motion controller.
 //
 // Responsibilities of this file:
-//   * brain link (BoardProtocol v2 READ/WRITE/EXEC/STOP frames) over UART1,
+//   * product Brain/Motion UART v4,
 //   * CAN bring-up + motor command HTTP API (delegated to motion::MotorControl),
-//   * WiFi soft-AP + single embedded debug page (device-controller/data/index.html).
+//   * independent Wi-Fi AP and the embedded motor debug page (MQTT is on Brain).
 //
 // It sends no enable or movement command on boot. Every motion command has to
 // come from an explicit HTTP or UART request; the driver may already be enabled.
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <cstring>
+#include <cmath>
+#include <limits>
 
 #include <BoardProtocolV2.h>
 #include <Hx711Scale.h>
 #include "QueueBoardMotion.h"
+#include "ProductSession.h"
+#include "ProductEventOutbox.h"
 #include "CommandQueue.h"
 #include "DebugLog.h"
 #include "ProtocolGate.h"
@@ -29,10 +35,13 @@
 #include "board_config.h"
 #include "ota_identity.h"
 #include "UartPeer.h"
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+#include <BoardLinkArduino.h>
+#include <MaintenanceUsbConsole.h>
+#include "MotionStateRecovery.h"
+#include "MotionProductRuntime.h"
+#include "MotionResultDelivery.h"
+#include <MotionInstallTarget.h>
 #include "DemoMotorExecutor.h"
-#include "DisplayLinkCore.h"
-#endif
 
 // Single self-contained page embedded by the build (board_build.embed_txtfiles).
 // The blob is NUL terminated; subtract that byte when sending.
@@ -44,8 +53,21 @@ extern const uint8_t demoJsonStart[] asm("_binary_data_demo_flow_json_start");
 
 namespace {
 
-HardwareSerial brain(1);
-babytech::v2::Parser parser;
+babytech::boardlink::ArduinoBoardLink productBoardLink;
+// Same read-only capture as USB diagnostics, independently owned by UART.
+babytech::boardlink::MaintenanceExport migrationExport;
+babytech::boardlink::MaintenanceUsbConsole commissioningSession;
+bool safeForCommissioning();
+bool safeForInstallation();
+class MotionMaintenanceTarget : public babytech::boardlink::BoardMaintenanceTarget {
+public:
+    bool safeToAcquire() const override {
+        return !commissioningSession.active() && safeForInstallation();
+    }
+    // Imports finish synchronously before the loop can release this lease.
+    // A storage fault inhibits another import, not independent local debugging.
+    bool safeToRelease() const override { return true; }
+} migrationMaintenance;
 motion::MotorControl motor;
 motion::Hx711Scale powderScale;
 motion::CommandQueue queue(motor);
@@ -60,14 +82,75 @@ babytech::WifiOta ota(server, BABYTECH_OTA_BOARD, BABYTECH_OTA_HARDWARE,
 // The queue is a board operation like any other: while it runs, Wi-Fi scanning
 // and the scale/config endpoints stay blocked.
 bool demoBusy();
+bool recoveryMotionPending();
+bool commissioningActive() {
+    return commissioningSession.active() || productBoardLink.maintenanceActive();
+}
 bool controlBusy() { return demoBusy() || endpoint.busy() || motor.hasActiveMotion() || queue.active(); }
-bool motionBusy() { return controlBusy() || ota.maintenanceActive(); }
-WiFiSetup wifiSetup(server, motionBusy);
+bool motionBusy() { return controlBusy() || ota.maintenanceActive() || commissioningActive(); }
+bool networkChangeBusy();
+WiFiSetup wifiSetup(server, networkChangeBusy);
+String cloudDeviceId;
+motion::ProductSession* productSession = nullptr;
+
+#ifndef BABYTECH_LOW_WATER_PIN
+#define BABYTECH_LOW_WATER_PIN -1
+#endif
+#ifndef BABYTECH_LOW_WATER_ACTIVE_LOW
+#define BABYTECH_LOW_WATER_ACTIVE_LOW 0
+#endif
+static_assert(BABYTECH_LOW_WATER_PIN == -1 ||
+              (BABYTECH_LOW_WATER_PIN >= 1 && BABYTECH_LOW_WATER_PIN <= 21 &&
+               BABYTECH_LOW_WATER_PIN != kCanTxPin &&
+               BABYTECH_LOW_WATER_PIN != kCanRxPin &&
+               BABYTECH_LOW_WATER_PIN != kScaleDoutPin &&
+               BABYTECH_LOW_WATER_PIN != kScaleSckPin),
+              "Low-water GPIO is unavailable or conflicts with CAN/HX711");
+bool lowWaterValid = false;
+bool lowWater = false;
+uint8_t lowWaterSamples = 0;
+uint32_t lastLowWaterSampleAt = 0;
+struct ProductResources {
+    bool waterValid;
+    bool lowWater;
+    bool powderValid;
+    float powderGrams;
+};
+// Admission and UART telemetry must use the same resource source.
+ProductResources productResources(uint32_t now) {
+    if (BABYTECH_V1_MOTOR_TEST == 1)
+        return {true, false, true, kV1TestPowderGrams};
+    const auto& scale = powderScale.snapshot();
+    const bool valid = powderScale.initialized() && scale.hasSample && scale.calibrated &&
+        scale.status != motion::LoadCellStatus::Stale && scale.status != motion::LoadCellStatus::Fault &&
+        std::isfinite(scale.filteredWeightG) &&
+        double(scale.filteredWeightG) <= double(std::numeric_limits<int32_t>::max()) &&
+        static_cast<uint32_t>(now - scale.sampledAtMs) <= powderScale.sampleTimeoutMs();
+    return {lowWaterValid, lowWater, valid, valid ? scale.filteredWeightG : 0.0f};
+}
+void pollProductResources() {
+    const uint32_t now = millis();
+    if (BABYTECH_LOW_WATER_PIN >= 0 &&
+        static_cast<uint32_t>(now - lastLowWaterSampleAt) >= 100) {
+        lastLowWaterSampleAt = now;
+        const bool observed = digitalRead(BABYTECH_LOW_WATER_PIN) ==
+            (BABYTECH_LOW_WATER_ACTIVE_LOW ? LOW : HIGH);
+        if (lowWaterSamples == 0 || observed != lowWater) lowWaterSamples = 1;
+        else if (lowWaterSamples < 5) ++lowWaterSamples;
+        lowWater = observed;
+        lowWaterValid = lowWaterSamples >= 5;
+    }
+    if (!productSession) return;
+    const auto resources = productResources(now);
+    productSession->resources(resources.waterValid, resources.lowWater,
+                              resources.powderValid, resources.powderGrams, now);
+}
 bool canStarted = false;
-bool safeForOta() { return !controlBusy() && !motor.operationBusy() && !wifiSetup.busy(); }
+bool otaWriterBusy();
+bool safeForOta() { return !commissioningActive() && !otaWriterBusy() &&
+    !motor.operationBusy() && !wifiSetup.busy() && motor.otaMotionSafe(); }
 bool otaHealthy() { return canStarted && wifiSetup.apReady() &&
                            WiFi.softAPIP() != IPAddress(0,0,0,0); }
-uint32_t lastBrainByteAt = 0;
 int scaleDoutPin = kScaleDoutPin;
 int scaleSckPin = kScaleSckPin;
 
@@ -89,6 +172,18 @@ String bootIdHex(uint64_t value) {
     snprintf(buffer, sizeof(buffer), "%016llX", static_cast<unsigned long long>(value));
     return String(buffer);
 }
+
+void initCloudIdentity() {
+    const uint64_t mac = ESP.getEfuseMac();
+    char id[24];
+    snprintf(id, sizeof(id), "bt-%04X%08X", static_cast<uint16_t>(mac >> 32),
+             static_cast<uint32_t>(mac));
+    cloudDeviceId = id;
+    Serial.printf("[cloud] Device ID: %s\n", id);
+    Serial.printf("[cloud] Development pairing code: %06llu\n",
+                  static_cast<unsigned long long>(mac % 1000000ULL));
+}
+
 
 // POST routes worth an entry. Nothing else is logged, so an unknown path or a
 // query string can never end up in the log or in an export, and the Wi-Fi routes
@@ -317,15 +412,127 @@ public:
 };
 BoardRotationSource boardRotation;
 
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
-motion::DemoMotorExecutor demoExecutor(motor, queue, boardRotation, []() { return !wifiSetup.busy(); });
+motion::DemoMotorExecutor demoExecutor(motor, queue, []() { return !wifiSetup.busy(); });
 motion::DemoFlowController demo(demoExecutor);
-motion::DisplayLinkCore displayLink(demo);
+motion::ProductSession product(demo);
+class RecoveryHardware : public motion::MotionRecoveryHardware {
+public:
+    void supervisedStop(uint32_t nowMs) override { product.recoverAfterRestart(nowMs); }
+    bool stationary() const override {
+        return canStarted && !endpoint.busy() &&
+            !motor.operationBusy() && !queue.active() && !demo.busy() &&
+            !product.ownsMotion() && demoExecutor.stopConfirmed() && motor.affectedAxesStationary();
+    }
+};
+RecoveryHardware recoveryHardware;
+babytech::boardlink::MotionStateStore productState;
+bool safeForRemoteInstall() {
+    return !commissioningSession.active() && safeForInstallation();
+}
+uint32_t installNowMs() { return uint32_t(millis()); }
+babytech::boardlink::MotionInstallTarget migrationInstall(
+    productState, productBoardLink.maintenance(), safeForRemoteInstall, installNowMs);
+motion::MotionStateRecovery productRecovery(productState, recoveryHardware);
+class ProductHardware : public motion::MotionProductHardware {
+public:
+    uint32_t nowMs() const override { return uint32_t(millis()); }
+    const char* unavailable() const override {
+        if (commissioningActive()) return "commissioning_active";
+        if (ota.maintenanceActive()) return "ota_active";
+        if (wifiSetup.busy()) return "wifi_busy";
+        if (endpoint.busy() || motor.operationBusy() || queue.active() ||
+            productRecovery.motionPending()) return "busy";
+        return nullptr;
+    }
+    bool newExecution(char (&id)[33]) override {
+        uint32_t words[4];
+        uint32_t nonzero;
+        do {
+            nonzero = 0;
+            for (auto& word : words) { word = esp_random(); nonzero |= word; }
+        } while (!nonzero);
+        constexpr char hex[] = "0123456789abcdef";
+        for (size_t i = 0; i < 4; ++i)
+            for (size_t digit = 0; digit < 8; ++digit)
+                id[i * 8 + digit] = hex[(words[i] >> ((7 - digit) * 4)) & 15];
+        id[32] = 0;
+        return true;
+    }
+    bool stationary() const override {
+        // Complete's display hold is not motion; cleaning also retains UI ownership.
+        const bool flowIdle = !demo.busy() || demo.stage() == babytech::display::DisplayStage::Complete;
+        return canStarted && !endpoint.busy() && !motor.operationBusy() &&
+            !queue.active() && flowIdle && (demo.stationary() || demoExecutor.stopConfirmed()) &&
+            motor.affectedAxesStationary();
+    }
+    bool workbenchBusy() const override {
+        return endpoint.busy() || motor.operationBusy() || queue.active() ||
+            (demo.busy() && demo.stage() != babytech::display::DisplayStage::Complete);
+    }
+    bool workbenchStationary() const override {
+        return canStarted && !workbenchBusy() && motor.affectedAxesStationary();
+    }
+    void stopWorkbench(uint32_t nowMs) override {
+        if (demo.busy() || demo.referenceValid()) demo.stop(nowMs);
+        else queue.cancel("stopped"); // Demo Stop already calls this existing all-axis backend.
+    }
+    const char* recoveringExecutionId() const override {
+        return productRecovery.motionPending() && productState.ready() &&
+            productState.state().slot.kind != babytech::boardlink::MotionSlotKind::Empty
+            ? productState.state().slot.executionId : "";
+    }
+    void stopRecovery(uint32_t nowMs) override { recoveryHardware.supervisedStop(nowMs); }
+};
+ProductHardware productHardware;
+motion::MotionProductRuntime productRuntime(productState, product, demo, productHardware);
+motion::MotionResultDelivery<babytech::boardlink::ArduinoBoardLink> resultDelivery(productBoardLink, productState);
+bool receiptProduct(const babytech::boardlink::CloudReceipt& receipt, uint32_t) {
+    return resultDelivery.receipt(receipt);
+}
+bool contextProduct(const babytech::boardlink::ProductContext& context, uint32_t nowMs,
+                    babytech::boardlink::ContextResult& result) {
+    return productRuntime.context(context, nowMs, result);
+}
+bool commandProduct(const babytech::boardlink::CommandMessage& command, uint32_t nowMs,
+                    babytech::boardlink::CommandResult& result) {
+    return productRuntime.command(command, nowMs, result);
+}
+bool stopProduct(const babytech::v4::StopRequest& request, uint32_t nowMs) {
+    return productRuntime.stop(request, nowMs);
+}
+bool productResultReady(babytech::boardlink::CommandResult& result) {
+    return productRuntime.resultReady(result);
+}
+bool queryProductResult(const babytech::boardlink::ResultQuery& query,
+                        babytech::boardlink::QueriedResult& result) {
+    return babytech::boardlink::queryMotionResult(productState, query, result);
+}
 String demoConfigJson;
-bool demoBusy() { return demo.busy(); }
-#else
-bool demoBusy() { return false; }
-#endif
+bool demoBusy() { return recoveryMotionPending() || demo.busy() || product.ownsMotion() || product.eventPending(); }
+
+bool recoveryMotionPending() {
+    return productRecovery.motionPending();
+}
+
+bool otaWriterBusy() {
+    // Historic upload receipts and enabled holding drivers are not movement.
+    bool productWriter = false;
+    productWriter = product.active() || product.ownsMotion() ||
+        (demo.busy() && demo.stage() != babytech::display::DisplayStage::Complete);
+    return productWriter || recoveryMotionPending() || endpoint.busy() || queue.active();
+}
+
+bool networkChangeBusy() {
+    if (commissioningActive()) return true;
+    bool stationaryPendingEvent = false;
+    // A pending receipt needs connectivity; it is not physical motion.
+    if (demo.busy() || product.ownsMotion()) return true;
+    stationaryPendingEvent = product.pendingEventSettled();
+    // hasActiveMotion also counts enabled-but-stationary drivers. Pending
+    // delivery may reconnect only with fresh stationary evidence for every axis.
+    return endpoint.busy() || (motor.hasActiveMotion() && !stationaryPendingEvent) ||
+        queue.active() || ota.maintenanceActive();
+}
 
 constexpr char kScaleIoNamespace[] = "scale-io";
 constexpr char kScaleIoPinsKey[] = "pins";
@@ -366,8 +573,8 @@ void loadScalePins() {
     preferences.end();
     const int doutPin = packed & 0xFF;
     const int sckPin = (packed >> 8) & 0xFF;
-    const bool checksumValid = ((packed >> 16) & 0xFF) == (doutPin ^ 0xFF) &&
-                               ((packed >> 24) & 0xFF) == (sckPin ^ 0xFF);
+    const bool checksumValid = ((packed >> 16) & 0xFF) == static_cast<uint32_t>(doutPin ^ 0xFF) &&
+                               ((packed >> 24) & 0xFF) == static_cast<uint32_t>(sckPin ^ 0xFF);
     if (checksumValid && scalePinsAllowed(doutPin, sckPin)) {
         scaleDoutPin = doutPin;
         scaleSckPin = sckPin;
@@ -557,70 +764,93 @@ bool argDecimal(const char* name, double& out) {
 }
 
 // ---------------------------------------------------------------------------
-// Brain link: v2 shared endpoint, bounded receive and event servicing.
+// Brain link: product UART v4. The retained shared v2 endpoint has no UART
+// transport; workbench cancellation still uses its internal CAN adapter.
 // ---------------------------------------------------------------------------
 void sendFrame(const babytech::v2::Frame& frame) {
-#if MOTION_UART_PEER == MOTION_UART_PEER_BRAIN
-    uint8_t bytes[babytech::v2::kMaxFrameSize];
-    const size_t n=babytech::v2::encode(frame,bytes,sizeof(bytes));
-    if (n) brain.write(bytes,n);
-#else
     (void)frame;
-#endif
 }
 void serviceBrainLink() {
-#if MOTION_UART_PEER == MOTION_UART_PEER_BRAIN
-    using namespace babytech::v2;
-    if (millis()-lastBrainByteAt>kByteTimeoutMs) parser.reset();
-    boardMotion.setRadioBusy(wifiSetup.busy() || queue.active() || ota.maintenanceActive());
-    for (size_t count=0;count<kLinkBytesPerPass && brain.available()>0;++count) {
-        lastBrainByteAt=millis(); Frame request,response;
-        if (parser.push(uint8_t(brain.read()),request)) {
-            // Endpoint validates and deduplicates before QueueBoardMotion::stop
-            // cancels any queue. Reads cannot acquire mechanical ownership.
-            if (endpoint.handle(request,millis(),response)) sendFrame(response);
-        }
+    babytech::boardlink::Status status;
+    status.snapshot = product.displaySnapshot();
+    status.snapshot.cloudConnected = false;
+    status.snapshot.startEnabled = false;
+    status.sampleUptimeMs = millis();
+    status.contextVersion = product.context().profileVersion;
+    status.motionBusy = controlBusy();
+    status.stationary = productHardware.stationary();
+    status.eventPending = product.eventPending();
+    strlcpy(status.productProgress, product.progress(), sizeof(status.productProgress));
+    strlcpy(status.productError, product.errorCode(), sizeof(status.productError));
+    status.isPreparing = product.active();
+    const auto resources = productResources(status.sampleUptimeMs);
+    status.lowWaterValid = resources.waterValid;
+    status.lowWater = resources.lowWater;
+    status.powderValid = resources.powderValid;
+    if (resources.powderValid && resources.powderGrams > 0)
+        status.powderGrams = static_cast<int32_t>(resources.powderGrams);
+    status.actuatorOperational = product.flowConfigured() && product.referenceValid() && motor.ready();
+    status.actuatorConfigValid = product.flowConfigured();
+    status.actuatorBusHealthy = motor.ready();
+    status.actuatorPositionReferenced = product.referenceValid();
+    status.executionAuthorized = product.executionAuthorized();
+    status.feedingContextConfigured = product.hasContext();
+    const auto& babyId = product.context().babyId;
+    if (babyId.size() < sizeof(status.babyId)) {
+        memcpy(status.babyId, babyId.data(), babyId.size());
+        status.babyId[babyId.size()] = 0;
+    } else {
+        status.feedingContextConfigured = false;
     }
-    Frame event;
-    for (uint8_t i=0;i<2 && endpoint.tick(millis(),event);++i) sendFrame(event);
-#else
-    if (ota.maintenanceActive()) { while (brain.available() > 0) brain.read(); return; }
-    uint8_t bytes[babytech::display::kDisplayMaxFrameSize];
-    for (size_t count = 0; count < kLinkBytesPerPass && brain.available() > 0; ++count) {
-        const auto n = displayLink.receive(uint8_t(brain.read()), millis(), bytes, sizeof(bytes));
-        if (n) brain.write(bytes, n);
-    }
-    const auto n = displayLink.state(millis(), bytes, sizeof(bytes));
-    if (n) brain.write(bytes, n);
-#endif
+    productRecovery.project(status);
+    productRuntime.project(status, productBoardLink.link().connected(status.sampleUptimeMs),
+                           productRecovery.motionPending());
+    if (status.executionOwner == babytech::boardlink::ExecutionOwner::Workbench)
+        status.stationary = productHardware.workbenchStationary();
+    productBoardLink.poll(status.sampleUptimeMs, &status);
+    if (productBoardLink.takeFailure() != babytech::v4::LinkFailure::None ||
+        !productBoardLink.link().healthy())
+        productRuntime.linkLost(millis());
 }
 
 bool demoManualMutation() {
     if (demoBusy()) { sendError(409, F("demo_busy")); return false; }
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
-    demo.invalidate();
-#endif
+    // Preserve observed faults before a manual action can clear their evidence.
+    // Admission alone is not movement or an execution handoff.
+    if (demo.referenceValid() && !demoExecutor.healthy()) demo.invalidate();
     return true;
 }
 
 // Stop remains reachable in every phase, including gaps between scripts.
-bool stopDemoOwnership() {
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+enum class StopOwnershipResult { None, Requested, Unconfirmed };
+
+StopOwnershipResult stopDemoOwnership() {
+    if (productRuntime.ownsMotion())
+        return productRuntime.stopOwned(millis()) ? StopOwnershipResult::Requested
+                                                  : StopOwnershipResult::Unconfirmed;
+    if (product.ownsMotion()) {
+        bool wasActive = false;
+        return product.stop(millis(), wasActive) ? StopOwnershipResult::Requested
+                                                : StopOwnershipResult::Unconfirmed;
+    }
     if (demo.busy() || demo.referenceValid()) {
         demo.stop(millis());
-        return true;
+        return demo.error() == babytech::display::DisplayError::CanFault
+            ? StopOwnershipResult::Unconfirmed : StopOwnershipResult::Requested;
     }
-#endif
-    return false;
+    return StopOwnershipResult::None;
 }
 
 bool stopDemoIfOwned() {
-    if (!stopDemoOwnership()) return false;
-    sendJson(202, F("{\"ok\":true,\"message\":\"stop_requested\"}"));
+    const auto result = stopDemoOwnership();
+    if (result == StopOwnershipResult::None) return false;
+    if (result == StopOwnershipResult::Unconfirmed)
+        sendError(503, F("stop_unconfirmed"));
+    else
+        sendJson(202, F("{\"ok\":true,\"message\":\"stop_requested\"}"));
     return true;
 }
 
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
 String demoStatusJson() {
     String s = "{\"available\":true,\"stage\":\"";
     s += babytech::display::displayStageKey(demo.stage());
@@ -633,17 +863,17 @@ String demoStatusJson() {
     s += ",\"configured\":"; s += demo.config().configured ? "true" : "false";
     s += '}'; return s;
 }
-bool applyDemoJson(const String& json, std::string& error) {
+bool applyDemoJson(const String& json, std::string& error, bool boot = false) {
     motion::DemoConfig candidate;
     if (!motion::parseDemoConfig(json.c_str(), json.length(), candidate, error)) return false;
-    if (!motion::demoRotationMatches(candidate, boardRotation)) { error = "rotation_distance_mismatch"; return false; }
+    if (boot) demoExecutor.configureStopAxes(candidate);
     if (!demo.apply(std::move(candidate))) { error = "demo_busy"; return false; }
     demoConfigJson = json;
     demoExecutor.configure(demo.config());
     return true;
 }
 void handleDemoConfig() {
-    if (demo.busy() || !demoExecutor.available() || wifiSetup.busy()) { sendError(409, F("demo_busy")); return; }
+    if (demoBusy() || !demoExecutor.available() || wifiSetup.busy()) { sendError(409, F("demo_busy")); return; }
     std::string error;
     if (!applyDemoJson(server.arg("json"), error)) {
         String body = "{\"error\":\""; body += error.c_str(); body += "\"}";
@@ -652,23 +882,35 @@ void handleDemoConfig() {
     sendJson(200, demoStatusJson());
 }
 void handleDemoAction() {
-    if (wifiSetup.busy() || !motion::demoRotationMatches(demo.config(), boardRotation)) {
+    if (demoBusy() || wifiSetup.busy()) {
         sendError(409, F("configuration_or_wifi_busy")); return;
     }
     const String action = server.arg("action");
     bool accepted = false;
+    const auto movementBefore = motor.movementGeneration();
     if (action == "initialize") accepted = demo.initialize(millis());
     else if (action == "start") accepted = demo.start(millis());
     else if (action == "stage") {
         const String id = server.arg("stage");
         for (uint8_t i = 0; i < 5; ++i) if (id == motion::kDemoStageIds[i]) accepted = demo.single(i, millis());
     }
+    if (accepted || motor.movementGeneration() != movementBefore) productRuntime.workbenchAccepted();
     if (!accepted) { sendError(409, F("not_ready")); return; }
     sendJson(202, demoStatusJson());
 }
 void pollDemo() {
     demoExecutor.poll(millis());
     demo.tick(millis());
+    product.tick(millis());
+    productRecovery.poll();
+    if (!endpoint.busy() && !motor.operationBusy() && !queue.active() && !product.active() &&
+        (!demo.busy() || demo.stage() == babytech::display::DisplayStage::Complete))
+        motor.releaseSettledMotion(); // Retire settled control axes, not their independent OTA evidence.
+    productRuntime.poll(millis());
+    // A runtime/recovery owner may still need to archive its execution slot.
+    // This only delays clearing that slot, never confirmation of queued history.
+    resultDelivery.poll(millis(), !productRuntime.active() && !productRecovery.executionPending() &&
+        productHardware.stationary(), commissioningActive() || ota.maintenanceActive());
     static babytech::display::DisplayStage previous = babytech::display::DisplayStage::Unknown;
     static const char* previousReason = nullptr;
     if (previous != demo.stage() || previousReason != demo.reason()) {
@@ -678,9 +920,8 @@ void pollDemo() {
         previous = demo.stage(); previousReason = demo.reason();
     }
 }
-#else
-void pollDemo() {}
-#endif
+
+
 
 // ---------------------------------------------------------------------------
 // HTTP handlers
@@ -703,8 +944,8 @@ void handleStatus() {
         return;
     }
     const uint8_t target = static_cast<uint8_t>(id);
-    // Reading a status must not steal the polling target from a running queue.
-    if (!endpoint.busy() && !queue.active()) motor.watch(target);
+    // Reading status must not steal the poll target from a product or debug run.
+    if (!endpoint.busy() && !queue.active() && !demoBusy()) motor.watch(target);
     // statusJson is already a complete JSON object; the body is forwarded
     // unmodified. It carries no uptime field.
     sendJson(200, motor.statusJson(target));
@@ -822,6 +1063,8 @@ void cancelUartForLocalDisable() {
     for (uint8_t i = 0; i < 2 && endpoint.cancelPending(event); ++i) sendFrame(event);
 }
 
+bool rejectDuringMaintenance();
+
 void handleEnable() {
     long id = 0;
     if (!argInteger("id", id) || id < 1 || id > 255) {
@@ -838,6 +1081,7 @@ void handleEnable() {
         return;
     }
     const bool enabling = enabledRaw == "1";
+    if (enabling && rejectDuringMaintenance()) return;
     if (enabling && !demoManualMutation()) return;
     if (!enabling) stopDemoOwnership();
     if (enabling) {
@@ -920,7 +1164,13 @@ void handleMove() {
     request.decelRpmS = static_cast<float>(decel);
     request.currentMa = static_cast<uint16_t>(currentMa);
 
-    sendResult("move", id, motor.move(request));
+    const auto movementBefore = motor.movementGeneration();
+    const motion::Result result = motor.move(request);
+    if (result.code < 300 || motor.movementGeneration() != movementBefore) {
+        demo.invalidate();
+        productRuntime.workbenchAccepted();
+    }
+    sendResult("move", id, result);
 }
 
 void handleStop() {
@@ -945,10 +1195,14 @@ void handleStop() {
 // it never claims the shaft physically stopped - clearing internal bookkeeping
 // is not evidence of that. GET cannot reach this handler.
 void handleControlReset() {
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    const bool pairedProduct = productRuntime.ownsMotion();
+    if (pairedProduct) productRuntime.stopOwned(millis());
+    if (!pairedProduct && product.ownsMotion()) {
+        bool wasActive = false;
+        product.stop(millis(), wasActive);
+    }
     demo.invalidate();
-    if (demo.busy()) demo.stop(millis());
-#endif
+    if (!pairedProduct && demo.busy()) demo.stop(millis());
     // First record what is being cleared: without this the reset itself would
     // erase the only evidence of the state it repaired.
     debugLog.addf(millis(), "warn", "control.reset",
@@ -998,6 +1252,7 @@ void handleEnableAll() {
     if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
         sendError(400, F("enabled must be 0 or 1")); return;
     }
+    if (enabled && rejectDuringMaintenance()) return;
     if (enabled && !demoManualMutation()) return;
     if (!enabled) stopDemoOwnership();
     if (enabled) {
@@ -1043,6 +1298,7 @@ void handleCommand() {
     // running program.
     const bool stopLike = kind==motion::CommandKind::Stop || kind==motion::CommandKind::Interrupt ||
         (kind==motion::CommandKind::Enable && bytes[3]==0);
+    if (!stopLike && kind != motion::CommandKind::Read && rejectDuringMaintenance()) return;
     const bool disabling = kind == motion::CommandKind::Enable && bytes[3] == 0;
     if (disabling) stopDemoOwnership();
     else if (stopLike && stopDemoIfOwned()) return;
@@ -1067,7 +1323,16 @@ void handleCommand() {
         sendError(409, F("wifi_busy")); return;
     }
     if (kind == motion::CommandKind::Enable && bytes[3] == 0) cancelUartForLocalDisable();
-    sendResult("command", bytes[0], motor.command(bytes, hex.length()/2));
+    const auto movementBefore = motor.movementGeneration();
+    const motion::Result result = motor.command(bytes, hex.length()/2);
+    if ((result.code < 300 || motor.movementGeneration() != movementBefore) &&
+        motion::commandChangesReference(kind, bytes)) demo.invalidate();
+    if ((result.code < 300 || motor.movementGeneration() != movementBefore) &&
+        (kind == motion::CommandKind::Move || kind == motion::CommandKind::DirectMove ||
+         kind == motion::CommandKind::Experiment || kind == motion::CommandKind::Home)) {
+        productRuntime.workbenchAccepted();
+    }
+    sendResult("command", bytes[0], result);
 }
 
 String limitsJson() {
@@ -1232,6 +1497,8 @@ void handleQueueStart() {
     const motion::Result started =
         queue.start(program.c_str(), program.length(), repeat, boardRotation, millis());
     if (started.code < 300) {
+        if (queue.changesReference()) demo.invalidate();
+        productRuntime.workbenchAccepted();
         // Only a started program takes the bus over: finish any pending UART
         // record so the two owners cannot interleave. An invalid program has no
         // side effects at all - nothing is cancelled and nothing is sent.
@@ -1269,7 +1536,7 @@ void loadQueryBudget() {
 }
 
 void handleQueryBudget() {
-    if (queue.active() || endpoint.busy() || motor.operationBusy() || motor.queries().inflight()) {
+    if (motionBusy() || motor.operationBusy() || motor.queries().inflight()) {
         sendError(409,F("query_budget_busy"));return;
     }
     const char* fields[]={"queriesPerSecond","gapMs","timeoutMs","cooldownMs","maxInflight"};
@@ -1307,7 +1574,7 @@ void loadSyncSettings() {
 }
 
 void handleSyncSettings() {
-    if(queue.active() || endpoint.busy() || motor.operationBusy()) {sendError(409,F("sync_busy"));return;}
+    if(motionBusy() || motor.operationBusy()) {sendError(409,F("sync_busy"));return;}
     double progress=0;long v[6]={};
     const char* fields[]={"timeToleranceMs","feedbackTimeoutMs","prepareTimeoutMs","stopTimeoutMs","responseBudgetMs","completionTenths"};
     if(!argDecimal("progressTolerance",progress) || progress<=0 || progress>0.25) {
@@ -1335,23 +1602,64 @@ bool rejectDuringOta() {
     return true;
 }
 
+bool rejectDuringMaintenance() {
+    if (commissioningActive()) {
+        sendError(409, F("commissioning_active"));
+        return true;
+    }
+    return rejectDuringOta();
+}
+
+bool safeForCommissioning() {
+    return canStarted && !controlBusy() && !motor.operationBusy() &&
+        !wifiSetup.busy() && !ota.maintenanceActive() && !powderScale.tareInProgress() &&
+        demo.stationary();
+}
+bool safeForInstallation() {
+    if (controlBusy() || motor.operationBusy() || wifiSetup.busy() ||
+        ota.maintenanceActive() || powderScale.tareInProgress()) return false;
+    // Installation only writes identity/configuration. A motor-free boot needs
+    // no feedback; once motion was submitted, retain the original stop proof.
+    return motor.movementGeneration() == 0 || safeForCommissioning();
+}
+void pollCommissioningConsole() {
+    const bool localSafe = !productBoardLink.maintenanceActive() && safeForCommissioning();
+    commissioningSession.poll(Serial, millis(), localSafe,
+        [](const char* line, char* output, size_t capacity) { return ota.formatSerialLine(line, output, capacity); });
+}
+
 }  // namespace
 
 void setup() {
     Serial.begin(115200);
+    Serial.setTxTimeoutMs(0);
     Serial.println();
     Serial.println("[boot] Babytech Motion: AP + HTTP debug bridge. No motion on boot.");
 
-    uint64_t boot=(uint64_t(esp_random())<<32)|esp_random();
+    uint64_t boot = 0;
+    while (!boot) boot = (uint64_t(esp_random()) << 32) | esp_random();
     // The diagnostic log starts with this boot's identity and the reset reason,
     // once. It stores no credentials and nothing about the previous session.
     debugLog.begin(bootIdHex(boot).c_str());
     debugLog.addf(millis(), "info", "boot", "boot=%s reset=%d",
                   debugLog.bootId(), static_cast<int>(esp_reset_reason()));
     endpoint.begin(boot);
-    brain.begin(kLinkBaud, SERIAL_8N1, kLinkRxPin, kLinkTxPin);
-    Serial.printf("[uart] peer=%s TX43/RX44 @115200\n",
-        MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY ? "display-v3" : "brain-v2");
+    commissioningSession.begin(babytech::v4::Role::Motion, boot);
+    if (!productBoardLink.begin(babytech::v4::Role::Motion, kLinkRxPin, kLinkTxPin, kLinkBaud, true))
+        Serial.printf("[uart] v4 unavailable, pairing state=%u\n",
+                      unsigned(productBoardLink.pairingState()));
+    productBoardLink.setExportSource(&migrationExport);
+    productBoardLink.setMaintenanceTarget(&migrationMaintenance);
+    productBoardLink.install().setTarget(&migrationInstall);
+    productSession = &product;
+    product.setExecutionAuthorized(true);
+    if (BABYTECH_V1_MOTOR_TEST == 1)
+        Serial.printf("[product] V1 motor test: water normal, powder %.0fg are test values; no measured temperature. Not for feeding.\n",
+                      double(kV1TestPowderGrams));
+    if (BABYTECH_LOW_WATER_PIN >= 0)
+        pinMode(BABYTECH_LOW_WATER_PIN,
+                BABYTECH_LOW_WATER_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
+    Serial.println("[uart] peer=brain-v4 TX43/RX44 @115200");
 
     loadScalePins();
     if (!powderScale.begin(makeScaleConfig(), millis())) {
@@ -1376,24 +1684,45 @@ void setup() {
     loadQueryBudget();
     loadSyncSettings();
     loadRotationDistances();
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
     std::string configError;
-    if (!applyDemoJson(reinterpret_cast<const char*>(demoJsonStart), configError))
+    if (!applyDemoJson(reinterpret_cast<const char*>(demoJsonStart), configError, true))
         Serial.printf("[demo] configuration rejected: %s\n", configError.c_str());
-#endif
     wifiSetup.begin();
+    initCloudIdentity();
+    if (productBoardLink.deviceId()[0]) cloudDeviceId = productBoardLink.deviceId();
+    if (const auto* pairing = productBoardLink.verifiedPairing()) {
+        const auto loaded = productRecovery.begin(*pairing, millis());
+        Serial.printf("[product] v4 state load=%u; recovered actions are never resumed\n",
+                      unsigned(loaded));
+    }
+    productBoardLink.setResultQueryHandler(queryProductResult);
+    // Admission uses the v4 Store/context barrier; old event data is inspected
+    // read-only below and never erased or replayed during ordinary boot.
+    product.setContextStorageReady(productState.ready());
+    const auto legacyState = ProductEventOutbox::inspectLegacyState();
+    if (legacyState != ProductEventOutbox::LegacyState::Empty) {
+        product.setEventPending(true);
+        if (!productRecovery.motionPending()) product.recoverAfterRestart(millis());
+        Serial.println("[product] legacy event requires controlled migration; record unchanged");
+    }
+    productBoardLink.setCommandHandler(commandProduct);
+    productBoardLink.setStopHandler(stopProduct);
+    productBoardLink.setCommandReadyHandler(productResultReady);
+    productBoardLink.setContextHandler(contextProduct);
+    productBoardLink.setCloudReceiptHandler(receiptProduct);
+    ota.useExternalSerialReader();
     ota.begin();
 
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/api/limits", HTTP_GET, []() { sendJson(200, limitsJson()); });
-    server.on("/api/limits", HTTP_POST, []() { if (!rejectDuringOta()) handleLimits(); });
+    server.on("/api/limits", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleLimits(); });
     server.on("/api/can-debug", HTTP_GET, []() { sendJson(200, motor.canDebugJson()); });
     server.on("/api/config-result", HTTP_GET, []() { sendJson(200, motor.configJson()); });
     // Legacy API name: toggles optional idle Page refresh only. Required
     // Controller/Await/Sync feedback remains scheduled during active work.
     server.on("/api/polling", HTTP_POST, []() {
-        if (rejectDuringOta()) return;
+        if (rejectDuringMaintenance()) return;
         if (demoBusy()) { sendError(409, F("demo_busy")); return; }
         long enabled = 0;
         if (!argInteger("enabled", enabled) || (enabled != 0 && enabled != 1)) {
@@ -1416,37 +1745,35 @@ void setup() {
         sendJson(200, String(logJson, length));
     });
     server.on("/api/scale", HTTP_GET, []() { sendJson(200, scaleStatusJson()); });
-    server.on("/api/scale/config", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleConfig(); });
-    server.on("/api/scale/tare", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleTare(); });
-    server.on("/api/scale/calibrate", HTTP_POST, []() { if (!rejectDuringOta()) handleScaleCalibrate(); });
+    server.on("/api/scale/config", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleScaleConfig(); });
+    server.on("/api/scale/tare", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleScaleTare(); });
+    server.on("/api/scale/calibrate", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleScaleCalibrate(); });
+    // Mixed routes validate first, then allow read/stop/disable in commissioning.
+    // Preserve the existing OTA reservation policy independently.
     server.on("/api/command", HTTP_POST, []() { if (!rejectDuringOta()) handleCommand(); });
     server.on("/api/enable", HTTP_POST, []() { if (!rejectDuringOta()) handleEnable(); });
     server.on("/api/enable-all", HTTP_POST, []() { if (!rejectDuringOta()) handleEnableAll(); });
-    server.on("/api/move", HTTP_POST, []() { if (!rejectDuringOta()) handleMove(); });
+    server.on("/api/move", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleMove(); });
     server.on("/api/stop", HTTP_POST, handleStop);
     server.on("/api/stop-all", HTTP_POST, handleStopAll);
     // Operator reset of volatile control ownership: POST only, available while
     // the queue, UART or a supervised action is busy, and never a re-enable.
-    server.on("/api/control/reset", HTTP_POST, []() { if (!rejectDuringOta()) handleControlReset(); });
+    server.on("/api/control/reset", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleControlReset(); });
     // Board queue: GET never executes anything, start validates the whole
     // program before the first CAN frame, cancel also stops everything.
     server.on("/api/queue", HTTP_GET, []() { sendJson(200, queue.statusJson()); });
     server.on("/api/query-budget", HTTP_GET, []() { sendJson(200, motor.queryStatusJson()); });
-    server.on("/api/query-budget", HTTP_POST, []() { if (!rejectDuringOta()) handleQueryBudget(); });
+    server.on("/api/query-budget", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleQueryBudget(); });
     server.on("/api/sync-settings", HTTP_GET, [](){sendJson(200,queue.syncSettingsJson());});
-    server.on("/api/sync-settings", HTTP_POST, []() { if (!rejectDuringOta()) handleSyncSettings(); });
-    server.on("/api/queue/start", HTTP_POST, []() { if (!rejectDuringOta()) handleQueueStart(); });
+    server.on("/api/sync-settings", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleSyncSettings(); });
+    server.on("/api/queue/start", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleQueueStart(); });
     server.on("/api/queue/cancel", HTTP_POST, handleQueueCancel);
     server.on("/api/motor-distance", HTTP_GET, handleMotorDistance);
-    server.on("/api/motor-distance", HTTP_POST, []() { if (!rejectDuringOta()) handleMotorDistance(); });
-#if MOTION_UART_PEER == MOTION_UART_PEER_DISPLAY
+    server.on("/api/motor-distance", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleMotorDistance(); });
     server.on("/api/demo", HTTP_GET, []() { sendJson(200, demoStatusJson()); });
     server.on("/api/demo/config", HTTP_GET, []() { sendJson(200, demoConfigJson); });
-    server.on("/api/demo/config", HTTP_POST, []() { if (!rejectDuringOta()) handleDemoConfig(); });
-    server.on("/api/demo/action", HTTP_POST, []() { if (!rejectDuringOta()) handleDemoAction(); });
-#else
-    server.on("/api/demo", HTTP_GET, []() { sendJson(200, F("{\"available\":false}")); });
-#endif
+    server.on("/api/demo/config", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleDemoConfig(); });
+    server.on("/api/demo/action", HTTP_POST, []() { if (!rejectDuringMaintenance()) handleDemoAction(); });
     server.onNotFound(handleNotFound);
     server.begin();
     debugLog.add(millis(), "info", "http.ready", "port=80 no_motion_on_boot");
@@ -1461,8 +1788,10 @@ void loop() {
     // entry is written only when something actually changed.
     debugLogPoll(millis());
     powderScale.poll(millis());
+    pollProductResources();
     motor.poll(false);
     serviceBrainLink();
+    pollCommissioningConsole();
     server.handleClient();
     ota.poll();
     // Process explicit stop/cancel inputs before demo or queue advancement.

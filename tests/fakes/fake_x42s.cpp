@@ -19,6 +19,7 @@ bool failNextMoveTx = false;
 
 namespace {
 uint32_t g_millis = 0;
+uint32_t g_millisReadStep = 0;
 
 void record(const CanRawFrame& frame, const TxRecord& rec) {
     capturedTX.push_back(frame);
@@ -39,10 +40,12 @@ void fakeReset() {
     txErrorCounter = 0;
     failNextMoveTx = false;
     g_millis = 0;
+    g_millisReadStep = 0;
 }
 
 void setMillis(uint32_t now) { g_millis = now; }
 void advanceMillis(uint32_t delta) { g_millis += delta; }
+void setMillisReadStep(uint32_t delta) { g_millisReadStep = delta; }
 
 void injectRx(const CanRawFrame& frame) { rxQueue.push_back(frame); }
 
@@ -145,7 +148,11 @@ bool sawStopFor(uint8_t addr) {
 }  // namespace fakecan
 
 // millis() is declared in the fake Arduino.h and read by MotorControl.cpp.
-unsigned long millis() { return fakecan::g_millis; }
+unsigned long millis() {
+    const auto now = fakecan::g_millis;
+    fakecan::g_millis += fakecan::g_millisReadStep;
+    return now;
+}
 
 // --- Fake X42sProtocol implementation -------------------------------------
 

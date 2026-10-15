@@ -1,5 +1,7 @@
 # 可重复烧录工作流
 
+描述对象：既有 Motion 四镜像包的离线预检和显式 USB 烧录。Milestone：V1，`V1-device`，成对 Brain/Motion UART v4。此工具不安装产品身份、不登记 Cloud，也不授权电机动作；Brain 的原生上传入口见 [README](../README.md)。
+
 ## 2026-09-22 已有记录
 
 依据 `out/flash-check/FLASH-RESULT.txt`、`backup.log`、`flash-motion.log` 和 `monitor.log`：
@@ -15,15 +17,15 @@
 
 `tools/flash-device.py` 支持当前项目 ESP32-S3 16 MB 分区布局。工具独立于前端和构建过程，不更改源文件、不执行 git 操作、不自动重编译，也不使用上次串口作为默认值。板卡的 8 MB OPI PSRAM 配置仍由构建配置负责；工具核对芯片和 Flash，不把它当作 PSRAM 功能测试。
 
-使用本机 PlatformIO 的 Python（包含 esptool/pyserial 依赖），PowerShell 示例：
+使用本机 PlatformIO 的 Python（包含 esptool/pyserial 依赖），PowerShell 示例。替换发布标识、端口和本次核对的 MAC；上面的旧包/COM3 仅是历史记录，不作为当前 v4 上传目标：
 
 ```powershell
 $flashPython = "$env:USERPROFILE/.platformio/penv/Scripts/python.exe"
 # 默认只读本地文件；不连接串口，不复位板卡
-& $flashPython tools/flash-device.py --package out/releases/motion-20260921T132548Z
+& $flashPython tools/flash-device.py --package out/releases/device-controller-RELEASE_ID
 
 # 仅在确实要烧录时运行；端口和 MAC 必须是本次确认的目标
-& $flashPython tools/flash-device.py --package out/releases/motion-20260921T132548Z --execute --port COM3 --expected-mac 3c:0f:02:c5:fe:64
+& $flashPython tools/flash-device.py --package out/releases/device-controller-RELEASE_ID --execute --port COM_MOTION --expected-mac EXPECTED_MAC
 ```
 
 预检要求包中有四个镜像和 `SHA256SUMS.txt`（sha256sum 格式）或 `SHA256SUMS.json`（文件名到摘要映射）。它验证摘要、ESP32-S3 镜像头、分区边界及应用容量。摘要只能检测包内容变化，不证明包的发布者身份或源码新旧。
@@ -40,4 +42,4 @@ $flashPython = "$env:USERPROFILE/.platformio/penv/Scripts/python.exe"
 
 烧录后可人工访问设备网页检查状态。工具不连接 Wi-Fi、不修改系统网络、不发送电机/校准操作。自动烧录不能替代机构运动、CAN、UART、称重精度验收。
 
-工具测试：`python tests/test_flash_device.py`。本次开发仅运行离线测试和已有包预检，没有重新连接或烧录板卡。
+工具测试入口：`python3 tests/test_flash_device.py`。上面的历史开发只执行离线测试和包预检；本文整理不重新烧录，也不覆盖 2026-09-22 的实际刷写记录。该记录证明当时镜像/NVS 校验，不代表当前两板所有硬件工况已验收。

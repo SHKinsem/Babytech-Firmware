@@ -6,7 +6,13 @@ namespace motion {
 // Pure protocol endpoint: bounded caller-owned IO and a short ACK history.
 class DisplayLinkCore {
 public:
-    explicit DisplayLinkCore(DemoFlowController& flow) : flow_(flow) {}
+    using IntentHandler = bool (*)(uint32_t);
+    using SnapshotProvider = babytech::display::DisplaySnapshot (*)();
+    explicit DisplayLinkCore(DemoFlowController& flow,
+                             IntentHandler start = nullptr,
+                             IntentHandler initialize = nullptr,
+                             SnapshotProvider snapshot = nullptr)
+        : flow_(flow), start_(start), initialize_(initialize), snapshot_(snapshot) {}
     size_t receive(uint8_t byte, uint32_t now, uint8_t* output, size_t capacity) {
         if (uint32_t(now - byteAt_) > 100) parser_.reset();
         byteAt_ = now;
@@ -16,17 +22,20 @@ public:
         if (!babytech::display::decodeDisplayIntentPayload(frame, intent)) return 0;
         for (const auto& saved : history_) if (saved.valid && saved.sequence == frame.sequence)
             return ack(frame.sequence, saved.intent == intent && saved.accepted, output, capacity);
+        const auto currentStage = snapshot_ ? snapshot_().stage : flow_.stage();
         const bool accepted = intent == babytech::display::DisplayIntent::StartFeeding
-            ? flow_.start(now)
+            ? (start_ ? start_(now) : flow_.start(now))
             : intent == babytech::display::DisplayIntent::Initialize &&
-                (flow_.stage() == babytech::display::DisplayStage::NotReady ||
-                 flow_.stage() == babytech::display::DisplayStage::Error) && flow_.initialize(now);
+                (currentStage == babytech::display::DisplayStage::NotReady ||
+                 currentStage == babytech::display::DisplayStage::Error ||
+                 currentStage == babytech::display::DisplayStage::Complete) &&
+                (initialize_ ? initialize_(now) : flow_.initialize(now));
         history_[cursor_] = {true, frame.sequence, accepted, intent};
         cursor_ = (cursor_ + 1) % history_.size();
         return ack(frame.sequence, accepted, output, capacity);
     }
     size_t state(uint32_t now, uint8_t* output, size_t capacity) {
-        auto snapshot = flow_.snapshot();
+        auto snapshot = snapshot_ ? snapshot_() : flow_.snapshot();
         if (sent_ && babytech::display::displaySnapshotsEqual(snapshot, last_) && uint32_t(now - stateAt_) < 1000) return 0;
         uint8_t payload[babytech::display::kDisplayMaxPayloadSize];
         const auto n = babytech::display::encodeDisplaySnapshotPayload(snapshot, payload, sizeof(payload));
@@ -54,6 +63,9 @@ private:
     std::array<Saved, 8> history_{};
     size_t cursor_ = 0;
     DemoFlowController& flow_;
+    IntentHandler start_ = nullptr;
+    IntentHandler initialize_ = nullptr;
+    SnapshotProvider snapshot_ = nullptr;
     babytech::display::DisplayFrameParser parser_;
     babytech::display::DisplaySnapshot last_;
     bool sent_ = false;

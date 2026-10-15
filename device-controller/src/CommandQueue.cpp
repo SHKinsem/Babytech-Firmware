@@ -1,5 +1,8 @@
 #include "CommandQueue.h"
+#include "ProtocolGate.h"
+#include "x42s_can_id.h"
 
+#include <algorithm>
 #include <string.h>
 
 namespace motion {
@@ -736,7 +739,9 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     // software supervisor without discarding observed hardware state or
     // sending anything on CAN.
     program_ = scratch;
+    runSyncSettings_ = syncSettings_;
     strictHome_ = false;
+    startSettled_ = false;
     programHash_=2166136261u;
     for(size_t i=0;i<length;++i) programHash_=(programHash_^uint8_t(text[i]))*16777619u;
     sync_.reset();
@@ -758,14 +763,49 @@ Result CommandQueue::start(const char* text, size_t length, long repeat,
     return Result{202, "queue_started"};
 }
 
+bool CommandQueue::changesReference() const {
+    DebugLimits protocolLimits;
+    protocolLimits.maxSpeedTenths = 30000;
+    protocolLimits.maxAccelRpmS = 65535;
+    protocolLimits.maxCurrentMa = 5000;
+    for (uint8_t i = 0; i < program_.count; ++i) {
+        const auto& step = program_.steps[i];
+        switch (step.action) {
+            case QueueAction::Move: case QueueAction::Home:
+            case QueueAction::Torque: case QueueAction::Velocity: return true;
+            case QueueAction::Hex: case QueueAction::Can: {
+                uint8_t bytes[kQueueMaxRawBytes];
+                uint8_t length = step.rawLength;
+                if (step.action == QueueAction::Hex) {
+                    memcpy(bytes, step.raw, length);
+                } else {
+                    if (!x42sCanIsSinglePacketDataFrame(step.canId, step.extended, false)) return true;
+                    bytes[0] = x42sCanAddress(step.canId);
+                    length = step.canLength + 1;
+                    memcpy(bytes + 1, step.canData, step.canLength);
+                }
+                // Broadcast diagnostics/config have the same logical layout.
+                bytes[0] = 1;
+                // Queue-only homing-parameter read; keep the HTTP whitelist unchanged.
+                if (length == 3 && bytes[1] == 0x22 && bytes[2] == 0x6B) break;
+                if (commandChangesReference(validateCommand(bytes, length, protocolLimits), bytes)) return true;
+                break;
+            }
+            default: break;
+        }
+    }
+    return false;
+}
+
 Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
     if (active() || motor_.operationBusy()) return Result{409, "queue_busy"};
     if (!motor_.ready() || motor_.hasFault()) return Result{503, "can_unavailable"};
     if (!program.count || program.hasRaw) return Result{400, "invalid_demo_program"};
+    const SyncSettings settingsForRun = syncSettings_.valid() ? syncSettings_ : productSyncDefaults();
     for (uint8_t i = 0; i < program.count; ++i) {
         const auto& step = program.steps[i];
         if (step.action != QueueAction::SyncBegin) continue;
-        SyncSettings settings = syncSettings_;
+        SyncSettings settings = settingsForRun;
         if (step.syncToleranceProgress > 0)
             settings.tolerance.progress = fmin(settings.tolerance.progress, step.syncToleranceProgress);
         const char* reason = sync_.validate(program.steps + i + 1, step.groupSize,
@@ -773,7 +813,9 @@ Result CommandQueue::startDemo(const QueueProgram& program, uint32_t now) {
         if (reason) { errorLine_ = step.line; setMessage(reason); return Result{400, reason}; }
     }
     program_ = program;
+    runSyncSettings_ = settingsForRun;
     strictHome_ = true;
+    startSettled_ = false;
     sync_.reset();
     programHash_ = 0;  // Demo programs have no DSL source text.
     motionComplete_ = false;
@@ -849,6 +891,7 @@ void CommandQueue::fail(uint32_t now, const char* reason, uint16_t line) {
 }
 
 void CommandQueue::advance(uint32_t now) {
+    startSettled_ = false;
     motor_.queueObserveId_ = 0;
     motor_.queries_.release(CanQueryScheduler::Await);
     ++stepIndex_;
@@ -873,7 +916,7 @@ void CommandQueue::dispatchStep(uint32_t now, const QueueStep& step) {
        step.action==QueueAction::Torque || step.action==QueueAction::Velocity)) ||
        step.action==QueueAction::Hex || step.action==QueueAction::Can) unconfirmedMotion_=true;
     if(step.action==QueueAction::SyncBegin) {
-        SyncSettings settings=syncSettings_;
+        SyncSettings settings=runSyncSettings_;
         if(step.syncToleranceProgress>0) settings.tolerance.progress=fmin(settings.tolerance.progress,step.syncToleranceProgress);
         helixTravelMm_=step.helixTravelMm;
         helixGeometryErrorMm_=step.helixGeometryErrorMm;
@@ -1086,7 +1129,25 @@ void CommandQueue::beginStep(uint32_t now) {
         int32_t position = 0, velocity = 0;
         const bool positionFresh = motor_.freshPosition(step.id, now, position);
         const bool velocityFresh = motor_.freshVelocity(step.id, now, velocity);
-        if (!positionFresh || !velocityFresh || velocity < -5 || velocity > 5) {
+        const auto& node = motor_.nodes_[step.id];
+        const auto& evidence = motor_.physical_[step.id];
+        // A timed torque/velocity stop may leave a fresh but still-moving position
+        // cached. Resolve the next relative target only from post-stop settled data.
+        const bool needsSettledStart = !step.absolute && evidence.stopSubmitted;
+        if (needsSettledStart) {
+            if (!velocityFresh || velocity < -5 || velocity > 5 ||
+                int32_t(node.velocityMs - evidence.stopAt) <= 0) startSettled_ = false;
+            else if (!startSettled_) {
+                startSettled_ = true;
+                startSettledAt_ = node.velocityMs;
+            }
+        }
+        // Frames drained together share a timestamp. Latch zero speed once, then
+        // require a later position update rather than chasing each velocity poll.
+        const bool settledStart = !needsSettledStart ||
+            (startSettled_ && int32_t(node.positionMs - evidence.stopAt) > 0 &&
+             int32_t(node.positionMs - startSettledAt_) > 0);
+        if (!positionFresh || !velocityFresh || velocity < -5 || velocity > 5 || !settledStart) {
             motor_.queries_.demand(step.id, 0x36, CanQueryScheduler::Await, 150, 1000, 2, now);
             motor_.queries_.demand(step.id, 0x35, CanQueryScheduler::Await, 150, 1000, 2, now);
             setMessage(positionFresh && velocityFresh ? "waiting_move_stationary" :
@@ -1144,7 +1205,7 @@ SyncFeedback CommandQueue::syncFeedback(uint8_t id) const {
     f.flagsValid=n.flagsValid;f.homeValid=n.homeFlagsValid;
     const auto match=[&](uint8_t field,uint32_t at,uint32_t& requested) {
         const auto evidence=motor_.queries_.evidence(id,field);requested=evidence.sampleRequestAt;
-        return evidence.receivedAt==at && at-requested<=syncSettings_.responseBudgetMs;
+        return evidence.receivedAt==at && at-requested<=runSyncSettings_.responseBudgetMs;
     };
     f.positionValid=f.positionValid && match(0x36,f.positionAt,f.positionRequestedAt);
     f.velocityValid=f.velocityValid && match(0x35,f.velocityAt,f.velocityRequestedAt);
@@ -1251,9 +1312,15 @@ void CommandQueue::observeMotion(uint32_t now) {
     // Anchor to the completion transition, NOT each subsequent idle response.
     // Otherwise the 3B/36/35 query cycle resets the stationary pair count forever.
     const uint32_t proofAt = home && homeComplete_ ? homeProofAt_ : phaseAt_;
+    // Product scripts poll every configured axis through the shared budget.
+    // Manual moves share that budget too; never renew a sample's receipt-time TTL.
+    const bool budgeted = strictHome_ || !home;
+    const uint32_t window = budgeted ? motor_.demoEvidenceWindow() : 1000;
+    const uint32_t positionWindow = budgeted ? std::min<uint32_t>(window, n.demoPositionFreshMs) : window;
+    const uint32_t velocityWindow = budgeted ? std::min<uint32_t>(window, n.demoVelocityFreshMs) : window;
     const bool fresh = n.positionValid && n.velocityValid &&
         newer(n.positionMs, proofAt) && newer(n.velocityMs, proofAt) &&
-        now-n.positionMs < 1000 && now-n.velocityMs < 1000;
+        now-n.positionMs < positionWindow && now-n.velocityMs < velocityWindow;
     // An accepted CD can still leave the driver's old target unchanged. If the
     // pre-send position was fresh, require the target readback to represent this
     // move before allowing two stationary samples to complete the await.
@@ -1290,7 +1357,7 @@ void CommandQueue::observeMotion(uint32_t now) {
     demand(0x36,200); demand(0x35,200);
     if (home && !homeComplete_) demand(0x3B,300);
     else motor_.queries_.release(step->id,0x3B,CanQueryScheduler::Await);
-    if (!home && (!n.targetValid || !newer(n.targetMs,phaseAt_))) demand(0x33,500);
+    if (!home && (!n.targetValid || !newer(n.targetMs,phaseAt_) || !expectedTargetSeen)) demand(0x33,500);
     else motor_.queries_.release(step->id,0x33,CanQueryScheduler::Await);
 }
 

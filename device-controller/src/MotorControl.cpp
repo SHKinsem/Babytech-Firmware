@@ -8,7 +8,7 @@
 namespace motion {
 namespace {
 
-// Feedback is considered fresh for this long after the frame arrived.
+// Single-axis/current feedback lifetime; multi-axis samples freeze a budget on RX.
 constexpr uint32_t kFeedbackFreshMs = 600;
 // How long an enable or a move acknowledgement may take before it is treated
 // as missing. Neither timeout ever implies success.
@@ -282,6 +282,7 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
         node.homeFlagsValid = true;
         node.homeFlags = frame.data[1];
         node.homeFlagsMs = now;
+        node.homeFlagsFreshMs = feedbackEvidenceWindow();
         if (id == queueObserveId_ && node.queueExpectedFunction == kFrameHome) {
             if (node.homeFlags & 0x38) node.queueHomeFailed = true;
             if (node.homeFlags & 4) {
@@ -297,7 +298,26 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
 
     FeedbackSample sample;
     if (!decodeFeedback(frame.data, frame.length, sample)) return;
+    const bool queryPending = queries_.evidence(id, function).pending;
     queries_.receive(id,function,now);
+
+    auto& physical = physical_[id];
+    if (physical.affected && (sample.field == FeedbackField::Position || sample.field == FeedbackField::Velocity)) {
+        const auto query = queries_.evidence(id, function);
+        const bool postStopQuery = physical.stopSubmitted && queryPending && query.received &&
+            query.receivedAt == now && isStrictlyNewerThan(query.sampleRequestAt, physical.stopAt);
+        if (sample.field == FeedbackField::Position) {
+            physical.positionAt = now; physical.positionValid = true;
+            physical.positionControlFreshMs = physicalEvidenceWindow(false);
+            physical.positionOtaFreshMs = physicalEvidenceWindow(true);
+            physical.positionAfterStopQuery = postStopQuery;
+        } else {
+            physical.velocityAt = now; physical.velocityValid = true; physical.velocity = sample.value;
+            physical.velocityControlFreshMs = physicalEvidenceWindow(false);
+            physical.velocityOtaFreshMs = physicalEvidenceWindow(true);
+            physical.velocityAfterStopQuery = postStopQuery;
+        }
+    }
 
     node.seenEver = true;
     node.lastSeenMs = now;
@@ -306,16 +326,21 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.positionValid = true;
             node.positionTenths = sample.value;
             node.positionMs = now;
+            node.demoPositionFreshMs = demoEvidenceWindow();
+            node.positionFreshMs = feedbackEvidenceWindow();
             break;
         case FeedbackField::Target:
             node.targetValid = true;
             node.targetTenths = sample.value;
             node.targetMs = now;
+            node.targetFreshMs = feedbackEvidenceWindow();
             break;
         case FeedbackField::Velocity:
             node.velocityValid = true;
             node.velocityTenths = sample.value;
             node.velocityMs = now;
+            node.demoVelocityFreshMs = demoEvidenceWindow();
+            node.velocityFreshMs = feedbackEvidenceWindow();
             break;
         case FeedbackField::Current:
             node.currentValid = true;
@@ -326,6 +351,8 @@ void MotorControl::handleFrame(const CanRawFrame& frame, uint32_t now) {
             node.flagsValid = true;
             node.flags = static_cast<uint8_t>(sample.value);
             node.flagsMs = now;
+            node.demoFlagsFreshMs = demoEvidenceWindow();
+            node.flagsFreshMs = feedbackEvidenceWindow();
             // A real disabled flag invalidates an old software confirmation.
             if (!(node.flags & 1)) node.enableConfirmed = false;
             if (node.enablePending && node.enableAck &&
@@ -387,7 +414,7 @@ void MotorControl::handleAck(
             // F3 02 means accepted, not actual enable. Require a post-request
             // 3A flag too; it may have arrived before this acknowledgement.
             if (node.flagsValid && isStrictlyNewerThan(node.flagsMs, node.enablePendingMs) &&
-                ageWithin(now, node.flagsMs, kFeedbackFreshMs) &&
+                ageWithin(now, node.flagsMs, node.flagsFreshMs) &&
                 bool(node.flags & 1) == node.enableDesired) {
                 node.enableConfirmed = node.enableDesired;
                 node.enablePending = false;
@@ -448,7 +475,7 @@ void MotorControl::handleAck(
 
 bool MotorControl::freshPosition(uint8_t id, uint32_t now, int32_t& out) const {
     const NodeState& node = nodes_[id];
-    if (!node.positionValid || !ageWithin(now, node.positionMs, kFeedbackFreshMs)) {
+    if (!node.positionValid || !ageWithin(now, node.positionMs, node.positionFreshMs)) {
         return false;
     }
     out = node.positionTenths;
@@ -457,7 +484,7 @@ bool MotorControl::freshPosition(uint8_t id, uint32_t now, int32_t& out) const {
 
 bool MotorControl::freshVelocity(uint8_t id, uint32_t now, int32_t& out) const {
     const NodeState& node = nodes_[id];
-    if (!node.velocityValid || !ageWithin(now, node.velocityMs, kFeedbackFreshMs)) {
+    if (!node.velocityValid || !ageWithin(now, node.velocityMs, node.velocityFreshMs)) {
         return false;
     }
     out = node.velocityTenths;
@@ -466,7 +493,7 @@ bool MotorControl::freshVelocity(uint8_t id, uint32_t now, int32_t& out) const {
 
 bool MotorControl::freshTarget(uint8_t id, uint32_t now, int32_t& out) const {
     const NodeState& node = nodes_[id];
-    if (!node.targetValid || !ageWithin(now, node.targetMs, kFeedbackFreshMs)) {
+    if (!node.targetValid || !ageWithin(now, node.targetMs, node.targetFreshMs)) {
         return false;
     }
     out = node.targetTenths;
@@ -495,7 +522,7 @@ void MotorControl::armTargetPoll(uint8_t id, uint32_t now) {
 
 bool MotorControl::freshHomeFlags(uint8_t id, uint32_t now, uint8_t& out) const {
     const NodeState& node = nodes_[id];
-    if (!node.homeFlagsValid || !ageWithin(now, node.homeFlagsMs, kFeedbackFreshMs)) {
+    if (!node.homeFlagsValid || !ageWithin(now, node.homeFlagsMs, node.homeFlagsFreshMs)) {
         return false;
     }
     out = node.homeFlags;
@@ -506,8 +533,8 @@ bool MotorControl::stationaryFeedback(
     uint8_t id, uint32_t now, uint32_t sinceMs) const {
     const NodeState& node = nodes_[id];
     if (!node.positionValid || !node.velocityValid) return false;
-    if (!ageWithin(now, node.positionMs, kFeedbackFreshMs)) return false;
-    if (!ageWithin(now, node.velocityMs, kFeedbackFreshMs)) return false;
+    if (!ageWithin(now, node.positionMs, node.positionFreshMs)) return false;
+    if (!ageWithin(now, node.velocityMs, node.velocityFreshMs)) return false;
     // A confirmation needs samples that strictly follow the request; a frame
     // that arrived in the same millisecond is not proof of the new state.
     if (sinceMs != 0 && !isStrictlyNewerThan(node.positionMs, sinceMs)) return false;
@@ -523,6 +550,7 @@ bool MotorControl::faultAppliesTo(uint8_t id) const {
 
 bool MotorControl::nodeOfInterest(uint8_t id) const {
     if (id == 0) return false;
+    if (physical_[id].affected) return true;
     if (demoWatched_[id]) return true;
     if (id == selectedId_ || id == experimentId_ || id == queueObserveId_ || syncObserve_[id]) return true;
     const uint8_t fields[]={0x36,0x35,0x3A,0x33,0x3B};
@@ -596,7 +624,7 @@ void MotorControl::serviceJob(uint32_t now) {
     // been silent past the grace window the job is a fault, not something to
     // ride out.
     if (!(posFresh && velFresh) &&
-        !ageWithin(now, job_.startMs, kFeedbackFreshMs)) {
+        !ageWithin(now, job_.startMs, job_.feedbackGraceMs)) {
         failJob(kFaultFeedbackStale, now);
         return;
     }
@@ -668,7 +696,7 @@ void MotorControl::serviceHome(uint32_t now) {
     // Same grace rule as a move: once position and velocity have both been
     // silent past the window, the supervised run is a fault, not something to
     // ride out.
-    if (!(posFresh && velFresh) && !ageWithin(now, home_.startMs, kFeedbackFreshMs)) {
+    if (!(posFresh && velFresh) && !ageWithin(now, home_.startMs, home_.feedbackGraceMs)) {
         failHome(kFaultFeedbackStale, now);
         return;
     }
@@ -704,7 +732,7 @@ void MotorControl::serviceHome(uint32_t now) {
             home_.stoppedMs = node.homeFlagsMs;
         }
     } else if (home_.completedMs == 0 && home_.ackSeen &&
-               !ageWithin(now, home_.startMs, kFeedbackFreshMs)) {
+               !ageWithin(now, home_.startMs, home_.feedbackGraceMs)) {
         // An acknowledged run with no homing status evidence cannot be judged:
         // fail instead of riding the deadline out. The explicit 9A/9F completion
         // is the only path that does not need 0x3B at all.
@@ -794,6 +822,15 @@ void MotorControl::serviceQueries(uint32_t now) {
         else targetPollId_=0;
     }
     if (config_.state==2 && !config_.readIssued) demand(config_.id,0x22,3000,3);
+    // Retiring the current writer must not depend on refreshing released OTA
+    // history. Keep every participating pair demanded: rotating only four
+    // targets after release(Controller) can phase-lock against the TX gap.
+    // The SAME scheduler still limits actual queries; no discovery probes.
+    const bool controlPending = hasUnsettledMotionEvidence();
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        if (controlPending ? !physical_[id].controlPending : !physical_[id].affected) continue;
+        demand(id,0x36,200,2); demand(id,0x35,200,2);
+    }
 }
 
 bool MotorControl::sendQuery(void* context,uint8_t id,uint8_t field) {
@@ -923,7 +960,9 @@ bool MotorControl::sendHomeTrigger(uint8_t id, uint8_t mode) {
     // does not supervise.
     const uint8_t frame[5] = {id, kFrameHome, mode, 0, kProtocolChecksum};
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Motion, id);
     const bool queued = can_.sendValidatedCommand(frame, sizeof(frame));
+    finishEvidenceTx(queued && !can_.hasTransmissionError());
     if (!queued || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -947,7 +986,9 @@ bool MotorControl::sendHomeInterrupt(uint8_t id) {
 bool MotorControl::sendStop(uint8_t id) {
     if (!canReady()) return false;
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Stop, id);
     can_.stopNow(id, false);
+    finishEvidenceTx(!can_.hasTransmissionError());
     if (can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -1089,6 +1130,7 @@ Result MotorControl::move(const MoveRequest& request) {
     if (absSpeed > kStopSpeedTenths) return Result{kCodeBusy, "not_stopped"};
 
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Motion, id);
     can_.positionControlWithCurrentLimit(
         id,
         plan.direction,
@@ -1099,6 +1141,7 @@ Result MotorControl::move(const MoveRequest& request) {
         plan.motionMode,
         plan.sync,
         plan.currentMa);
+    finishEvidenceTx(!can_.hasTransmissionError());
     if (can_.hasTransmissionError()) {
         // A partial transmission may have reached the motor. Stop it best
         // effort and latch instead of returning a bare 503 with a live motor.
@@ -1133,6 +1176,7 @@ Result MotorControl::move(const MoveRequest& request) {
             : static_cast<uint32_t>(kTargetToleranceTenths));
     job_.expectedDurationMs = plan.expectedDurationMs;
     job_.startMs = now;
+    job_.feedbackGraceMs = feedbackEvidenceWindow();
     job_.deadlineMs = limits_.maxMoveDurationMs;
     job_.ackSeen = false;
     job_.doneUpdates = 0;
@@ -1207,6 +1251,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     }
 
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Motion, id);
     if (plan.withCurrentLimit) {
         can_.passthroughPositionControlWithCurrentLimit(
             id,
@@ -1227,6 +1272,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
             plan.motionMode,
             false);
     }
+    finishEvidenceTx(!can_.hasTransmissionError());
     if (can_.hasTransmissionError()) {
         // A partial transmission may have reached the motor. Stop it best
         // effort and latch instead of returning a bare 503 with a live motor.
@@ -1267,6 +1313,7 @@ Result MotorControl::directPosition(const DirectPositionRequest& request) {
     }
     job_.expectedDurationMs = resolved.expectedDurationMs;
     job_.startMs = now;
+    job_.feedbackGraceMs = feedbackEvidenceWindow();
     // The configured policy duration is the deadline, not an invented ramp: the
     // driver plans this motion itself, so there is no acceleration profile here
     // to derive a tighter one from.
@@ -1340,6 +1387,7 @@ Result MotorControl::home(uint8_t id, uint8_t mode) {
     home_ = HomeJob{};
     home_.active = true;
     home_.startMs = now;
+    home_.feedbackGraceMs = feedbackEvidenceWindow();
     // Configured budget, not a new hardcoded timeout.
     home_.deadlineMs = limits_.maxMoveDurationMs;
     home_.lastDonePosMs = now;
@@ -1356,7 +1404,9 @@ bool MotorControl::rawLogical(const uint8_t* bytes, uint8_t length) {
     // bus must be healthy: nothing here stops or enables anything to make room.
     if (!canReady() || operationBusy()) return false;
     can_.clearTransmissionError();
+    beginEvidenceTx(logicalEvidenceEffect(bytes, length), bytes[0]);
     const bool sent = can_.sendRawLogical(bytes, length);
+    finishEvidenceTx(sent && !can_.hasTransmissionError());
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -1448,7 +1498,13 @@ bool MotorControl::rawCanFrame(uint32_t id, bool extended, const uint8_t* data, 
     if (length > kMaxCanDataBytes) return false;
     if (!canReady() || operationBusy()) return false;
     can_.clearTransmissionError();
+    uint8_t logical[9] = {x42sCanAddress(id)};
+    if (data && length <= 8) memcpy(logical + 1, data, length);
+    beginEvidenceTx(x42sCanIsSinglePacketDataFrame(id, extended, false) && data ?
+        logicalEvidenceEffect(logical, uint8_t(length + 1)) : EvidenceEffect::Unknown,
+        extended && !(id & ~0xFFFFU) ? x42sCanAddress(id) : 0);
     const bool sent = can_.sendRawFrame(id, extended, data, length);
+    finishEvidenceTx(sent && !can_.hasTransmissionError());
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return false;
@@ -1464,7 +1520,9 @@ bool MotorControl::queueSendLogical(const uint8_t* bytes, uint8_t length) {
     if (!canReady()) return false;
     can_.clearTransmissionError();
     queueTransport_=true;
+    beginEvidenceTx(logicalEvidenceEffect(bytes, length), bytes[0]);
     const bool sent = can_.sendRawLogical(bytes, length);
+    finishEvidenceTx(sent && !can_.hasTransmissionError());
     queueTransport_=false;
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
@@ -1496,7 +1554,13 @@ bool MotorControl::queueSendFrame(uint32_t id, bool extended, const uint8_t* dat
     if (!canReady()) return false;
     can_.clearTransmissionError();
     queueTransport_=true;
+    uint8_t logical[9] = {x42sCanAddress(id)};
+    if (data && length <= 8) memcpy(logical + 1, data, length);
+    beginEvidenceTx(x42sCanIsSinglePacketDataFrame(id, extended, false) && data ?
+        logicalEvidenceEffect(logical, uint8_t(length + 1)) : EvidenceEffect::Unknown,
+        extended && !(id & ~0xFFFFU) ? x42sCanAddress(id) : 0);
     const bool sent = can_.sendRawFrame(id, extended, data, length);
+    finishEvidenceTx(sent && !can_.hasTransmissionError());
     queueTransport_=false;
     if (!sent || can_.hasTransmissionError()) {
         can_.clearTransmissionError();
@@ -1620,7 +1684,7 @@ Result MotorControl::stopAll() {
         // broadcast still stops every address. Explicitly commanded/pending
         // nodes and observed selected nodes still require fresh stop evidence.
         const bool touched = (id == selectedId_ && node.seenEver) || node.stopRequested ||
-            node.enablePending || node.enableDesired || node.enableConfirmed;
+            node.enablePending || node.enableDesired || node.enableConfirmed || physical_[id].controlPending;
         if (!touched) continue;
         node.enableAck = false; node.enableTimedOut = false;
         node.stopRequested = true;
@@ -1642,7 +1706,9 @@ Result MotorControl::stopAll() {
 
     // id 0 is the dedicated broadcast for stopAll.
     can_.clearTransmissionError();
+    beginEvidenceTx(EvidenceEffect::Stop, 0);
     can_.stopNow(0, false);
+    finishEvidenceTx(!can_.hasTransmissionError());
     if (can_.hasTransmissionError()) {
         can_.clearTransmissionError();
         return Result{kCodeUnavailable, "can_tx_failed"};
@@ -1702,9 +1768,9 @@ String MotorControl::statusJson(uint8_t id) const {
     const uint32_t now = millis();
     const NodeState& node = nodes_[id];
     const bool posFresh =
-        node.positionValid && ageWithin(now, node.positionMs, kFeedbackFreshMs);
+        node.positionValid && ageWithin(now, node.positionMs, node.positionFreshMs);
     const bool velFresh =
-        node.velocityValid && ageWithin(now, node.velocityMs, kFeedbackFreshMs);
+        node.velocityValid && ageWithin(now, node.velocityMs, node.velocityFreshMs);
     const bool curFresh =
         node.currentValid && ageWithin(now, node.currentMs, kFeedbackFreshMs);
 
@@ -1769,7 +1835,7 @@ String MotorControl::statusJson(uint8_t id) const {
         json += "null";
     }
     json += ",\"driverFlags\":";
-    const bool flagsFresh = node.flagsValid && ageWithin(now, node.flagsMs, kFeedbackFreshMs);
+    const bool flagsFresh = node.flagsValid && ageWithin(now, node.flagsMs, node.flagsFreshMs);
     if (flagsFresh) json += static_cast<unsigned int>(node.flags); else json += "null";
     json += ",\"driverEnabled\":";
     json += flagsFresh ? ((node.flags & 1) ? "true" : "false") : "null";
@@ -1786,7 +1852,7 @@ String MotorControl::statusJson(uint8_t id) const {
     json += ",\"homeMode\":";
     if (homeId_ != 0) json += static_cast<unsigned int>(homeMode_); else json += "null";
     const bool homeFreshFlags =
-        node.homeFlagsValid && ageWithin(now, node.homeFlagsMs, kFeedbackFreshMs);
+        node.homeFlagsValid && ageWithin(now, node.homeFlagsMs, node.homeFlagsFreshMs);
     json += ",\"homeOrg\":";
     if (homeFreshFlags) json += static_cast<unsigned int>(node.homeFlags); else json += "null";
     json += ",\"homeRunning\":";
@@ -1867,7 +1933,7 @@ bool MotorControl::demoFlags(uint8_t id, uint8_t& flags, uint32_t& age) const {
     const auto& n = nodes_[id];
     age = n.flagsValid ? millis() - n.flagsMs : UINT32_MAX;
     flags = n.flags;
-    return n.flagsValid && age <= kFeedbackFreshMs;
+    return n.flagsValid && age <= n.flagsFreshMs;
 }
 
 MotorControl::Snapshot MotorControl::snapshot(uint8_t id) const {
@@ -1877,13 +1943,36 @@ MotorControl::Snapshot MotorControl::snapshot(uint8_t id) const {
     s.positionAge=n.positionValid ? now-n.positionMs : UINT32_MAX;
     s.velocityAge=n.velocityValid ? now-n.velocityMs : UINT32_MAX;
     s.currentAge=n.currentValid ? now-n.currentMs : UINT32_MAX;
-    s.positionValid=n.positionValid && s.positionAge<=kFeedbackFreshMs;
-    s.velocityValid=n.velocityValid && s.velocityAge<=kFeedbackFreshMs;
+    s.positionValid=n.positionValid && s.positionAge<=n.positionFreshMs;
+    s.velocityValid=n.velocityValid && s.velocityAge<=n.velocityFreshMs;
     s.currentValid=n.currentValid && s.currentAge<=kFeedbackFreshMs;
     s.position=n.positionTenths; s.velocity=n.velocityTenths; s.current=n.currentMa;
     s.enabled=n.enableConfirmed; s.enablePending=n.enablePending;
     s.enableAck=n.enableAck; s.enableTimedOut=n.enableTimedOut;
     s.stopPending=n.stopRequested; s.fault=faultAppliesTo(id); return s;
+}
+bool MotorControl::demoFeedbackFresh(uint8_t id, uint16_t windowMs) const {
+    if (!id || windowMs < kFeedbackFreshMs || windowMs > 5000) return false;
+    const auto& n = nodes_[id];
+    const uint32_t now = millis();
+    return n.positionValid && n.velocityValid && n.flagsValid &&
+        ageWithin(now, n.positionMs, windowMs) && ageWithin(now, n.velocityMs, windowMs) &&
+        ageWithin(now, n.flagsMs, windowMs) &&
+        // Changing the query budget cannot revive already expired samples.
+        ageWithin(now, n.positionMs, n.demoPositionFreshMs) &&
+        ageWithin(now, n.velocityMs, n.demoVelocityFreshMs) &&
+        ageWithin(now, n.flagsMs, n.demoFlagsFreshMs);
+}
+bool MotorControl::stopEvidence(uint8_t id, uint32_t stopAt, uint16_t windowMs) const {
+    if (!id || windowMs < kFeedbackFreshMs || windowMs > 5000) return false;
+    const auto& n = nodes_[id];
+    const uint32_t now = millis();
+    return n.positionValid && n.velocityValid && n.flagsValid &&
+        ageWithin(now, n.positionMs, windowMs) && ageWithin(now, n.velocityMs, windowMs) &&
+        ageWithin(now, n.flagsMs, windowMs) &&
+        isStrictlyNewerThan(n.positionMs, stopAt) && isStrictlyNewerThan(n.velocityMs, stopAt) &&
+        isStrictlyNewerThan(n.flagsMs, stopAt) &&
+        n.velocityTenths >= -kStopSpeedTenths && n.velocityTenths <= kStopSpeedTenths;
 }
 bool MotorControl::operationBusy() const {
     if (configPending()) return true;
@@ -1900,6 +1989,146 @@ bool MotorControl::hasActiveMotion() const {
         if (n.enablePending || n.stopRequested || n.enableConfirmed || n.enableDesired) return true;
     }
     return false;
+}
+
+MotorControl::EvidenceEffect MotorControl::logicalEvidenceEffect(const uint8_t* b, uint8_t n) {
+    if (!b || n < 3 || n > 30 || b[n - 1] != 0x6B) return EvidenceEffect::Unknown;
+    if (b[1] == 0xFE && n == 5 && b[2] == 0x98 && b[3] <= 1)
+        return b[3] == 0 ? EvidenceEffect::Stop : EvidenceEffect::None;
+    if (b[1] == 0x9C && n == 4 && b[2] == 0x48) return EvidenceEffect::None;
+    if (b[1] == 0x22 && n == 3) return EvidenceEffect::None;
+    if (b[1] == 0x50 && n == 4 && b[2] == 1) return EvidenceEffect::None;
+    // Raw/queue commands keep their existing policy-free transport. Recognize
+    // documented motion shapes, including cached/absolute queue forms, rather
+    // than applying the manual controller's travel/enable/ownership gates.
+    bool motion = false;
+    switch (b[1]) {
+        case 0xFD: case 0xCD:
+            motion = n == (b[1] == 0xFD ? 16 : 18) && b[2] <= 1 && b[13] <= 2 && b[14] <= 1; break;
+        case 0xFB: case 0xCB:
+            motion = n == (b[1] == 0xFB ? 12 : 14) && b[2] <= 1 && b[9] <= 2 && b[10] <= 1; break;
+        case 0x9A: motion = n == 5 && b[2] <= kHomeModeMax && b[3] <= 1; break;
+        case 0xF5: case 0xF6: case 0xC5: case 0xC6:
+            motion = n == ((b[1] == 0xF5 || b[1] == 0xF6) ? 9 : 11) && b[2] <= 1 && b[7] <= 1; break;
+        default: break;
+    }
+    if (motion) return b[0] ? EvidenceEffect::Motion : EvidenceEffect::Unknown;
+    uint8_t addressed[30]; memcpy(addressed, b, n); addressed[0] = 1;
+    DebugLimits protocolLimits;
+    protocolLimits.maxSpeedTenths = 30000; protocolLimits.maxAccelRpmS = 65535;
+    protocolLimits.maxCurrentMa = 5000;
+    const auto kind = validateCommand(addressed, n, protocolLimits);
+    return kind == CommandKind::Read || kind == CommandKind::Configure || kind == CommandKind::Enable ?
+        EvidenceEffect::None : EvidenceEffect::Unknown;
+}
+
+void MotorControl::beginEvidenceTx(EvidenceEffect effect, uint8_t id) {
+    evidenceTx_ = EvidenceTransmission{};
+    evidenceTx_.effect = effect; evidenceTx_.id = id;
+}
+
+void MotorControl::recordEvidenceTx(uint32_t now) {
+    const auto effect = evidenceTx_.effect;
+    if (effect == EvidenceEffect::Motion || effect == EvidenceEffect::Unknown) {
+        if (!evidenceTx_.submitted) ++movementGeneration_;
+        if (effect == EvidenceEffect::Unknown) unknownPhysicalRisk_ = true;
+        if (effect == EvidenceEffect::Motion && evidenceTx_.id) {
+            auto& e = physical_[evidenceTx_.id];
+            e.affected = e.controlPending = true; e.movementAt = now; e.stopSubmitted = false;
+            e.positionValid = e.velocityValid = false;
+            e.positionAfterStopQuery = e.velocityAfterStopQuery = false;
+        }
+    }
+    evidenceTx_.submitted = true;
+}
+
+void MotorControl::finishEvidenceTx(bool complete) {
+    if (complete && evidenceTx_.submitted && evidenceTx_.effect == EvidenceEffect::Stop) {
+        const uint32_t now = millis();
+        for (uint16_t id = 1; id < kNodeCount; ++id) {
+            auto& e = physical_[id];
+            if (!e.affected || (evidenceTx_.id && evidenceTx_.id != id)) continue;
+            e.stopSubmitted = true; e.stopAt = now;
+            e.positionAfterStopQuery = e.velocityAfterStopQuery = false;
+        }
+    }
+    evidenceTx_ = EvidenceTransmission{};
+}
+
+uint16_t MotorControl::feedbackEvidenceWindow() const {
+    const bool controlPending = hasUnsettledMotionEvidence();
+    uint8_t first = 0;
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        const auto& n = nodes_[id];
+        const bool physicalQueried = controlPending ? physical_[id].controlPending : physical_[id].affected;
+        if (!demoWatched_[id] && !physicalQueried &&
+            !(autoQueriesEnabled_ && selectedId_ == id) &&
+            !(job_.active && job_.id == id) && !(home_.active && homeId_ == id) &&
+            !n.stopRequested && !n.enablePending) continue;
+        // Match serviceQueries: after control settles, historical affected axes
+        // are still queried for OTA evidence and consume the shared budget.
+        if (first) return physicalEvidenceWindow(!controlPending);
+        first = static_cast<uint8_t>(id);
+    }
+    // Single-axis debugging keeps its original fast feedback requirement.
+    return kFeedbackFreshMs;
+}
+
+uint16_t MotorControl::physicalEvidenceWindow(bool ota) const {
+    uint32_t axes = 0, demoAxes = 0;
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        if (ota ? physical_[id].affected : physical_[id].controlPending) ++axes;
+        if (demoWatched_[id]) ++demoAxes;
+    }
+    const auto& c = queries_.config();
+    uint32_t gap = (1000u + c.queriesPerSecond - 1) / c.queriesPerSecond;
+    if (gap < c.gapMs) gap = c.gapMs;
+    const uint32_t responseGap = (uint32_t(c.timeoutMs) + c.maxInflight - 1) / c.maxInflight;
+    if (gap < responseGap) gap = responseGap;
+    const uint32_t fields = 2 * axes + 4 * demoAxes +
+        (autoQueriesEnabled_ && selectedId_ ? 3u : 0u) + c.maxInflight;
+    const uint32_t window = fields * gap + c.timeoutMs;
+    return uint16_t(window < kFeedbackFreshMs ? kFeedbackFreshMs : window > 5000 ? 5000 : window);
+}
+
+bool MotorControl::physicalStationary(const PhysicalEvidence& e, uint32_t now, bool ota) const {
+    const uint16_t positionWindow = ota ? e.positionOtaFreshMs : e.positionControlFreshMs;
+    const uint16_t velocityWindow = ota ? e.velocityOtaFreshMs : e.velocityControlFreshMs;
+    return e.positionValid && e.velocityValid &&
+        ageWithin(now, e.positionAt, positionWindow) && ageWithin(now, e.velocityAt, velocityWindow) &&
+        isStrictlyNewerThan(e.positionAt, e.movementAt) && isStrictlyNewerThan(e.velocityAt, e.movementAt) &&
+        (!e.stopSubmitted || (isStrictlyNewerThan(e.positionAt, e.stopAt) && isStrictlyNewerThan(e.velocityAt, e.stopAt))) &&
+        e.velocity >= -kStopSpeedTenths && e.velocity <= kStopSpeedTenths;
+}
+
+bool MotorControl::affectedAxesStationary() const {
+    const uint32_t now = millis();
+    for (uint16_t id = 1; id < kNodeCount; ++id)
+        if (physical_[id].controlPending && (!canReady() || !physicalStationary(physical_[id], now, false))) return false;
+    return true;
+}
+
+bool MotorControl::hasUnsettledMotionEvidence() const {
+    for (uint16_t id = 1; id < kNodeCount; ++id)
+        if (physical_[id].controlPending) return true;
+    return false;
+}
+
+bool MotorControl::releaseSettledMotion() {
+    if (!affectedAxesStationary()) return false;
+    for (uint16_t id = 1; id < kNodeCount; ++id) physical_[id].controlPending = false;
+    return true;
+}
+
+bool MotorControl::otaMotionSafe() const {
+    if (unknownPhysicalRisk_) return false;
+    const uint32_t now = millis();
+    for (uint16_t id = 1; id < kNodeCount; ++id) {
+        const auto& e = physical_[id];
+        if (e.affected && (!canReady() || !physicalStationary(e, now, true) || !e.stopSubmitted ||
+                          !e.positionAfterStopQuery || !e.velocityAfterStopQuery)) return false;
+    }
+    return true;
 }
 
 bool MotorControl::setDebugLimits(const DebugLimits& limits) {
@@ -1976,7 +2205,7 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
     NodeState& node = nodes_[id];
     if (kind == CommandKind::Configure) {
         if (hasActiveMotion() || !stationaryFeedback(id, millis(), 0) ||
-            !node.flagsValid || !ageWithin(millis(), node.flagsMs, kFeedbackFreshMs) || (node.flags & 1))
+            !node.flagsValid || !ageWithin(millis(), node.flagsMs, node.flagsFreshMs) || (node.flags & 1))
             return Result{409, "disable_and_wait_for_stationary_feedback"};
     }
     if (kind == CommandKind::Experiment) {
@@ -1985,7 +2214,9 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
             return Result{409, "enable_and_wait_for_stationary_feedback"};
     }
     can_.clearTransmissionError();
+    beginEvidenceTx(kind == CommandKind::Experiment ? EvidenceEffect::Motion : EvidenceEffect::None, id);
     const bool queued = can_.sendValidatedCommand(b, n);
+    finishEvidenceTx(queued && !can_.hasTransmissionError());
     if (kind == CommandKind::Interrupt) {
         // 0x9C aborts a homing run. The operator's own frame is already on the
         // wire, so the supervised run is cancelled without a second interrupt
@@ -2022,7 +2253,10 @@ Result MotorControl::command(const uint8_t* b, uint8_t n) {
 
 void MotorControl::traceSink(void* context, const CanRawFrame& frame, bool tx) {
     MotorControl* self = static_cast<MotorControl*>(context);
-    if (tx) { ++self->txFrameCount_; self->queries_.noteTraffic(millis()); }
+    if (tx) {
+        ++self->txFrameCount_; self->queries_.noteTraffic(millis());
+        self->recordEvidenceTx(millis());
+    }
     if(tx && !self->queueTransport_ && frame.length && (frame.identifier&0xFF)==0 &&
        !CanQueryScheduler::supported(frame.data[0])) {
         self->queueDiagnostics_.invalidate(uint8_t(frame.identifier>>8));
@@ -2085,8 +2319,8 @@ bool MotorControl::anyMotorOnline() const {
     for (uint16_t id = 1; id < kNodeCount; ++id) {
         const NodeState& node = nodes_[id];
         if (!node.positionValid || !node.velocityValid) continue;
-        if (!ageWithin(now, node.positionMs, kFeedbackFreshMs)) continue;
-        if (!ageWithin(now, node.velocityMs, kFeedbackFreshMs)) continue;
+        if (!ageWithin(now, node.positionMs, node.positionFreshMs)) continue;
+        if (!ageWithin(now, node.velocityMs, node.velocityFreshMs)) continue;
         return true;
     }
     return false;

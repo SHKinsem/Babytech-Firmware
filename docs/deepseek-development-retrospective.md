@@ -1,4 +1,8 @@
-# 本次工作台开发复盘
+# 历史复盘：早期工作台开发
+
+描述对象：早期 Claude/DeepSeek 工作台开发的返工和分工经验。Milestone：V1 历史记录，不是当前工具、供应商、人员授权或交付流程规范。当前固件和工作台入口见 [README](../README.md)及[工作台说明](motion-workbench-release.md)。
+
+下文环境、默认限制和验证结果只描述当时任务；不据此恢复旧 Brain 网页、固定旧数值上限或追加当前必做关卡。保留经验，不将复盘当成现行功能清单。
 
 依据：`tools/motor-protocol-demo/claude-brief.txt`、`claude-review.txt`、`claude-development.md`、`design-qa.md`、浏览器测试结果，以及保留的一次失败 CLI 运行记录。没有完整可靠的阶段工时数据，下列排序是按返工量与执行过程判断，不虚构占比。
 

@@ -1,0 +1,13 @@
+{
+  "name": "BabytechDisplayLvgl",
+  "version": "0.1.0",
+  "description": "Shared Babytech LVGL view for local and UART-connected displays.",
+  "dependencies": {
+    "lvgl": "8.4.0"
+  },
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "includeDir": "src"
+  }
+}

@@ -16,6 +16,15 @@ constexpr int kCanTxPin = 4;
 constexpr int kCanRxPin = 5;
 constexpr long kCanBitrate = 500000;
 
+// Current V1 bench has motors only. This selects resource test values, not
+// simulated motion; set to 0 after installing/configuring the real sensors.
+#ifndef BABYTECH_V1_MOTOR_TEST
+#define BABYTECH_V1_MOTOR_TEST 1
+#endif
+static_assert(BABYTECH_V1_MOTOR_TEST == 0 || BABYTECH_V1_MOTOR_TEST == 1,
+              "BABYTECH_V1_MOTOR_TEST must be 0 or 1");
+constexpr float kV1TestPowderGrams = 300.0f;
+
 // Powder hopper load cell through a 3.3 V HX711 module.
 // Override these two build definitions for another board revision without
 // editing the HX711 driver, for example:

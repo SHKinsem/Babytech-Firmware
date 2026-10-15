@@ -1,8 +1,10 @@
-# Wi-Fi 固件升级计划
+# 历史计划：Wi-Fi 固件升级
 
-> 本文记录实施前的评估与验收目标。当前代码进展和使用步骤见 [Wi-Fi 固件升级：实现与使用](wifi-ota-implementation.md)。
+描述对象：2026-09-23 旧双板 OTA 实施前的评估和候选验收。Milestone：V1 历史阶段，不是当前升级步骤。
 
-## 结论与范围
+当前 `V1-device` 仅提供 Motion 签名 OTA；Brain 屏幕基线不含旧 OTA 或 `Babytech-Debug` 网页，两板产品链路为 UART v4。当前操作见 [OTA 使用说明](wifi-ota-implementation.md)和[README](../README.md)。下文“双板均有 OTA”、旧工具链、镜像大小及实施顺序都是当时方案，不能当作已实现能力或普通云端/固件更新的必做门禁。
+
+## 当时结论与范围
 
 可以实现。首版采用**浏览器连接板卡 Wi-Fi，手动上传对应板卡的 `firmware.bin`**：设备控制板可通过自身热点或已连接的局域网访问；主控板目前只开热点，通过 `Babytech-Debug` 访问。两块板分别升级，不经 UART 互相转发固件，也不依赖云服务。
 
@@ -27,7 +29,7 @@
 4. 两板实现首次启动健康检查及延迟确认；分别验证自动回退。更新 `tools/package-device.py` 和交付文档，使发布包及版本记录可追溯。
 5. 台架验收：先断开电机动力电源，依次验证两板升级、错板镜像、错误摘要/签名、上传中断、断电、首次启动崩溃、NVS 保留、跨版本 UART 兼容。最后在受控实机环境中检查升级前后停止与失能行为。
 
-## 当前代码接入点
+## 当时的代码接入点
 
 - `main-controller/src/main.cpp`：现有热点、`WebServer` 和主控板 UART 轮询。
 - `device-controller/src/main.cpp`：设备板 HTTP 路由、运动/队列/UART 轮询及 `motionBusy()`。

@@ -69,6 +69,7 @@ public:
 
     bool active() const { return state_ == QueueState::Running || sync_.active(); }
     bool containsRaw() const { return program_.hasRaw; }
+    bool changesReference() const;
     QueueState state() const { return state_; }
     uint32_t runId() const { return runId_; }
     uint16_t lastErrorLine() const { return errorLine_; }
@@ -115,6 +116,7 @@ private:
 
     MotorControl& motor_;
     SyncSettings syncSettings_;
+    SyncSettings runSyncSettings_;
     SyncRuntime sync_;
     bool motionComplete_=false;
     bool unconfirmedMotion_=false;
@@ -131,6 +133,8 @@ private:
     uint32_t phaseAt_ = 0;            // when the current phase started
     uint32_t deadlineAt_ = 0;         // wait/timed phase deadline
     uint32_t lastRawAt_ = 0;          // spacing between raw frames
+    bool startSettled_ = false;
+    uint32_t startSettledAt_ = 0;
     uint16_t errorLine_ = 0;          // line of the first failure / bad program
     char message_[64] = "idle";
 };

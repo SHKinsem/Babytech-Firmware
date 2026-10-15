@@ -58,6 +58,7 @@ void fakeReset();
 // Deterministic millis() clock.
 void setMillis(uint32_t now);
 void advanceMillis(uint32_t delta);
+void setMillisReadStep(uint32_t delta);
 
 // Queues one frame for the module to receive on the next poll().
 void injectRx(const CanRawFrame& frame);
