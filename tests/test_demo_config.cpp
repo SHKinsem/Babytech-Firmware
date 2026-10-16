@@ -13,7 +13,35 @@ int main(int argc, char** argv) {
     DemoConfig c; std::string error;
     assert(parseDemoConfig(source.c_str(), source.size(), c, error) && c.configured);
     QueueProgram program; std::array<int32_t,256> zeros{}; zeros[1] = -123;
+    const auto assertLift = [](const QueueStep& step, int32_t distance, uint16_t rpm, uint16_t ramp) {
+        assert(step.action == QueueAction::Move && step.id == 1 && !step.absolute);
+        assert(step.distanceTenths == distance && step.awaitCompletion);
+        assert(step.speedTenths == rpm * 10 && step.accelRpmS == ramp && step.decelRpmS == ramp);
+        assert(step.currentMa == 200);
+    };
+    assert(buildDemoProgram(c.stages[0], c, false, zeros, program, error));
+    assert(program.count == 12);
+    assertLift(program.steps[4], -100800, 2400, 2400); // -56 mm: fast first 80%.
+    assertLift(program.steps[5], -25200, 600, 600);     // -14 mm: unchanged final 20%.
+    assert(program.steps[4].distanceTenths + program.steps[5].distanceTenths == -126000);
+    assert(program.steps[10].id == 3 && program.steps[10].speedTenths == 2400 &&
+           program.steps[10].awaitCompletion);
+    assertLift(program.steps[9], 36000, 600, 600); // +20 mm clearance before translation.
+    assertLift(program.steps[11], -95400, 3000, 4800);
+    const int32_t openLift = program.steps[4].distanceTenths + program.steps[5].distanceTenths +
+        program.steps[7].distanceTenths + program.steps[9].distanceTenths + program.steps[11].distanceTenths;
+    assert(openLift == -181800); // Dispensing height stays -101 mm.
+    assert(buildDemoProgram(c.stages[4], c, false, zeros, program, error));
+    assert(program.count == 8);
+    assertLift(program.steps[0], 24552, 600, 600);   // 13.64 mm: unchanged first 20%.
+    assertLift(program.steps[1], 98208, 2400, 2400); // 54.56 mm: fast final 80%.
+    assert(program.steps[0].distanceTenths + program.steps[1].distanceTenths == 122760);
+    const int32_t returnTravel = program.steps[0].distanceTenths + program.steps[1].distanceTenths;
     assert(buildDemoProgram(c.stages[3], c, false, zeros, program, error));
+    assertLift(program.steps[0], 95400, 3000, 4800);
+    assertLift(program.steps[2], -30600, 600, 600);
+    assert(openLift + program.steps[0].distanceTenths == -86400); // -48 mm clearance.
+    assert(openLift + program.steps[0].distanceTenths + program.steps[2].distanceTenths == -117000);
     assert(program.count == 13);
     assert(program.steps[3].action == QueueAction::SyncBegin &&
            program.steps[3].groupSize == 2 && program.steps[3].syncTriggerOnly);
@@ -24,6 +52,9 @@ int main(int argc, char** argv) {
     assert(program.steps[6].action == QueueAction::SyncEnd);
     assert(program.steps[7].action == QueueAction::SyncBegin &&
            program.steps[7].groupSize == 2 && program.steps[7].syncTriggerOnly);
+    const int32_t closedLift = openLift + program.steps[0].distanceTenths + program.steps[2].distanceTenths +
+        program.steps[4].distanceTenths + program.steps[8].distanceTenths;
+    assert(closedLift == -122760 && closedLift + returnTravel == 0);
     {
         MotorControl motor; CommandQueue queue(motor);
         assert(motor.begin(4, 5, 500000));
