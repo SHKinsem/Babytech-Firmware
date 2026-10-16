@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "name": "V1_Demo_Flow_Eve",
+  "display": {
+    "baby_name": "lx",
+    "formula_brand": "Friso",
+    "water_ml": 100,
+    "temperature_c": 45
+  },
+  "axes": [
+    {
+      "motor_id": 1,
+      "rotation_distance_mm": 2
+    },
+    {
+      "motor_id": 2,
+      "rotation_distance_mm": 0
+    },
+    {
+      "motor_id": 3,
+      "rotation_distance_mm": 40
+    },
+    {
+      "motor_id": 4,
+      "rotation_distance_mm": 0
+    },
+    {
+      "motor_id": 5,
+      "rotation_distance_mm": 0
+    }
+  ],
+  "initialization": {
+    "timeout_ms": 120000,
+    "zero_axes": [
+      {
+        "motor_id": 1,
+        "zero_tolerance_deg": 1
+      },
+      {
+        "motor_id": 3,
+        "zero_tolerance_deg": 1
+      }
+    ],
+    "commands": [
+      "enable 1",
+      "enable 3",
+      "move 1 -5 mm 300 300 300 200 await",
+      "home 1 2 await",
+      "move 1 -2 mm 300 300 300 200 await",
+      "home 3 2 await",
+      "move 3 2 mm 300 300 300 650 await",
+      "disable 1",
+      "disable 3"
+    ]
+  },
+  "stages": [
+    {
+      "id": "open_cap",
+      "timeout_ms": 120000,
+      "commands": [
+        "enable 1",
+        "enable 2",
+        "enable 3",
+        "move 3 76.7 mm 120 120 120 650 await",
+        "move 1 -56 mm 2400 2400 2400 200 await",
+        "move 1 -14 mm 600 600 600 200 await",
+        "move 2 1000 deg 200 60 60 500 await",
+        "move 1 2 mm 300 300 300 200 await",
+        "move 2 1400 deg 200 60 60 500 await",
+        "move 1 20 mm 600 600 600 200 await",
+        "move 3 -76.7 mm 240 240 240 650 await",
+        "move 1 -53 mm 3000 4800 4800 200 await"
+      ]
+    },
+    {
+      "id": "water",
+      "timeout_ms": 90000,
+      "commands": [
+        "enable 5",
+        "move 5 25 rev 2000 10000 10000 800 await",
+        "disable 5 ",
+        "wait 500"
+      ]
+    },
+    {
+      "id": "powder",
+      "timeout_ms": 180000,
+      "commands": [
+        "enable 4",
+        "move 4 5 rev 200 10000 10000 800 await",
+        "disable 4 ",
+        "wait 500"
+      ]
+    },
+    {
+      "id": "close_cap",
+      "timeout_ms": 120000,
+      "commands": [
+        "move 1 53 mm 3000 4800 4800 200 await",
+        "move 3 76.7 mm 120 120 120 650 await",
+        "move 1 -17 mm 600 600 600 200 await",
+        "sync begin trigger",
+        "move 1 -1.2 mm 100 300 300 200",
+        "move 2 1000 deg 400 1500 1500 500",
+        "sync end",
+        "sync begin trigger",
+        "move 1 -2 mm 100 300 300 200",
+        "move 2 -2400 deg 500 1500 1500 500",
+        "sync end",
+        "torque 2 -500 2000 300 1000",
+        "move 2 300 deg 500 1500 1500 500 await"
+      ]
+    },
+    {
+      "id": "mix",
+      "timeout_ms": 60000,
+      "commands": [
+        "move 1 13.64 mm 600 600 600 200 await",
+        "move 1 54.56 mm 2400 2400 2400 200 await",
+        "move 3 -76.7 mm 120 120 120 650 await",
+        "move 2 2000 deg 1200 4500 4500 500 await",
+        "move 2 -2000 deg 1200 4500 4500 500 await",
+        "disable 1",
+        "disable 2",
+        "disable 3"
+      ]
+    }
+  ]
+}

@@ -48,7 +48,7 @@
 extern "C" {
 extern const uint8_t indexHtmlStart[] asm("_binary_data_index_html_start");
 extern const uint8_t indexHtmlEnd[] asm("_binary_data_index_html_end");
-extern const uint8_t demoJsonStart[] asm("_binary_data_demo_flow_json_start");
+extern const uint8_t demoJsonStart[] asm("_binary_data_V1_Demo_Flow_Adam_json_start");
 }
 
 namespace {

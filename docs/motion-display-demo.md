@@ -24,7 +24,7 @@ Motion GPIO43 TX 接 Brain GPIO44 RX；Motion GPIO44 RX 接 Brain GPIO43 TX，�
 ## 配置与操作
 
 1. 使用上述默认 v4 构建，连接 Motion 热点，进入网页“屏幕流程”。无需选择旧宏；网页工作台和 Brain 产品入口保持各自的所有权与准入语义。
-2. 内置 `device-controller/data/demo_flow.json` 保存台架配置；上电只校验并载入，不自动运动。网页 Load 与编辑只改变本机草稿。配置可解析不代表机构已验收或已经 Ready。
+2. 内置 `device-controller/data/V1_Demo_Flow_Adam.json` 保存台架配置；上电只校验并载入，不自动运动。网页 Load 与编辑只改变本机草稿。配置可解析不代表机构已验收或已经 Ready。
 3. Apply 校验后整份替换 RAM 配置，不运动；失败保留旧配置。配置替换撤销旧软件参考。Export 导出编辑器中的配置，可保存到上述工程路径后重新编译烧录。没有文件系统上传、永久保存按钮或自动恢复中断流程。
 4. 在 Apply 可接受配置后，由现场确认机构安全，点击网页“复位 / 初始化”。Brain 屏幕 Initialize 走产品运行入口，不按旧演示协议提交意图。入口只要求配置有效、执行器空闲且 CAN 可用，不以五轴位置/速度轮询完整为前提；队列的 `await`、已知故障及脚本超时仍可使本次初始化失败。
 5. 先逐个调试业务阶段。单阶段结束停在 NotReady，不自动执行其他阶段；需回零时运行包含回程动作的混合阶段，再点复位重新检查。软件参考仍有效时复位不会重新碰撞找零。
@@ -57,7 +57,9 @@ Motion GPIO43 TX 接 Brain GPIO44 RX；Motion GPIO44 RX 接 Brain GPIO43 TX，�
 
 ## JSON 与脚本契约
 
-格式基线见 [demo_flow.json](../device-controller/data/demo_flow.json)。总 JSON 最大 **16384 bytes**；最多 5 个轴，每段最多 64 条命令、8192 bytes、超时 100–3600000 ms。stage ID 固定为 `open_cap`、`water`、`powder`、`close_cap`、`mix`；JSON 顺序不改变执行顺序。重复/缺失/未知阶段、重复键、非法枚举与数值、过深嵌套、多行注入均被拒绝。
+第一台 V1 的配置为 `V1_Demo_Flow_Adam.json`，默认固件只内嵌这一份。第二份 [V1_Demo_Flow_Eve.json](../device-controller/data/V1_Demo_Flow_Eve.json) 初始动作参数与 Adam 相同，仅 `name` 不同，可后续独立调整；它不会按设备 ID 自动切换，也不默认编入固件。网页可 Load / Apply 任一文件到 RAM，导出文件名随配置中的 Adam/Eve 名称区分，不改变设备 ID、配对或 NVS。
+
+格式基线见 [V1_Demo_Flow_Adam.json](../device-controller/data/V1_Demo_Flow_Adam.json)。总 JSON 最大 **16384 bytes**；最多 5 个轴，每段最多 64 条命令、8192 bytes、超时 100–3600000 ms。stage ID 固定为 `open_cap`、`water`、`powder`、`close_cap`、`mix`；JSON 顺序不改变执行顺序。重复/缺失/未知阶段、重复键、非法枚举与数值、过深嵌套、多行注入均被拒绝。
 
 `axes` 是全部参与执行与停稳检查的轴清单。下面仅展示该字段的结构，不是可直接加载的完整流程：
 
@@ -70,7 +72,7 @@ Motion GPIO43 TX 接 Brain GPIO44 RX；Motion GPIO44 RX 接 Brain GPIO43 TX，�
 }
 ```
 
-示例值不是实机参数。产品/屏幕流程的毫米换算只使用当前 JSON `axes[].rotation_distance_mm`，不再要求与调试网页保存的 NVS 值相同。当前内置草案为轴1=2、轴3=40 mm/rev；其余轴0表示本脚本不提供毫米换算，只能使用 deg/rev。毫米指令缺少有效正数换算仍被拒绝；新板无需先在网页重复保存2/40，上电加载脚本但不自动运动，仍须现场确认参数并 Initialize。网页 Apply 只修改 RAM，永久修改内置参数仍需编辑 `device-controller/data/demo_flow.json` 后重编译烧录。`initialization.zero_axes` 必须引用此清单，容差为 0.1–10 度。未声明轴的指令不能运行。
+示例值不是实机参数。产品/屏幕流程的毫米换算只使用当前 JSON `axes[].rotation_distance_mm`，不再要求与调试网页保存的 NVS 值相同。当前内置草案为轴1=2、轴3=40 mm/rev；其余轴0表示本脚本不提供毫米换算，只能使用 deg/rev。毫米指令缺少有效正数换算仍被拒绝；新板无需先在网页重复保存2/40，上电加载脚本但不自动运动，仍须现场确认参数并 Initialize。网页 Apply 只修改 RAM，永久修改内置参数仍需编辑 `device-controller/data/V1_Demo_Flow_Adam.json` 后重编译烧录。`initialization.zero_axes` 必须引用此清单，容差为 0.1–10 度。未声明轴的指令不能运行。
 
 “编排队列”中的手动程序仍使用 `/api/motor-distance` 保存的板端 NVS 值；此接口及原有数据不变。两种入口各自使用自己的已确认配置：产品使用 JSON，手动队列使用 NVS。不要把网页手动换算值当作产品脚本已更新；运行中仍不能替换配置或修改换算值。
 

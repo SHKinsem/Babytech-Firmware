@@ -33,5 +33,5 @@ with tempfile.TemporaryDirectory(prefix="babytech-demo-") as directory:
     for name, sources in suites.items():
         output = directory / name
         subprocess.run(flags + sources + ["-o", str(output)], check=True)
-        args = [str(root / "device-controller/data/demo_flow.json")] if name == "demo-config" else []
+        args = [str(root / "device-controller/data/V1_Demo_Flow_Adam.json")] if name == "demo-config" else []
         subprocess.run([str(output), *args], check=True)
