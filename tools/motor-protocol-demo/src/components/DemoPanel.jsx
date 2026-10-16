@@ -86,7 +86,9 @@ export function DemoPanel() {
   function exportJson() {
     if (!config) return;
     const url = URL.createObjectURL(new Blob([JSON.stringify(config,null,2)+'\n'],{type:'application/json'}));
-    const a = document.createElement('a'); a.href=url; a.download='demo_flow.json'; a.click();
+    const a = document.createElement('a'); a.href=url;
+    a.download = config.name === 'V1_Demo_Flow_Eve' ? 'V1_Demo_Flow_Eve.json' : 'V1_Demo_Flow_Adam.json';
+    a.click();
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
   return <main className="demo-workbench" aria-label="屏幕流程演示">
@@ -114,7 +116,7 @@ export function DemoPanel() {
       <div className="demo-actions"><label className="button button--outline">Load JSON<input type="file" accept=".json,application/json" hidden onChange={load}/></label><button className="button button--outline" disabled={!config} onClick={exportJson}>Export JSON</button><button className="button button--primary" disabled={locked || !config} onClick={()=>post('/api/demo/config',{json:draft},draft)}>Apply</button></div>
       <textarea aria-label="演示 JSON" spellCheck={false} value={draft} onChange={e=>edit(e.target.value)} disabled={pending}/>
       <p>{dirty ? '本机草稿，尚未应用。' : '当前编辑内容与本页最近确认的 RAM 配置一致。'} 轮询不覆盖草稿。</p>
-      <p>Apply 不触发运动。RAM 配置断电丢失；最终导出到 device-controller/data/demo_flow.json 后重新编译烧录。</p>
+      <p>Apply 不触发运动，RAM 配置断电丢失。导出后保存到 device-controller/data/ 下对应文件；默认固件内嵌 V1_Demo_Flow_Adam.json，Eve 可通过 Load / Apply 临时载入。</p>
     </section>
   </main>;
 }

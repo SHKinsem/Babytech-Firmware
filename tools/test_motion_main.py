@@ -140,7 +140,7 @@ def main():
         # Generate linker assets from the same source files embedded by PIO.
         assets = directory / "assets.cpp"
         content = ['#include <cstdint>', 'extern "C" {']
-        for name, file in (("index_html", "index.html"), ("demo_flow_json", "demo_flow.json")):
+        for name, file in (("index_html", "index.html"), ("V1_Demo_Flow_Adam_json", "V1_Demo_Flow_Adam.json")):
             data = (root / "device-controller/data" / file).read_bytes() + b"\0"
             symbol = "_binary_data_" + name + "_start"
             content.append('extern const uint8_t asset_' + name + '[] asm("' + symbol + '") = {' + ','.join(map(str, data)) + '};')
