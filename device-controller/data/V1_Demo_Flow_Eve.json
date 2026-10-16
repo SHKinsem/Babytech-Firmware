@@ -61,14 +61,14 @@
         "enable 1",
         "enable 2",
         "enable 3",
-        "move 3 76.7 mm 120 120 120 650 await",
+        "move 3 76.7 mm 1200 1200 1200 650 await",
         "move 1 -56 mm 2400 2400 2400 200 await",
         "move 1 -14 mm 600 600 600 200 await",
         "move 2 1000 deg 200 60 60 500 await",
         "move 1 2 mm 300 300 300 200 await",
         "move 2 1400 deg 200 60 60 500 await",
         "move 1 20 mm 1200 600 600 200 await",
-        "move 3 -76.7 mm 240 240 240 650 await",
+        "move 3 -76.7 mm 1200 1200 1200 650 await",
         "move 1 -53 mm 3000 4800 4800 200 await"
       ]
     },
@@ -97,7 +97,7 @@
       "timeout_ms": 120000,
       "commands": [
         "move 1 53 mm 3000 4800 4800 200 await",
-        "move 3 76.7 mm 120 120 120 650 await",
+        "move 3 76.7 mm 1200 1200 1200 650 await",
         "move 1 -17 mm 600 600 600 200 await",
         "sync begin trigger",
         "move 1 -1.2 mm 100 300 300 200",
@@ -117,7 +117,7 @@
       "commands": [
         "move 1 13.64 mm 600 600 600 200 await",
         "move 1 54.56 mm 2400 2400 2400 200 await",
-        "move 3 -76.7 mm 120 120 120 650 await",
+        "move 3 -76.7 mm 1200 1200 1200 650 await",
         "move 2 2000 deg 1200 4500 4500 500 await",
         "move 2 -2000 deg 1200 4500 4500 500 await",
         "disable 1",
