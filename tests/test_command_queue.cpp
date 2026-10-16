@@ -1449,6 +1449,83 @@ static void test_await_move_refreshes_mismatched_target_until_confirmed() {
     }
 }
 
+static void test_move_await_query_priority_and_cancel_release() {
+    {
+        QueueRig rig;
+        rig.begin();
+        rig.motor.setAutoQueriesEnabled(false);
+        CHECK(rig.motor.queries().demand(1, 0x36, CanQueryScheduler::Demo, 400, 60000, 0, 0));
+        CHECK(startQueue(rig, "move 3 10 deg 30 60 60 650 await", 1, 510).code == 202);
+        setMillis(520); rig.queue.poll(520);
+        CHECK(opcodeFrames(0xCD) == 0);
+        for (uint32_t now : {640u, 740u}) {
+            setMillis(now); rig.queue.poll(now);
+            const size_t before = capturedTX.size();
+            rig.motor.dispatchQueries();
+            CHECK(capturedTX.size() == before + 1);
+            if (capturedTX.size() != before + 1) continue;
+            const auto& frame = capturedTX.back();
+            CHECK((frame.identifier >> 8) == 3 && frame.length == 2);
+            CHECK(frame.data[0] == 0x36 || frame.data[0] == 0x35);
+            if (frame.data[0] == 0x36) injectRx(makePosition(3, 0));
+            else injectRx(makeVelocity(3, 0));
+            setMillis(now + 10); rig.motor.poll(false); rig.queue.poll(now + 10);
+            CHECK(opcodeFrames(0xCD) == (now == 640 ? 0u : 1u));
+        }
+    }
+    for (bool product : {false, true}) {
+        QueueRig rig;
+        rig.begin();
+        rig.motor.setAutoQueriesEnabled(false);
+        rig.motor.watch(3);
+        for (uint8_t field : {0x36, 0x35, 0x3A, 0x3B})
+            CHECK(rig.motor.queries().demand(1, field, CanQueryScheduler::Demo, 400, 60000, 0, 0));
+        setMillis(500);
+        injectRx(makePosition(3, 0)); injectRx(makeVelocity(3, 0));
+        rig.motor.poll(false);
+        const char* text = "move 3 10 deg 30 60 60 650 await\nwait 1\n";
+        setMillis(510);
+        if (product) {
+            QueueProgram program; QueueError error;
+            CHECK(parseQueueProgram(text, std::strlen(text), rig.rotation, program, error));
+            CHECK(rig.queue.startDemo(program, 510).code == 202);
+        } else CHECK(startQueue(rig, text, 1, 510).code == 202);
+        setMillis(520); rig.motor.poll(false); rig.queue.poll(520);
+        injectRx(makeAck(3, 0xCD, 2));
+        setMillis(540); rig.motor.poll(false); rig.queue.poll(540);
+        for (uint32_t now : {640u, 740u, 840u}) {
+            setMillis(now);
+            rig.queue.poll(now);
+            const size_t before = capturedTX.size();
+            rig.motor.dispatchQueries();
+            CHECK(capturedTX.size() == before + 1);
+            if (capturedTX.size() != before + 1) continue;
+            const auto& frame = capturedTX.back();
+            CHECK((frame.identifier >> 8) == 3 && frame.length == 2);
+            const uint8_t field = frame.data[0];
+            CHECK(field == 0x36 || field == 0x35 || field == 0x33);
+            if (field == 0x36) injectRx(makePosition(3, 0));
+            else if (field == 0x35) injectRx(makeVelocity(3, 0));
+            else if (field == 0x33) injectRx(makeTarget(3, 100));
+            setMillis(now + 10);
+            rig.motor.poll(false);
+            rig.queue.poll(now + 10);
+        }
+        CHECK(opcodeFrames(0xCD) == 1); // Queries never replay the move.
+        CHECK(rig.queue.active()); // Priority does not bypass arrival evidence.
+        CHECK(rig.queue.cancel("test_cancel").code == 202);
+        // An unreleased Await lease is still live and due at both checkpoints.
+        rig.motor.queries().release(CanQueryScheduler::Controller);
+        rig.motor.queries().release(CanQueryScheduler::Demo);
+        const size_t before = capturedTX.size();
+        for (uint32_t now : {1100u, 1400u}) {
+            setMillis(now);
+            rig.motor.dispatchQueries();
+            CHECK(capturedTX.size() == before);
+        }
+    }
+}
+
 static void test_trigger_only_sync_parse() {
     QueueRig rig;
     rig.begin();
@@ -1793,6 +1870,7 @@ int main() {
         {"explicit await syntax, completion, rejection and cancellation", test_explicit_await},
         {"await move does not complete on unchanged target", test_await_move_rejects_unchanged_target_after_ack},
         {"await move refreshes mismatched target and releases confirmed target queries", test_await_move_refreshes_mismatched_target_until_confirmed},
+        {"move await favors the active axis and cancellation releases priority", test_move_await_query_priority_and_cancel_release},
         {"program validation is atomic and reports source lines", test_program_validation_is_atomic_with_source_lines},
         {"strict numbers, units and raw id/DLC bounds", test_strict_numeric_and_raw_bounds},
         {"rotation distance, rev conversion and direction", test_rotation_distance_and_direction_conversion},

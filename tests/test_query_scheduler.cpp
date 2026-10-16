@@ -10,6 +10,37 @@ static bool send(void*,uint8_t id,uint8_t field) {tx.push_back({id,field});retur
 static void request(S& s,uint8_t id,S::Owner owner,uint32_t now=0,uint8_t priority=1) {
     assert(s.demand(id,0x36,owner,100,60000,priority,now));
 }
+static unsigned activeAxisQueries(uint8_t priority) {
+    S s;
+    const uint8_t fields[] = {0x36, 0x35, 0x3A, 0x3B};
+    uint32_t last[6][4] = {};
+    unsigned seen[6][4] = {};
+    unsigned active = 0;
+    for (uint8_t id = 1; id <= 5; ++id)
+        for (uint8_t field : fields) assert(s.demand(id, field, S::Demo, 400, 60000, 0, 0));
+    for (uint8_t field : {0x36, 0x35}) assert(s.demand(3, field, S::Await, 200, 60000, priority, 0));
+    const size_t before = tx.size();
+    for (uint32_t now = 100; now <= 20000; now += 100) {
+        assert(s.dispatch(now, send, nullptr));
+        const auto query = tx.back();
+        unsigned index = 0;
+        while (index < 4 && fields[index] != query.field) ++index;
+        assert(index < 4);
+        assert(now - last[query.id][index] <= 5000); // No background field starves.
+        last[query.id][index] = now;
+        ++seen[query.id][index];
+        if (query.id == 3 && (query.field == 0x36 || query.field == 0x35)) ++active;
+        s.receive(query.id, query.field, now + 1);
+        assert(!s.dispatch(now + 2, send, nullptr)); // Same global TX gap.
+    }
+    for (uint8_t id = 1; id <= 5; ++id)
+        for (unsigned field = 0; field < 4; ++field) {
+            assert(seen[id][field] > 0);
+            assert(20000 - last[id][field] <= 5000);
+        }
+    assert(tx.size() - before == 200);
+    return active;
+}
 int main() {
     S s;
     request(s,1,S::Controller);request(s,1,S::Await);request(s,1,S::Page);
@@ -59,5 +90,9 @@ int main() {
     assert(!wrap.dispatch(30,send,nullptr));assert(wrap.dispatch(50,send,nullptr));
     S expired;assert(expired.demand(1,0x36,S::Page,100,200,1,0));
     assert(!expired.dispatch(200,send,nullptr));
+    const auto previous = activeAxisQueries(2);
+    const auto focused = activeAxisQueries(8);
+    assert(focused > previous);
+    std::printf("PASS five-axis query preference: active position/velocity %u -> %u, background retained, 10 queries/s\n", previous, focused);
     puts("PASS query scheduler: dedup, global budget, in-flight, timeout/cooldown, fairness, raw traffic, exclusivity, browsers, wrap");
 }
