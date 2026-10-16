@@ -11,6 +11,8 @@ namespace {
 // --- Limits of the sender ---------------------------------------------------
 // Raw frames retain the documented minimum gap; sync has its own state machine.
 constexpr uint32_t kRawSpacingMs = 2;
+// Soft preference only: scheduler aging still services background feedback.
+constexpr uint8_t kMoveAwaitQueryPriority = 8;
 // Default arguments of the readable DSL.
 constexpr double kDefaultMoveRpm = 30.0;
 constexpr long kDefaultMoveAccel = 60;
@@ -1148,8 +1150,8 @@ void CommandQueue::beginStep(uint32_t now) {
             (startSettled_ && int32_t(node.positionMs - evidence.stopAt) > 0 &&
              int32_t(node.positionMs - startSettledAt_) > 0);
         if (!positionFresh || !velocityFresh || velocity < -5 || velocity > 5 || !settledStart) {
-            motor_.queries_.demand(step.id, 0x36, CanQueryScheduler::Await, 150, 1000, 2, now);
-            motor_.queries_.demand(step.id, 0x35, CanQueryScheduler::Await, 150, 1000, 2, now);
+            motor_.queries_.demand(step.id, 0x36, CanQueryScheduler::Await, 150, 1000, kMoveAwaitQueryPriority, now);
+            motor_.queries_.demand(step.id, 0x35, CanQueryScheduler::Await, 150, 1000, kMoveAwaitQueryPriority, now);
             setMessage(positionFresh && velocityFresh ? "waiting_move_stationary" :
                        "waiting_move_start_feedback");
             return;
@@ -1352,7 +1354,8 @@ void CommandQueue::observeMotion(uint32_t now) {
         setMessage("waiting_move_target");
     }
     const auto demand=[this,step,now](uint8_t field,uint32_t period) {
-        motor_.queries_.demand(step->id,field,CanQueryScheduler::Await,period,1000,2,now);
+        const uint8_t priority = step->action == QueueAction::Move ? kMoveAwaitQueryPriority : 2;
+        motor_.queries_.demand(step->id,field,CanQueryScheduler::Await,period,1000,priority,now);
     };
     demand(0x36,200); demand(0x35,200);
     if (home && !homeComplete_) demand(0x3B,300);
