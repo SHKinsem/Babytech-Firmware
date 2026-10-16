@@ -2,7 +2,7 @@
 
 描述对象：Motion 独立调试网页的签名 OTA 与本地打包工具。Milestone：V1，`V1-device`，成对 Brain/Motion UART v4。仅在明确维护升级时采用，不是每次启动或云端更新的前置流程。
 
-屏幕基线迁入 Brain 后，`main-controller` 不包含旧 Brain OTA 服务和 `ota_identity.h`。当前可用目标只有 Motion；打包器保留 Brain 参数别名不代表 Brain OTA 已实现。旧双板候选方案见 [历史计划](wifi-ota-plan.md)，不能按其步骤升级当前 Brain。
+屏幕基线迁入 Brain 后，`main-controller` 不包含旧 Brain OTA 服务和 `ota_identity.h`。当前可用目标只有 Motion；打包器保留 Brain 参数别名不代表 Brain OTA 已实现。旧双板候选方案已从现行文档删除，可从 Git 历史查询，不能按其步骤升级当前 Brain。
 
 ## 当前状态
 
