@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     assert(program.steps[4].distanceTenths + program.steps[5].distanceTenths == -126000);
     assert(program.steps[10].id == 3 && program.steps[10].speedTenths == 2400 &&
            program.steps[10].awaitCompletion);
-    assertLift(program.steps[9], 36000, 600, 600); // +20 mm clearance before translation.
+    assertLift(program.steps[9], 36000, 1200, 600); // +20 mm clearance: doubled speed, unchanged ramp.
     assertLift(program.steps[11], -95400, 3000, 4800);
     const int32_t openLift = program.steps[4].distanceTenths + program.steps[5].distanceTenths +
         program.steps[7].distanceTenths + program.steps[9].distanceTenths + program.steps[11].distanceTenths;

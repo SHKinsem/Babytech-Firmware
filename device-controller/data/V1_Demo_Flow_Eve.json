@@ -67,7 +67,7 @@
         "move 2 1000 deg 200 60 60 500 await",
         "move 1 2 mm 300 300 300 200 await",
         "move 2 1400 deg 200 60 60 500 await",
-        "move 1 20 mm 600 600 600 200 await",
+        "move 1 20 mm 1200 600 600 200 await",
         "move 3 -76.7 mm 240 240 240 650 await",
         "move 1 -53 mm 3000 4800 4800 200 await"
       ]
